@@ -27,6 +27,8 @@ internal sealed record FolderSettings
     public string SortColumn    { get; init; } = "Name";
     public bool   SortAscending { get; init; } = true;
     public ShellViewMode ViewMode { get; init; } = ShellViewMode.Details;
+    /// <summary>Column key to group by, or empty string for no grouping.</summary>
+    public string GroupColumn   { get; init; } = string.Empty;
 }
 
 internal sealed record ColumnRecord(
@@ -93,6 +95,7 @@ internal sealed class FolderSettingsDb : IDisposable
         Exec(_writeConnection, "PRAGMA synchronous=NORMAL;");
 
         EnsureSchema();
+        MigrateSchema();
     }
 
     private static void Exec(SqliteConnection conn, string sql)
@@ -115,6 +118,14 @@ internal sealed class FolderSettingsDb : IDisposable
             );
             """;
         cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Adds columns introduced after the initial schema without data loss.</summary>
+    private void MigrateSchema()
+    {
+        // SQLite does not support ADD COLUMN IF NOT EXISTS before 3.37, so guard with try/catch.
+        try { Exec(_writeConnection, "ALTER TABLE FolderSettings ADD COLUMN GroupColumn TEXT NOT NULL DEFAULT '';"); }
+        catch { /* column already exists — harmless */ }
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -160,7 +171,7 @@ internal sealed class FolderSettingsDb : IDisposable
         {
             using var cmd = _readConnection.CreateCommand();
             cmd.CommandText = """
-                SELECT Columns, SortColumn, SortAscending, ViewMode
+                SELECT Columns, SortColumn, SortAscending, ViewMode, GroupColumn
                 FROM FolderSettings WHERE Path = @path;
                 """;
             cmd.Parameters.AddWithValue("@path", key);
@@ -173,6 +184,7 @@ internal sealed class FolderSettingsDb : IDisposable
             var sortColumn    = reader.GetString(1);
             var sortAscending = reader.GetInt32(2) != 0;
             var viewMode      = (ShellViewMode)reader.GetInt32(3);
+            var groupColumn   = reader.IsDBNull(4) ? string.Empty : reader.GetString(4);
 
             List<ColumnRecord>? columns = null;
             if (!string.IsNullOrWhiteSpace(columnsJson))
@@ -187,6 +199,7 @@ internal sealed class FolderSettingsDb : IDisposable
                 SortColumn    = sortColumn,
                 SortAscending = sortAscending,
                 ViewMode      = viewMode,
+                GroupColumn   = groupColumn,
             };
         }
     }
@@ -197,19 +210,21 @@ internal sealed class FolderSettingsDb : IDisposable
         {
             using var cmd = _writeConnection.CreateCommand();
             cmd.CommandText = """
-                INSERT INTO FolderSettings (Path, Columns, SortColumn, SortAscending, ViewMode)
-                VALUES (@path, @columns, @sortCol, @sortAsc, @viewMode)
+                INSERT INTO FolderSettings (Path, Columns, SortColumn, SortAscending, ViewMode, GroupColumn)
+                VALUES (@path, @columns, @sortCol, @sortAsc, @viewMode, @groupCol)
                 ON CONFLICT(Path) DO UPDATE SET
                     Columns       = excluded.Columns,
                     SortColumn    = excluded.SortColumn,
                     SortAscending = excluded.SortAscending,
-                    ViewMode      = excluded.ViewMode;
+                    ViewMode      = excluded.ViewMode,
+                    GroupColumn   = excluded.GroupColumn;
                 """;
             cmd.Parameters.AddWithValue("@path",     key);
             cmd.Parameters.AddWithValue("@columns",  columnsJson);
             cmd.Parameters.AddWithValue("@sortCol",  s.SortColumn);
             cmd.Parameters.AddWithValue("@sortAsc",  s.SortAscending ? 1 : 0);
             cmd.Parameters.AddWithValue("@viewMode", (int)s.ViewMode);
+            cmd.Parameters.AddWithValue("@groupCol", s.GroupColumn);
             cmd.ExecuteNonQuery();
         }
     }

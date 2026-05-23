@@ -4,6 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:shellapi="using:BetterExplorer.ShellApi"
+    xmlns:local="using:BetterExplorer.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
@@ -470,7 +471,51 @@
                       DragOver="OnShellViewDragOver"
                       DragLeave="OnShellViewDragLeave"
                       Drop="OnShellViewDrop"
-                      Padding="8" />
+                      Padding="8">
+        <ListView.GroupStyle>
+          <GroupStyle HidesIfEmpty="False">
+            <GroupStyle.HeaderTemplate>
+              <DataTemplate x:DataType="local:ShellItemGroup">
+                <Button Background="Transparent"
+                        BorderThickness="0"
+                        Padding="0"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch"
+                        Click="GroupHeader_Click">
+                  <Grid ColumnDefinitions="Auto,*,Auto"
+                        Padding="4,6,4,4"
+                        Margin="0,4,0,0">
+                    <Grid.BorderBrush>
+                      <SolidColorBrush Color="Transparent" />
+                    </Grid.BorderBrush>
+                    <!-- chevron -->
+                    <FontIcon Grid.Column="0"
+                              Glyph="{Binding ChevronGlyph}"
+                              FontSize="11"
+                              Margin="0,0,6,0"
+                              VerticalAlignment="Center"
+                              Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                    <!-- group name -->
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding Key}"
+                               FontWeight="SemiBold"
+                               FontSize="12"
+                               VerticalAlignment="Center"
+                               Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                    <!-- collapsed count hint -->
+                    <TextBlock Grid.Column="2"
+                               Text="{Binding CountText}"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               Margin="6,0,0,0"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                  </Grid>
+                </Button>
+              </DataTemplate>
+            </GroupStyle.HeaderTemplate>
+          </GroupStyle>
+        </ListView.GroupStyle>
+      </ListView>
 
       <Canvas x:Name="SelectionCanvas" IsHitTestVisible="False">
         <Rectangle x:Name="SelectionRect"

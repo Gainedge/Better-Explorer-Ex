@@ -479,40 +479,24 @@
               ToolTipService.ToolTip="Sort">
         <FontIcon Glyph="&#xE8CB;" FontSize="14" />
         <Button.Flyout>
-          <Flyout x:Name="SortFlyout" Placement="Bottom">
-            <Flyout.FlyoutPresenterStyle>
-              <Style TargetType="FlyoutPresenter">
-                <Setter Property="Padding"      Value="8" />
-                <Setter Property="MinWidth"     Value="200" />
-                <Setter Property="MaxWidth"     Value="200" />
-                <Setter Property="CornerRadius" Value="8" />
-              </Style>
-            </Flyout.FlyoutPresenterStyle>
-            <StackPanel Spacing="2" MinWidth="160">
-              <TextBlock Text="Sort by" FontWeight="SemiBold" Margin="4,2,4,6" />
-              <RadioButton x:Name="SortMenuName"     Tag="Name" Content="Name"
-                           Style="{StaticResource SortMenuRadioButtonStyle}"
-                           GroupName="SortColumn" Click="SortColumnMenuItem_Click" />
-              <RadioButton x:Name="SortMenuDate"     Tag="Date" Content="Date modified"
-                           Style="{StaticResource SortMenuRadioButtonStyle}"
-                           GroupName="SortColumn" Click="SortColumnMenuItem_Click" />
-              <RadioButton x:Name="SortMenuType"     Tag="Type" Content="Type"
-                           Style="{StaticResource SortMenuRadioButtonStyle}"
-                           GroupName="SortColumn" Click="SortColumnMenuItem_Click" />
-              <RadioButton x:Name="SortMenuSize"     Tag="Size" Content="Size"
-                           Style="{StaticResource SortMenuRadioButtonStyle}"
-                           GroupName="SortColumn" Click="SortColumnMenuItem_Click" />
-              <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}"
-                      Margin="0,6" />
-              <TextBlock Text="Order" FontWeight="SemiBold" Margin="4,0,4,6" />
-              <RadioButton x:Name="SortMenuAscending"  Tag="Ascending"  Content="Ascending ▲"
-                           Style="{StaticResource SortMenuRadioButtonStyle}"
-                           GroupName="SortDirection" Click="SortDirectionMenuItem_Click" />
-              <RadioButton x:Name="SortMenuDescending" Tag="Descending" Content="Descending ▼"
-                           Style="{StaticResource SortMenuRadioButtonStyle}"
-                           GroupName="SortDirection" Click="SortDirectionMenuItem_Click" />
-            </StackPanel>
-          </Flyout>
+          <MenuFlyout x:Name="SortFlyout" Placement="Bottom">
+            <MenuFlyoutSubItem Text="Sort by">
+              <RadioMenuFlyoutItem x:Name="SortMenuName" Text="Name"          GroupName="SortColumn"    Tag="Name" Click="SortColumnMenuItem_Click" />
+              <RadioMenuFlyoutItem x:Name="SortMenuDate" Text="Date modified"  GroupName="SortColumn"    Tag="Date" Click="SortColumnMenuItem_Click" />
+              <RadioMenuFlyoutItem x:Name="SortMenuType" Text="Type"           GroupName="SortColumn"    Tag="Type" Click="SortColumnMenuItem_Click" />
+              <RadioMenuFlyoutItem x:Name="SortMenuSize" Text="Size"           GroupName="SortColumn"    Tag="Size" Click="SortColumnMenuItem_Click" />
+            </MenuFlyoutSubItem>
+            <MenuFlyoutSubItem Text="Group by">
+              <RadioMenuFlyoutItem x:Name="GroupMenuNone" Text="None"          GroupName="GroupColumn"   Tag=""     Click="GroupColumnMenuItem_Click" />
+              <RadioMenuFlyoutItem x:Name="GroupMenuName" Text="Name"          GroupName="GroupColumn"   Tag="Name" Click="GroupColumnMenuItem_Click" />
+              <RadioMenuFlyoutItem x:Name="GroupMenuDate" Text="Date modified"  GroupName="GroupColumn"   Tag="Date" Click="GroupColumnMenuItem_Click" />
+              <RadioMenuFlyoutItem x:Name="GroupMenuType" Text="Type"           GroupName="GroupColumn"   Tag="Type" Click="GroupColumnMenuItem_Click" />
+              <RadioMenuFlyoutItem x:Name="GroupMenuSize" Text="Size"           GroupName="GroupColumn"   Tag="Size" Click="GroupColumnMenuItem_Click" />
+            </MenuFlyoutSubItem>
+            <MenuFlyoutSeparator />
+            <RadioMenuFlyoutItem x:Name="SortMenuAscending"  Text="Ascending ▲"  GroupName="SortDirection" Tag="Ascending"  Click="SortDirectionMenuItem_Click" />
+            <RadioMenuFlyoutItem x:Name="SortMenuDescending" Text="Descending ▼" GroupName="SortDirection" Tag="Descending" Click="SortDirectionMenuItem_Click" />
+          </MenuFlyout>
         </Button.Flyout>
       </Button>
 

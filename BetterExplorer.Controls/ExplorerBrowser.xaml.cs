@@ -49,8 +49,10 @@ public sealed partial class ExplorerBrowser : UserControl
         InitializeComponent();
         FileList.PathChanged  += OnPathChanged;
         FileList.SortChanged  += OnSortChanged;
+        FileList.GroupChanged += OnGroupChanged;
         UpdateViewModeCheckmarks(FileList.ViewMode);
         UpdateSortCheckmarks(FileList.SortColumn, FileList.SortAscending);
+        UpdateGroupCheckmarks(FileList.GroupColumn);
     }
 
     // ── Public navigation API ─────────────────────────────────────────────────
@@ -75,6 +77,7 @@ public sealed partial class ExplorerBrowser : UserControl
         NavTreeView.SyncToPath(path);
         UpdateViewModeCheckmarks(FileList.ViewMode);
         UpdateSortCheckmarks(FileList.SortColumn, FileList.SortAscending);
+        UpdateGroupCheckmarks(FileList.GroupColumn);
         PathChanged?.Invoke(this, path);
     }
 
@@ -177,20 +180,35 @@ public sealed partial class ExplorerBrowser : UserControl
 
     private void SortColumnMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is RadioButton { Tag: string col })
-        {
+        if (sender is RadioMenuFlyoutItem item && item.Tag is string col)
             FileList.ApplySort(col, FileList.SortAscending);
-            SortFlyout.Hide();
-        }
     }
 
     private void SortDirectionMenuItem_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is RadioButton { Tag: string tag })
-        {
+        if (sender is RadioMenuFlyoutItem item && item.Tag is string tag)
             FileList.ApplySort(FileList.SortColumn, tag == "Ascending");
-            SortFlyout.Hide();
+    }
+
+    private void OnGroupChanged(object? sender, EventArgs e) =>
+        UpdateGroupCheckmarks(FileList.GroupColumn);
+
+    private void GroupColumnMenuItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is RadioMenuFlyoutItem item)
+        {
+            var tag = item.Tag as string;
+            FileList.ApplyGroupBy(string.IsNullOrEmpty(tag) ? null : tag);
         }
+    }
+
+    private void UpdateGroupCheckmarks(string groupColumn)
+    {
+        GroupMenuNone.IsChecked = string.IsNullOrEmpty(groupColumn);
+        GroupMenuName.IsChecked = groupColumn == "Name";
+        GroupMenuDate.IsChecked = groupColumn == "Date";
+        GroupMenuType.IsChecked = groupColumn == "Type";
+        GroupMenuSize.IsChecked = groupColumn == "Size";
     }
 
     // ── Tree / file-list splitter ─────────────────────────────────────────────

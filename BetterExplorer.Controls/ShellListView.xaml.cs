@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -77,8 +79,13 @@ public sealed partial class ShellListView : UserControl {
   /// <summary>Raised whenever sort column or direction changes (column-header tap or toolbar).</summary>
   public event EventHandler? SortChanged;
 
+  /// <summary>Raised whenever the group-by column changes.</summary>
+  public event EventHandler? GroupChanged;
+
   public string SortColumn    => _sortColumn;
   public bool   SortAscending => _sortAscending;
+  /// <summary>Current group-by column key, or empty string when grouping is off.</summary>
+  public string GroupColumn   => _groupColumn;
 
   // ── Private state ────────────────────────────────────────────────────────
 
@@ -141,6 +148,7 @@ public sealed partial class ShellListView : UserControl {
 
   private string _sortColumn = "Name";
   private bool _sortAscending = true;
+  private string _groupColumn = string.Empty;  // empty = no grouping
   private ShellViewMode _currentMode = ShellViewMode.Details;
   // True while LoadDirectory/NavigateToKnownFolder is applying loaded settings
   // so that property-change callbacks do not trigger a redundant save.
@@ -317,6 +325,10 @@ public sealed partial class ShellListView : UserControl {
     var virtualPath = $"::{folderId:B}";
     await ApplyFolderSettings(virtualPath);
 
+    // Break any existing grouped CollectionViewSource binding before clearing items.
+    if (ShellView.ItemsSource != Items)
+      ShellView.ItemsSource = Items;
+
     // Don't re-navigate to the folder already shown
     if (string.Equals(virtualPath, CurrentPath, StringComparison.OrdinalIgnoreCase))
       return;
@@ -369,6 +381,7 @@ public sealed partial class ShellListView : UserControl {
     }
 
     // Update CurrentPath and fire PathChanged regardless of whether items were found.
+    ApplyGrouping();
     CurrentPath = virtualPath;
     PathChanged?.Invoke(this, CurrentPath);
     CanGoBack = _backStack.Count > 0;
@@ -380,6 +393,11 @@ public sealed partial class ShellListView : UserControl {
 
   private async void LoadDirectory(string path) {
     await ApplyFolderSettings(path);
+
+    // Break any existing grouped CollectionViewSource binding so the old grouped
+    // layout is never rendered against the incoming folder's items.
+    if (ShellView.ItemsSource != Items)
+      ShellView.ItemsSource = Items;
 
     // Reset selection on outgoing items
     // never reference a ShellItem with IsSelected=true during the next layout pass.
@@ -433,6 +451,7 @@ public sealed partial class ShellListView : UserControl {
       }
 
       Items.AddRange(kfItems);
+      ApplyGrouping();
       CurrentPath = path;
       CanGoBack = _backStack.Count > 0;
       CanGoForward = _forwardStack.Count > 0;
@@ -488,6 +507,7 @@ public sealed partial class ShellListView : UserControl {
 
     // ── Show ALL items at once ────────────────────────────────────────────────
     Items.AddRange(allItems);
+    ApplyGrouping();
     CurrentPath = path;
     CanGoBack = _backStack.Count > 0;
     CanGoForward = _forwardStack.Count > 0;
@@ -1932,6 +1952,33 @@ public sealed partial class ShellListView : UserControl {
   private void ApplySortToCollection() {
     var sorted = SortItems(Items.ToList());
     Items.Reset(sorted);
+    ApplyGrouping();
+  }
+
+  /// <summary>
+  /// Rebuilds the ListView's ItemsSource to reflect the current <see cref="_groupColumn"/>.
+  /// When grouping is active a <see cref="CollectionViewSource"/> wrapping <see cref="ShellItemGroup"/>
+  /// objects is used; otherwise the list binds directly to the flat <see cref="Items"/> collection.
+  /// </summary>
+  private void ApplyGrouping() {
+    if (string.IsNullOrEmpty(_groupColumn)) {
+      // Restore flat binding if we were previously grouped.
+      if (ShellView.ItemsSource != Items)
+        ShellView.ItemsSource = Items;
+      return;
+    }
+
+    var groups = Items
+        .GroupBy(GetGroupLabel)
+        .OrderBy(g => GetGroupSortOrder(g.Key))
+        .Select(g => new ShellItemGroup(g.Key, g))
+        .ToList();
+
+    var cvs = new Microsoft.UI.Xaml.Data.CollectionViewSource {
+      IsSourceGrouped = true,
+      Source          = groups,
+    };
+    ShellView.ItemsSource = cvs.View;
   }
 
   /// <summary>
@@ -1945,6 +1992,17 @@ public sealed partial class ShellListView : UserControl {
     UpdateSortIndicators();
     SaveCurrentFolderSettings();
     SortChanged?.Invoke(this, EventArgs.Empty);
+  }
+
+  /// <summary>
+  /// Sets the group-by column key (or null / empty string to remove grouping),
+  /// rebuilds the grouped view, persists the change, and fires <see cref="GroupChanged"/>.
+  /// </summary>
+  public void ApplyGroupBy(string? column) {
+    _groupColumn = string.IsNullOrEmpty(column) ? string.Empty : column;
+    ApplySortToCollection();   // re-sort then re-group
+    SaveCurrentFolderSettings();
+    GroupChanged?.Invoke(this, EventArgs.Empty);
   }
 
   internal List<ShellItem> SortItems(List<ShellItem> list) {
@@ -2011,6 +2069,8 @@ public sealed partial class ShellListView : UserControl {
 
       // Apply view mode (will fire OnViewModeChanged → ApplyViewMode).
       ViewMode = settings.ViewMode;
+      // Apply group column (empty = no grouping).
+      _groupColumn = settings.GroupColumn ?? string.Empty;
     } finally {
       _applyingFolderSettings = false;
     }
@@ -2036,6 +2096,7 @@ public sealed partial class ShellListView : UserControl {
       SortColumn    = _sortColumn,
       SortAscending = _sortAscending,
       ViewMode      = ViewMode,
+      GroupColumn   = _groupColumn,
     };
 
     FolderSettingsDb.Instance.Save(CurrentPath, settings);
@@ -2282,6 +2343,12 @@ public sealed partial class ShellListView : UserControl {
   }
 
   private void OnShellViewDragLeave(object sender, DragEventArgs e) => ClearDragTarget();
+
+  private void GroupHeader_Click(object sender, RoutedEventArgs e)
+  {
+    if (sender is Button { DataContext: ShellItemGroup group })
+      group.Toggle();
+  }
 
   private async void OnShellViewDrop(object sender, DragEventArgs e) {
     if (!e.DataView.Contains(StandardDataFormats.StorageItems))
@@ -2554,13 +2621,152 @@ public sealed partial class ShellListView : UserControl {
     for (int i = 0; i < Items.Count; i++) {
       var existing = Items[i];
       // Folders always sort before files.
-      if (item.IsFolder && !existing.IsFolder) { Items.Insert(i, item); return; }
+      if (item.IsFolder && !existing.IsFolder) { Items.Insert(i, item); ApplyGrouping(); return; }
       if (!item.IsFolder && existing.IsFolder)
         continue;
       // Same tier: compare by sort key.
       int cmp = Comparer<object?>.Default.Compare(key(item), key(existing));
-      if (_sortAscending ? cmp <= 0 : cmp >= 0) { Items.Insert(i, item); return; }
+      if (_sortAscending ? cmp <= 0 : cmp >= 0) { Items.Insert(i, item); ApplyGrouping(); return; }
     }
     Items.Add(item);
+    ApplyGrouping();
+  }
+
+  // ── Grouping helpers ─────────────────────────────────────────────────────
+
+  private string GetGroupLabel(ShellItem item) =>
+    _groupColumn switch {
+      "Name" => GetNameGroupLabel(item.Name),
+      "Date" => GetDateGroupLabel(item.DateModified),
+      "Type" => string.IsNullOrWhiteSpace(item.ItemType) ? "Other" : item.ItemType,
+      "Size" => GetSizeGroupLabel(item.SizeBytes, item.IsFolder),
+      _      => GetNameGroupLabel(item.Name),
+    };
+
+  private static string GetNameGroupLabel(string name) {
+    if (string.IsNullOrEmpty(name)) return "#";
+    var c = char.ToUpperInvariant(name[0]);
+    if (!char.IsLetter(c)) return "#";
+    return c switch {
+      >= 'A' and <= 'F' => "A \u2013 F",
+      >= 'G' and <= 'L' => "G \u2013 L",
+      >= 'M' and <= 'R' => "M \u2013 R",
+      _                  => "S \u2013 Z",
+    };
+  }
+
+  private static string GetDateGroupLabel(DateTime date) {
+    if (date == default) return "Unspecified";
+    var today = DateTime.Today;
+    var diff  = (today - date.Date).Days;
+    if (diff == 0)             return "Today";
+    if (diff == 1)             return "Yesterday";
+    if (diff <= today.DayOfWeek - DayOfWeek.Monday + 1)
+                               return "Earlier this week";
+    if (diff <= 14)            return "Last week";
+    if (date.Month == today.Month && date.Year == today.Year)
+                               return "Earlier this month";
+    if (diff <= 60)            return "Last month";
+    if (date.Year == today.Year)
+                               return "Earlier this year";
+    if (date.Year == today.Year - 1)
+                               return "Last year";
+    return "A long time ago";
+  }
+
+  private static readonly string[] _dateGroupOrder = [
+    "Today", "Yesterday", "Earlier this week", "Last week",
+    "Earlier this month", "Last month", "Earlier this year", "Last year",
+    "A long time ago", "Unspecified"
+  ];
+
+  private static readonly string[] _sizeGroupOrder = [
+    "Unspecified", "Tiny", "Small", "Medium", "Large", "Huge", "Gigantic"
+  ];
+
+  private static string GetSizeGroupLabel(long bytes, bool isFolder) {
+    if (isFolder) return "Unspecified";
+    return bytes switch {
+      < 16_384L                => "Tiny",       // < 16 KB
+      < 1_048_576L             => "Small",      // < 1 MB
+      < 134_217_728L           => "Medium",     // < 128 MB
+      < 1_073_741_824L         => "Large",      // < 1 GB
+      < 4_294_967_296L         => "Huge",       // < 4 GB
+      _                        => "Gigantic",
+    };
+  }
+
+  private static readonly string[] _nameGroupOrder = [
+    "#", "A \u2013 F", "G \u2013 L", "M \u2013 R", "S \u2013 Z",
+  ];
+
+  private int GetGroupSortOrder(string groupLabel) {
+    var order = _groupColumn switch {
+      "Date" => _dateGroupOrder,
+      "Size" => _sizeGroupOrder,
+      "Name" => _nameGroupOrder,
+      _      => _nameGroupOrder,
+    };
+    var idx = Array.IndexOf(order, groupLabel);
+    return idx < 0 ? int.MaxValue : idx;
+  }
+
+  private string GetColumnDisplayName(string key) =>
+    key switch {
+      "Name" => "Name",
+      "Date" => "Date modified",
+      "Type" => "Type",
+      "Size" => "Size",
+      _      => key,
+    };
+}
+
+// ── ShellItemGroup ────────────────────────────────────────────────────────────
+
+/// <summary>
+/// A named, collapsible group of <see cref="ShellItem"/> objects for use with
+/// <see cref="Microsoft.UI.Xaml.Data.CollectionViewSource"/>.
+/// </summary>
+public sealed class ShellItemGroup : ObservableCollection<ShellItem>, INotifyPropertyChanged
+{
+  private readonly List<ShellItem> _allItems;
+  private bool _isExpanded = true;
+
+  public string Key { get; }
+
+  public bool IsExpanded {
+    get => _isExpanded;
+    set {
+      if (_isExpanded == value) return;
+      _isExpanded = value;
+      OnPropertyChanged(new PropertyChangedEventArgs(nameof(IsExpanded)));
+      OnPropertyChanged(new PropertyChangedEventArgs(nameof(ChevronGlyph)));
+      OnPropertyChanged(new PropertyChangedEventArgs(nameof(CountText)));
+      SyncItems();
+    }
+  }
+
+  // Segoe Fluent / MDL2 chevrons
+  public string ChevronGlyph => _isExpanded ? "\uE70D" : "\uE76C";
+
+  public string CountText => _isExpanded ? string.Empty : $"({_allItems.Count})";
+
+  public ShellItemGroup(string key, IEnumerable<ShellItem> items) : base()
+  {
+    Key       = key;
+    _allItems = [.. items];
+    foreach (var item in _allItems) Add(item);
+  }
+
+  public void Toggle() => IsExpanded = !_isExpanded;
+
+  private void SyncItems()
+  {
+    if (_isExpanded) {
+      foreach (var item in _allItems)
+        if (!Contains(item)) Add(item);
+    } else {
+      ClearItems();
+    }
   }
 }
