@@ -17,6 +17,85 @@
     <shellapi:DetailsColumnSettings x:Key="DetailsColumns" />
 
     <!-- ═══════════════════════════════════════════════
+             Rename TextBox — no delete/clear button
+        ════════════════════════════════════════════════ -->
+    <Style x:Key="RenameTextBoxStyle" TargetType="TextBox">
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Foreground" Value="{ThemeResource TextControlForeground}" />
+      <Setter Property="Background" Value="{ThemeResource TextControlBackground}" />
+      <Setter Property="BorderBrush" Value="{ThemeResource TextControlBorderBrush}" />
+      <Setter Property="BorderThickness" Value="{ThemeResource TextControlBorderThemeThickness}" />
+      <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" />
+      <Setter Property="Padding" Value="4,2,4,2" />
+      <Setter Property="ScrollViewer.HorizontalScrollMode" Value="Auto" />
+      <Setter Property="ScrollViewer.VerticalScrollMode" Value="Auto" />
+      <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Hidden" />
+      <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Hidden" />
+      <Setter Property="SelectionHighlightColor" Value="{ThemeResource TextControlSelectionHighlightColor}" />
+      <Setter Property="AcceptsReturn" Value="False" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Grid>
+              <VisualStateManager.VisualStateGroups>
+                <VisualStateGroup x:Name="CommonStates">
+                  <VisualState x:Name="Normal" />
+                  <VisualState x:Name="Disabled">
+                    <VisualState.Setters>
+                      <Setter Target="BorderElement.Opacity" Value="0.38" />
+                      <Setter Target="ContentElement.Opacity" Value="0.38" />
+                    </VisualState.Setters>
+                  </VisualState>
+                  <VisualState x:Name="PointerOver">
+                    <VisualState.Setters>
+                      <Setter Target="BorderElement.BorderBrush"
+                              Value="{ThemeResource TextControlBorderBrushPointerOver}" />
+                      <Setter Target="BorderElement.Background"
+                              Value="{ThemeResource TextControlBackgroundPointerOver}" />
+                    </VisualState.Setters>
+                  </VisualState>
+                  <VisualState x:Name="Focused">
+                    <VisualState.Setters>
+                      <Setter Target="BorderElement.BorderBrush"
+                              Value="{ThemeResource TextControlBorderBrushFocused}" />
+                      <Setter Target="BorderElement.Background"
+                              Value="{ThemeResource TextControlBackgroundFocused}" />
+                      <Setter Target="FocusAccentBorder.Visibility" Value="Visible" />
+                    </VisualState.Setters>
+                  </VisualState>
+                </VisualStateGroup>
+              </VisualStateManager.VisualStateGroups>
+
+              <!-- Background + border chrome -->
+              <Border x:Name="BorderElement"
+                      Background="{TemplateBinding Background}"
+                      BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}"
+                      CornerRadius="{ThemeResource ControlCornerRadius}" />
+
+              <!-- Accent focus underline (matches WinUI convention) -->
+              <Border x:Name="FocusAccentBorder"
+                      BorderThickness="0,0,0,2"
+                      BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                      CornerRadius="{ThemeResource ControlCornerRadius}"
+                      Visibility="Collapsed" />
+
+              <!-- Text editing area — MUST be named ContentElement -->
+              <ScrollViewer x:Name="ContentElement"
+                            Padding="{TemplateBinding Padding}"
+                            HorizontalScrollMode="{TemplateBinding ScrollViewer.HorizontalScrollMode}"
+                            VerticalScrollMode="{TemplateBinding ScrollViewer.VerticalScrollMode}"
+                            HorizontalScrollBarVisibility="{TemplateBinding ScrollViewer.HorizontalScrollBarVisibility}"
+                            VerticalScrollBarVisibility="{TemplateBinding ScrollViewer.VerticalScrollBarVisibility}"
+                            AutomationProperties.AccessibilityView="Raw" />
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- ═══════════════════════════════════════════════
              Extra Large Icons  (256 px)
         ════════════════════════════════════════════════ -->
     <DataTemplate x:Key="ExtraLargeIconsTemplate" x:DataType="shellapi:ShellItem">
@@ -39,7 +118,7 @@
         <Canvas Grid.Row="1" Width="276" Height="57" HorizontalAlignment="Left"
                         Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="276"
-                               Text="{x:Bind Name}"
+                               Text="{x:Bind Name, Mode=OneWay}"
                                TextWrapping="Wrap" TextAlignment="Center"
                                MaxLines="2" TextTrimming="CharacterEllipsis" />
         </Canvas>
@@ -69,7 +148,7 @@
         <Canvas Grid.Row="1" Width="148" Height="57" HorizontalAlignment="Left"
                         Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="148"
-                               Text="{x:Bind Name}"
+                               Text="{x:Bind Name, Mode=OneWay}"
                                TextWrapping="Wrap" TextAlignment="Center"
                                MaxLines="2" TextTrimming="CharacterEllipsis" />
         </Canvas>
@@ -99,7 +178,7 @@
         <Canvas Grid.Row="1" Width="116" Height="57" HorizontalAlignment="Left"
                 Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="116"
-                               Text="{x:Bind Name}"
+                               Text="{x:Bind Name, Mode=OneWay}"
                                TextWrapping="Wrap" TextAlignment="Center"
                                MaxLines="2" TextTrimming="CharacterEllipsis" />
         </Canvas>
@@ -129,7 +208,7 @@
         <Canvas Grid.Row="1" Width="80" Height="57" HorizontalAlignment="Left"
             Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="80"
-                           Text="{x:Bind Name}"
+                           Text="{x:Bind Name, Mode=OneWay}"
                            TextWrapping="Wrap" TextAlignment="Center"
                            MaxLines="2" TextTrimming="CharacterEllipsis" />
         </Canvas>
@@ -168,7 +247,8 @@
             <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="None" />
           </Grid>
         </Viewbox>
-        <TextBlock Text="{x:Bind Name}" VerticalAlignment="Center"
+        <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center"
+                                       Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                        TextTrimming="CharacterEllipsis" MaxLines="1" />
       </StackPanel>
     </DataTemplate>
@@ -197,7 +277,8 @@
               <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
             </Grid>
           </Viewbox>
-          <TextBlock Text="{x:Bind Name}" VerticalAlignment="Center"
+          <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center"
+                               Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" />
         </StackPanel>
         <TextBlock Grid.Column="{Binding DateOrder, Source={StaticResource DetailsColumns}, Mode=OneWay}"
@@ -231,7 +312,8 @@
           </Grid>
         </Viewbox>
         <StackPanel VerticalAlignment="Center" Spacing="2">
-          <TextBlock Text="{x:Bind Name}" FontWeight="SemiBold"
+          <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontWeight="SemiBold"
+                               Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" Width="190" />
           <TextBlock Text="{x:Bind ItemType}" Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -386,7 +468,8 @@
           </Grid>
         </Viewbox>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
-          <TextBlock Text="{x:Bind Name}" FontWeight="SemiBold"
+          <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontWeight="SemiBold"
+                               Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" />
           <TextBlock Text="{x:Bind DateModifiedString}"
                                Style="{StaticResource CaptionTextBlockStyle}"
@@ -471,6 +554,7 @@
                       DragOver="OnShellViewDragOver"
                       DragLeave="OnShellViewDragLeave"
                       Drop="OnShellViewDrop"
+                      KeyDown="OnShellViewKeyDown"
                       Padding="8">
         <ListView.GroupStyle>
           <GroupStyle HidesIfEmpty="False">
@@ -556,6 +640,8 @@
           </Grid>
         </Border>
       </Popup>
+
+      <!-- Inline rename TextBox — created and positioned in code-behind -->
     </Grid>
   </Grid>
 </UserControl>

@@ -146,6 +146,10 @@ public sealed partial class ShellListView : UserControl {
 
   // ── Sort state ────────────────────────────────────────────────────────────
 
+  // ── Rename popup (created in code — Popup children lose x:Name in WinUI 3) ──
+  private readonly Microsoft.UI.Xaml.Controls.Primitives.Popup _renamePopup  = new();
+  private readonly TextBox _renameTextBox = new();
+
   private string _sortColumn = "Name";
   private bool _sortAscending = true;
   private string _groupColumn = string.Empty;  // empty = no grouping
@@ -181,11 +185,21 @@ public sealed partial class ShellListView : UserControl {
     ShellView.ContainerContentChanging += OnContainerContentChanging;
     ShellView.SelectionChanged += OnShellViewSelectionChanged;
     ApplyViewMode(ViewMode);
+
+    // Apply the custom template (no delete button) and wire events.
+    _renameTextBox.Style = (Style)Resources["RenameTextBoxStyle"];
+    _renameTextBox.KeyDown   += RenameTextBox_KeyDown;
+    _renameTextBox.LostFocus += RenameTextBox_LostFocus;
+    _renamePopup.Child = _renameTextBox;
   }
 
   private void ShellListView_Loaded(object sender, RoutedEventArgs e) {
     if (string.IsNullOrEmpty(CurrentPath))
       Navigate(@"C:\");
+
+    // Add the rename popup to the visual tree so it inherits theme resources.
+    if (!DragSelectGrid.Children.Contains(_renamePopup))
+      DragSelectGrid.Children.Add(_renamePopup);
 
     DragSelectGrid.AddHandler(PointerPressedEvent,
         new PointerEventHandler(OnDragSelectPointerPressed), true);
@@ -1320,6 +1334,17 @@ public sealed partial class ShellListView : UserControl {
     return null;
   }
 
+  private static IEnumerable<T> FindDescendants<T>(DependencyObject parent) where T : DependencyObject {
+    int count = VisualTreeHelper.GetChildrenCount(parent);
+    for (int i = 0; i < count; i++) {
+      var child = VisualTreeHelper.GetChild(parent, i);
+      if (child is T match)
+        yield return match;
+      foreach (var nested in FindDescendants<T>(child))
+        yield return nested;
+    }
+  }
+
   private static bool IsCtrlDown() =>
       (Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(
           Windows.System.VirtualKey.Control) &
@@ -1347,6 +1372,10 @@ public sealed partial class ShellListView : UserControl {
   }
 
   private void OnDragSelectPointerPressed(object sender, PointerRoutedEventArgs e) {
+    // If a rename is in progress, a click anywhere outside the textbox should commit it.
+    if (_renameActive)
+      CommitRename();
+
     var pt = e.GetCurrentPoint(DragSelectGrid);
     if (!pt.Properties.IsLeftButtonPressed)
       return;
@@ -2350,6 +2379,242 @@ public sealed partial class ShellListView : UserControl {
       group.Toggle();
   }
 
+  // ── Inline rename ─────────────────────────────────────────────────────────
+
+  private ShellItem? _renamingItem;
+  private bool _renameActive;  // true while rename popup is open; guards against LostFocus re-entrance
+
+
+  /// <summary>
+  /// Starts an inline rename for the single selected item (if any).
+  /// Called by F2 key handler and can also be called from a context menu.
+  /// </summary>
+  public void BeginRename() {
+    var item = ShellView.SelectedItems.OfType<ShellItem>().FirstOrDefault();
+    if (item is null) return;
+
+    var container = ShellView.ContainerFromItem(item) as ListViewItem;
+    if (container is null) return;
+
+    // Locate the name TextBlock before we hide anything.
+    // Fall back to the first TextBlock in case the container was just recycled
+    // and its text hasn't propagated yet.
+    var nameBlock = FindDescendants<TextBlock>(container)
+                      .FirstOrDefault(tb => tb.Text == item.Name)
+                    ?? FindDescendants<TextBlock>(container).FirstOrDefault();
+    if (nameBlock is null) return;
+
+    _renamingItem = item;
+    _renameActive = true;
+
+    // ── Capture geometry BEFORE hiding the label ──────────────────────────────
+    // Setting IsLabelHidden collapses the Canvas/TextBlock which invalidates
+    // TransformToVisual, so measure everything while it is still visible.
+    nameBlock.UpdateLayout();
+    var nbTransform = nameBlock.TransformToVisual(DragSelectGrid);
+    var nbPos = nbTransform.TransformPoint(new Windows.Foundation.Point(0, 0));
+
+    var ctTransform = container.TransformToVisual(DragSelectGrid);
+    var ctPos = ctTransform.TransformPoint(new Windows.Foundation.Point(0, 0));
+
+    double tbLeft, tbTop, tbWidth, tbHeight;
+
+    if (IsIconLabelExpandMode(_currentMode)) {
+      // ── Icon modes (ExtraLarge / Large / Medium / Small) ────────────────────
+      // Template: icon row + label Canvas (Width=itemWidth, Height=57, Canvas.Top=4 on TextBlock).
+      double canvasW = _currentMode switch {
+        ShellViewMode.ExtraLargeIcons => 276.0,
+        ShellViewMode.LargeIcons      => 148.0,
+        ShellViewMode.MediumIcons     => 116.0,
+        _                             =>  80.0,
+      };
+
+      if (NameExpansionPopup.IsOpen && _expandedItem == item) {
+        // Expansion popup is open — overlay the TextBox exactly over the card
+        // so the selection border is preserved as a natural frame.
+        tbLeft   = NameExpansionPopup.HorizontalOffset;
+        tbTop    = NameExpansionPopup.VerticalOffset;
+        tbWidth  = NameExpansionCard.Width;
+        tbHeight = Math.Max(NameExpansionCard.DesiredSize.Height, NameExpansionInBoundsHeight);
+      } else {
+        // No expansion popup — position over the label Canvas row.
+        tbLeft   = nbPos.X;
+        tbTop    = nbPos.Y - 4;   // Canvas.Top=4 shifts TextBlock down inside canvas
+        tbWidth  = canvasW;
+        tbHeight = 57.0;
+      }
+    } else {
+      // ── Details / List / Tiles / Content ───────────────────────────────────
+      tbWidth  = ComputeRenameTextBoxWidth(nameBlock);
+      tbHeight = ComputeRenameTextBoxHeight(container);
+      // Align left edge to name TextBlock; vertically center within the row.
+      tbLeft = nbPos.X - 4;
+      tbTop  = ctPos.Y + Math.Max(0, (container.ActualHeight - tbHeight) / 2);
+    }
+
+    // Hide the original label now that we have all measurements.
+    item.IsLabelHidden = true;
+    // Also hide the expansion popup label so there is no overlapping text.
+    NameExpansionText.Opacity = 0;
+
+    // Match font to the actual label so the text renders identically.
+    _renameTextBox.FontSize   = nameBlock.FontSize;
+    _renameTextBox.FontWeight = nameBlock.FontWeight;
+
+    // Match the text alignment and wrapping of the item template.
+    bool isIconMode = IsIconLabelExpandMode(_currentMode);
+    _renameTextBox.TextAlignment = isIconMode ? TextAlignment.Center : TextAlignment.Left;
+    _renameTextBox.TextWrapping  = isIconMode ? TextWrapping.Wrap    : TextWrapping.NoWrap;
+
+    _renameTextBox.Width  = tbWidth;
+    _renameTextBox.Height = tbHeight;
+    _renameTextBox.Text   = item.Name;
+
+    _renamePopup.HorizontalOffset = tbLeft;
+    _renamePopup.VerticalOffset   = tbTop;
+    _renamePopup.IsOpen = true;
+
+    _renameTextBox.Focus(FocusState.Programmatic);
+
+    // Select just the stem (everything before the last dot) for files.
+    if (!item.IsFolder) {
+      var dot = item.Name.LastIndexOf('.');
+      if (dot > 0) {
+        _renameTextBox.SelectionStart  = 0;
+        _renameTextBox.SelectionLength = dot;
+      } else {
+        _renameTextBox.SelectAll();
+      }
+    } else {
+      _renameTextBox.SelectAll();
+    }
+  }
+
+  private async void CommitRename() {
+    if (_renamingItem is null) return;
+
+    var item     = _renamingItem;
+    var newName  = _renameTextBox.Text.Trim();
+    _renamingItem = null;  // null immediately so any re-entrant LostFocus call is a no-op
+    _renameActive = false;
+
+    _renamePopup.IsOpen = false;
+    // Restore the expansion label opacity right now — before any await — so the
+    // card never shows as empty while the shell operation is in flight.
+    NameExpansionText.Opacity = 1;
+
+    item.IsLabelHidden = false;
+
+    if (string.IsNullOrEmpty(newName) ||
+        string.Equals(newName, item.Name, StringComparison.OrdinalIgnoreCase)) {
+      UpdateNameExpansion();
+      ShellView.Focus(FocusState.Programmatic);
+      return;
+    }
+
+    // ── Optimistic update ────────────────────────────────────────────────────
+    // Apply the new name to the UI immediately so the label changes without
+    // waiting for IFileOperation to complete on the STA thread.
+    var oldName     = item.Name;
+    var oldFullPath = item.FullPath;
+    var optimisticPath = System.IO.Path.Combine(
+        System.IO.Path.GetDirectoryName(item.FullPath) ?? string.Empty, newName);
+
+    item.Name     = newName;
+    item.FullPath = optimisticPath;
+    UpdateNameExpansion();
+    ShellView.Focus(FocusState.Programmatic);
+
+    // ── Shell operation (background STA thread) ───────────────────────────────
+    try {
+      var hwnd    = GetOwnerHwnd();
+      var newPath = await NativeShell.ShellRenameAsync(oldFullPath, newName, hwnd);
+
+      if (newPath is not null) {
+        // Shell may have adjusted the name (e.g. duplicate resolution).
+        // Update to the authoritative final path/name if they differ.
+        var finalName = System.IO.Path.GetFileName(newPath);
+        if (!string.Equals(item.FullPath, newPath, StringComparison.OrdinalIgnoreCase)) {
+          item.FullPath = newPath;
+          item.Name     = finalName;
+          UpdateNameExpansion();
+        }
+        ApplyGrouping();
+      } else {
+        // Operation failed — roll back to the original name.
+        item.Name     = oldName;
+        item.FullPath = oldFullPath;
+        UpdateNameExpansion();
+      }
+    } catch {
+      // Roll back on exception.
+      item.Name     = oldName;
+      item.FullPath = oldFullPath;
+      UpdateNameExpansion();
+    }
+  }
+
+  private void CancelRename() {
+    var item = _renamingItem;
+    _renamingItem = null;
+    _renameActive = false;
+    _renamePopup.IsOpen = false;
+    if (item is not null) {
+      item.IsLabelHidden = false;
+      NameExpansionText.Opacity = 1;
+      UpdateNameExpansion();
+    }
+    ShellView.Focus(FocusState.Programmatic);
+  }
+
+  /// <summary>
+  /// Width for the rename TextBox in Details / List / Tiles / Content modes.
+  /// Icon modes compute their own width directly in BeginRename.
+  /// </summary>
+  private double ComputeRenameTextBoxWidth(TextBlock nameBlock) {
+    const double MinWidth = 80;
+    return _currentMode switch {
+      // Name column StackPanel width minus icon (16) minus spacing (6).
+      ShellViewMode.Details => Math.Max(DetailsColumns.NameWidth - 22, MinWidth),
+      // For List and Content use the actual measured TextBlock width.
+      // TextTrimming means ActualWidth == the available name-column width, not content width.
+      ShellViewMode.List    => Math.Max(nameBlock.ActualWidth + 8, MinWidth),
+      ShellViewMode.Content => Math.Max(nameBlock.ActualWidth + 8, MinWidth),
+      // Tiles name TextBlock has explicit Width="190".
+      ShellViewMode.Tiles   => 190.0,
+      _                     => Math.Max(nameBlock.ActualWidth + 8, MinWidth),
+    };
+  }
+
+  /// <summary>
+  /// Returns the height for the rename TextBox.
+  /// For list-style modes the textbox fills the row (minus 1 px margin each side).
+  /// For icon modes and Tiles it is kept compact so it stays inside the label canvas.
+  /// </summary>
+  private double ComputeRenameTextBoxHeight(ListViewItem container) {
+    return _currentMode switch {
+      ShellViewMode.Details or ShellViewMode.List or ShellViewMode.Content
+          => Math.Max(container.ActualHeight - 2, 20),
+      _   => 24   // icon modes and Tiles: compact single-line input
+    };
+  }
+
+  private void RenameTextBox_KeyDown(object sender, KeyRoutedEventArgs e) {
+    if (e.Key == Windows.System.VirtualKey.Enter) {
+      CommitRename();
+      e.Handled = true;
+    } else if (e.Key == Windows.System.VirtualKey.Escape) {
+      CancelRename();
+      e.Handled = true;
+    }
+  }
+
+  private void RenameTextBox_LostFocus(object sender, RoutedEventArgs e) {
+    if (_renameActive)
+      CommitRename();
+  }
+
+
   private async void OnShellViewDrop(object sender, DragEventArgs e) {
     if (!e.DataView.Contains(StandardDataFormats.StorageItems))
       return;
@@ -2397,6 +2662,12 @@ public sealed partial class ShellListView : UserControl {
     // Don't intercept shortcuts when the user is typing in a text field.
     if (FocusManager.GetFocusedElement(XamlRoot) is TextBox)
       return;
+
+    if (e.Key == Windows.System.VirtualKey.F2) {
+      BeginRename();
+      e.Handled = true;
+      return;
+    }
 
     var ctrl = Microsoft.UI.Input.InputKeyboardSource
         .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control);

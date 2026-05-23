@@ -393,9 +393,11 @@ public static class NativeShell {
   private static readonly Guid IID_IShellItemOp = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
 
   // IFileOperation flags
-  private const uint FOF_NOCONFIRMMKDIR = 0x0200;
+  private const uint FOF_NOCONFIRMMKDIR   = 0x0200;
   private const uint FOF_RENAMEONCOLLISION = 0x0008;
-  private const uint FOFX_ADDUNDORECORD = 0x20000000;  // add to Explorer undo stack
+  private const uint FOF_SILENT           = 0x0004;  // suppress progress dialog
+  private const uint FOF_NO_UI            = 0x0614;  // FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR
+  private const uint FOFX_ADDUNDORECORD   = 0x20000000;  // add to Explorer undo stack
 
   // ── IShellFolder constants ────────────────────────────────────────────────
 
@@ -1599,5 +1601,93 @@ public static class NativeShell {
     public void ResetTimer() { }
     public void PauseTimer() { }
     public void ResumeTimer() { }
+  }
+
+  // ── Rename sink ───────────────────────────────────────────────────────────
+
+  private sealed class RenameSink : IFileOperationProgressSink {
+    internal string? NewPath { get; private set; }
+
+    private static string? GetPath(IShellItemOp? item) {
+      if (item is null) return null;
+      try { item.GetDisplayName(0x80058000u, out string path); return path; } catch { return null; }
+    }
+
+    public void PostRenameItem(uint dwFlags, IShellItemOp psiItem, string pszNewName,
+        int hrRename, IShellItemOp psiNewlyCreated) {
+      if (hrRename >= 0)
+        NewPath = GetPath(psiNewlyCreated);
+    }
+
+    public void StartOperations() { }
+    public void FinishOperations(int hrResult) { }
+    public void PreRenameItem(uint dwFlags, IShellItemOp psiItem, string pszNewName) { }
+    public void PreMoveItem(uint dwFlags, IShellItemOp psiItem, IShellItemOp psiDestinationFolder, string pszNewName) { }
+    public void PostMoveItem(uint dwFlags, IShellItemOp psiItem, IShellItemOp psiDestinationFolder, string pszNewName, int hrMove, IShellItemOp psiNewlyCreated) { }
+    public void PreCopyItem(uint dwFlags, IShellItemOp psiItem, IShellItemOp psiDestinationFolder, string pszNewName) { }
+    public void PostCopyItem(uint dwFlags, IShellItemOp psiItem, IShellItemOp psiDestinationFolder, string pszNewName, int hrCopy, IShellItemOp psiNewlyCreated) { }
+    public void PreDeleteItem(uint dwFlags, IShellItemOp psiItem) { }
+    public void PostDeleteItem(uint dwFlags, IShellItemOp psiItem, int hrDelete, IShellItemOp psiNewlyCreated) { }
+    public void PreNewItem(uint dwFlags, IShellItemOp psiDestinationFolder, string pszNewName) { }
+    public void PostNewItem(uint dwFlags, IShellItemOp psiDestinationFolder, string pszNewName, string pszTemplateName, uint dwFileAttributes, int hrNew, IShellItemOp psiNewItem) { }
+    public void UpdateProgress(uint iWorkTotal, uint iWorkSoFar) { }
+    public void ResetTimer() { }
+    public void PauseTimer() { }
+    public void ResumeTimer() { }
+  }
+
+  // ── Shell rename helper ────────────────────────────────────────────────────
+
+  /// <summary>
+  /// Renames a single file or folder via <c>IFileOperation</c>, which
+  /// adds an undo record in Explorer and shows a conflict dialog if needed.
+  /// </summary>
+  /// <returns>The new full path on success, or <see langword="null"/> if the
+  /// operation was cancelled or failed.</returns>
+  public static Task<string?> ShellRenameAsync(
+      string sourcePath, string newName,
+      IntPtr hwndOwner = default) {
+    var tcs = new TaskCompletionSource<string?>();
+
+    var thread = new System.Threading.Thread(() => {
+      IFileOperation? fileOp = null;
+      uint cookie = 0;
+      var sink = new RenameSink();
+      try {
+        int hr = CoCreateInstance(
+            CLSID_FileOperation, IntPtr.Zero, 1,
+            IID_IFileOperation, out object opObj);
+        Marshal.ThrowExceptionForHR(hr);
+        fileOp = (IFileOperation)opObj;
+
+        if (hwndOwner != IntPtr.Zero)
+          fileOp.SetOwnerWindow(hwndOwner);
+
+        // Silent rename — no progress dialog, no confirmation prompts.
+        // FOFX_ADDUNDORECORD still adds an undo entry to Explorer's undo stack.
+        fileOp.SetOperationFlags(FOF_NO_UI | FOFX_ADDUNDORECORD);
+        fileOp.Advise(sink, out cookie);
+
+        SHCreateItemFromParsingNameOp(
+            sourcePath, IntPtr.Zero, IID_IShellItemOp, out IShellItemOp srcItem);
+
+        fileOp.RenameItem(srcItem, newName, null);
+
+        hr = fileOp.PerformOperations();
+        Marshal.ThrowExceptionForHR(hr);
+
+        tcs.SetResult(sink.NewPath);
+      } catch (Exception ex) {
+        tcs.SetException(ex);
+      } finally {
+        if (fileOp is not null && cookie != 0)
+          fileOp.Unadvise(cookie);
+      }
+    });
+
+    thread.SetApartmentState(System.Threading.ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+    return tcs.Task;
   }
 }
