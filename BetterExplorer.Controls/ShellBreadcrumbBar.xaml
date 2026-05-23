@@ -1,0 +1,167 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="BetterExplorer.Controls.ShellBreadcrumbBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:BetterExplorer.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    VerticalAlignment="Stretch">
+
+    <UserControl.Resources>
+
+        <!-- Style for breadcrumb segment buttons (no chrome, hover highlight) -->
+        <Style x:Key="BreadcrumbSegmentStyle" TargetType="Button">
+            <Setter Property="Background"           Value="Transparent" />
+            <Setter Property="BorderBrush"          Value="Transparent" />
+            <Setter Property="BorderThickness"      Value="0" />
+            <Setter Property="Padding"              Value="6,0,2,0" />
+            <Setter Property="VerticalAlignment"    Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="FontSize"             Value="12" />
+            <Setter Property="FontFamily"           Value="Segoe UI Variable Text" />
+            <Setter Property="UseSystemFocusVisuals" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid x:Name="Root" Background="{TemplateBinding Background}"
+                              CornerRadius="4">
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal" />
+                                    <VisualState x:Name="PointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="Root.Background"
+                                                    Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Pressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="Root.Background"
+                                                    Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              Margin="{TemplateBinding Padding}" />
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Style for the chevron dropdown button -->
+        <Style x:Key="BreadcrumbChevronStyle" TargetType="Button">
+            <Setter Property="Background"           Value="Transparent" />
+            <Setter Property="BorderBrush"          Value="Transparent" />
+            <Setter Property="BorderThickness"      Value="0" />
+            <Setter Property="Padding"              Value="2,0" />
+            <Setter Property="VerticalAlignment"    Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="UseSystemFocusVisuals" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid x:Name="Root" Background="{TemplateBinding Background}"
+                              CornerRadius="4">
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal" />
+                                    <VisualState x:Name="PointerOver">
+                                        <VisualState.Setters>
+                                            <Setter Target="Root.Background"
+                                                    Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                    <VisualState x:Name="Pressed">
+                                        <VisualState.Setters>
+                                            <Setter Target="Root.Background"
+                                                    Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Margin="{TemplateBinding Padding}" />
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+    </UserControl.Resources>
+
+    <!-- Root border that looks like a text field -->
+    <Border x:Name="RootBorder"
+            Background="{ThemeResource TextControlBackground}"
+            BorderBrush="{ThemeResource TextControlBorderBrush}"
+            BorderThickness="1"
+            CornerRadius="4"
+            VerticalAlignment="Stretch">
+
+        <Grid>
+
+            <!-- â”€â”€ Breadcrumb display mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+            <Grid x:Name="BreadcrumbView"
+                  Visibility="Visible"
+                  PointerPressed="OnBreadcrumbViewPressed">
+
+                <Grid.ColumnDefinitions>
+                    <!-- Root (drive/shell icon) button -->
+                    <ColumnDefinition Width="Auto" />
+                    <!-- Scrollable segment strip -->
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Root arrow / quick-access menu button -->
+                <Button x:Name="RootMenuButton"
+                        Grid.Column="0"
+                        Style="{StaticResource BreadcrumbChevronStyle}"
+                        Width="28"
+                        ToolTipService.ToolTip="Navigate to..."
+                        Click="OnRootMenuClick">
+                    <Image x:Name="RootMenuIcon" Width="16" Height="16" Stretch="UniformToFill" />
+                </Button>
+
+                <!-- Horizontal scroll viewer â€” clips and scrolls the chips -->
+                <ScrollViewer x:Name="ChipScroller"
+                              Grid.Column="1"
+                              HorizontalScrollMode="Enabled"
+                              HorizontalScrollBarVisibility="Hidden"
+                              VerticalScrollBarVisibility="Disabled"
+                              VerticalScrollMode="Disabled"
+                              VerticalAlignment="Stretch">
+
+                    <!-- Chips are built dynamically in code-behind and added here -->
+                    <StackPanel x:Name="ChipPanel"
+                                Orientation="Horizontal"
+                                VerticalAlignment="Stretch"
+                                Spacing="0" />
+
+                </ScrollViewer>
+            </Grid>
+
+            <!-- â”€â”€ Edit mode overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+            <AutoSuggestBox x:Name="EditBox"
+                            Visibility="Collapsed"
+                            PlaceholderText="Type a path or search..."
+                            QueryIcon="Find"
+                            VerticalAlignment="Stretch"
+                            BorderThickness="0"
+                            Background="Transparent"
+                            FontSize="12"
+                            FontFamily="Segoe UI Variable Text"
+                            TextChanged="OnEditBoxTextChanged"
+                            SuggestionChosen="OnEditBoxSuggestionChosen"
+                            QuerySubmitted="OnEditBoxQuerySubmitted"
+                            KeyDown="OnEditBoxKeyDown" />
+
+        </Grid>
+    </Border>
+</UserControl>
+
+

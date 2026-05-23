@@ -1,0 +1,648 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="BetterExplorer.Controls.ExplorerBrowser"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:BetterExplorer.Controls"
+    xmlns:shellapi="using:BetterExplorer.ShellApi"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+  <Grid>
+    <Grid.Resources>
+      <FontFamily x:Key="FluentSystemIconsFont">ms-appx:///BetterExplorer.Controls/Assets/Fonts/FluentSystemIcons-Regular.ttf#FluentSystemIcons-Regular</FontFamily>
+      <FontFamily x:Key="CustomGlyphsFont">ms-appx:///BetterExplorer.Controls/Assets/Fonts/Custom-Glyphs.ttf#Custom-Glyphs</FontFamily>
+      <FontFamily x:Key="ColoredIconsFont">ms-appx:///BetterExplorer.Controls/Assets/Fonts/Colored-Icons.ttf#Untitled1</FontFamily>
+
+      <!-- Files-style view mode radio button: icon on top, label below, checked = accent fill -->
+      <Style x:Key="ViewModeRadioButtonStyle" TargetType="RadioButton">
+        <Setter Property="Width"            Value="72" />
+        <Setter Property="Padding"          Value="4,8" />
+        <Setter Property="CornerRadius"     Value="{ThemeResource ControlCornerRadius}" />
+        <Setter Property="Background"       Value="Transparent" />
+        <Setter Property="BorderBrush"      Value="Transparent" />
+        <Setter Property="BorderThickness"  Value="1" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment"   Value="Center" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="RadioButton">
+              <Border x:Name="Root"
+                      Background="{TemplateBinding Background}"
+                      BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}"
+                      CornerRadius="{TemplateBinding CornerRadius}"
+                      Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                <VisualStateManager.VisualStateGroups>
+                  <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal" />
+                    <VisualState x:Name="PointerOver">
+                      <VisualState.Setters>
+                        <Setter Target="Root.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                        <Setter Target="Root.BorderBrush" Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Pressed">
+                      <VisualState.Setters>
+                        <Setter Target="Root.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                        <Setter Target="Root.BorderBrush" Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Checked">
+                      <VisualState.Setters>
+                        <Setter Target="Root.Background" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                        <Setter Target="Root.BorderBrush" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="CheckedPointerOver">
+                      <VisualState.Setters>
+                        <Setter Target="Root.Background" Value="{ThemeResource AccentFillColorSecondaryBrush}" />
+                        <Setter Target="Root.BorderBrush" Value="{ThemeResource AccentFillColorSecondaryBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="CheckedPressed">
+                      <VisualState.Setters>
+                        <Setter Target="Root.Background" Value="{ThemeResource AccentFillColorTertiaryBrush}" />
+                        <Setter Target="Root.BorderBrush" Value="{ThemeResource AccentFillColorTertiaryBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
+      <!-- ListView-item-like radio button for sort flyout -->
+      <!-- ListView-item-like sort menu row: hover tints the row, checked shows a radio dot on the left -->
+      <Style x:Key="SortMenuRadioButtonStyle" TargetType="RadioButton">
+        <Setter Property="HorizontalAlignment"        Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Left" />
+        <Setter Property="VerticalContentAlignment"   Value="Center" />
+        <Setter Property="Height"                     Value="36" />
+        <Setter Property="Padding"                    Value="8,0,12,0" />
+        <Setter Property="CornerRadius"               Value="{ThemeResource ControlCornerRadius}" />
+        <Setter Property="Background"                 Value="Transparent" />
+        <Setter Property="BorderThickness"            Value="0" />
+        <Setter Property="FontSize"                   Value="{ThemeResource ControlContentThemeFontSize}" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="RadioButton">
+              <Border x:Name="Root"
+                      Background="{TemplateBinding Background}"
+                      CornerRadius="{TemplateBinding CornerRadius}"
+                      Padding="{TemplateBinding Padding}">
+                <Grid ColumnDefinitions="16,*">
+                  <!-- Radio indicator: filled circle (checked) or empty (unchecked) -->
+                  <Ellipse x:Name="OuterRing"
+                           Grid.Column="0"
+                           Width="16" Height="16"
+                           StrokeThickness="1.5"
+                           Stroke="{ThemeResource TextFillColorSecondaryBrush}"
+                           Fill="Transparent"
+                           VerticalAlignment="Center" />
+                  <Ellipse x:Name="InnerDot"
+                           Grid.Column="0"
+                           Width="8" Height="8"
+                           Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                           VerticalAlignment="Center"
+                           Opacity="0" />
+                  <ContentPresenter Grid.Column="1"
+                                    Margin="8,0,0,0"
+                                    HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                    VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                </Grid>
+                <VisualStateManager.VisualStateGroups>
+                  <!-- Background reacts to pointer independently of check state -->
+                  <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal" />
+                    <VisualState x:Name="PointerOver">
+                      <VisualState.Setters>
+                        <Setter Target="Root.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Pressed">
+                      <VisualState.Setters>
+                        <Setter Target="Root.Background" Value="{ThemeResource SubtleFillColorTertiaryBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Disabled" />
+                  </VisualStateGroup>
+                  <!-- Radio dot reacts to check state independently of pointer -->
+                  <VisualStateGroup x:Name="CheckStates">
+                    <VisualState x:Name="Unchecked" />
+                    <VisualState x:Name="Checked">
+                      <VisualState.Setters>
+                        <Setter Target="InnerDot.Opacity" Value="1" />
+                        <Setter Target="OuterRing.Stroke" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                      </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Indeterminate" />
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+              </Border>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
+      <!--
+        Ghost nav button style:
+          Normal   – fully transparent background + border
+          Hover    – themed fill + border (ButtonBackgroundPointerOver / ButtonBorderBrushPointerOver)
+          Pressed  – themed pressed fill + border
+          Disabled – transparent background + border, dimmed foreground (ghosted icon)
+        A custom ControlTemplate is used so that the default template's Disabled
+        state (which sets ButtonBackgroundDisabled) does not produce a visible fill.
+      -->
+      <Style x:Key="NavButtonStyle" TargetType="Button">
+        <Setter Property="Foreground"               Value="{ThemeResource ButtonForeground}" />
+        <Setter Property="BorderThickness"          Value="{ThemeResource ButtonBorderThemeThickness}" />
+        <Setter Property="HorizontalAlignment"      Value="Left" />
+        <Setter Property="VerticalAlignment"        Value="Center" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment"   Value="Center" />
+        <Setter Property="FontFamily"               Value="{ThemeResource ContentControlThemeFontFamily}" />
+        <Setter Property="FontSize"                 Value="{ThemeResource ControlContentThemeFontSize}" />
+        <Setter Property="UseSystemFocusVisuals"    Value="{StaticResource UseSystemFocusVisuals}" />
+        <Setter Property="FocusVisualMargin"        Value="-3" />
+        <Setter Property="CornerRadius"             Value="{ThemeResource ControlCornerRadius}" />
+        <Setter Property="Width"                    Value="36" />
+        <Setter Property="Height"                   Value="36" />
+        <Setter Property="Padding"                  Value="0" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Button">
+              <ContentPresenter x:Name="ContentPresenter"
+                                Background="Transparent"
+                                BorderBrush="Transparent"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                ContentTransitions="{TemplateBinding ContentTransitions}"
+                                CornerRadius="{TemplateBinding CornerRadius}"
+                                Padding="{TemplateBinding Padding}"
+                                HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                AutomationProperties.AccessibilityView="Raw">
+                <VisualStateManager.VisualStateGroups>
+                  <VisualStateGroup x:Name="CommonStates">
+
+                    <VisualState x:Name="Normal" />
+
+                    <VisualState x:Name="PointerOver">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBackgroundPointerOver}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBorderBrushPointerOver}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonForegroundPointerOver}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+
+                    <VisualState x:Name="Pressed">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBackgroundPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBorderBrushPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonForegroundPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+
+                    <!--
+                      Disabled: keep transparent fill/border so the button stays ghosted;
+                      only dim the foreground icon to signal unavailability.
+                    -->
+                    <VisualState x:Name="Disabled">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonForegroundDisabled}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+              </ContentPresenter>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
+      <!--
+        Ghost SplitButton style, matching NavButtonStyle:
+          Normal / Disabled – fully transparent background + border
+          Hover / Pressed   – themed fill + border (same as NavButtonStyle)
+        A single BackgroundBorder sits behind both the primary and the secondary
+        (chevron) areas, so hovering *either* half highlights the entire button.
+        The inner PrimaryButton / SecondaryButton use bare transparent templates
+        so their default per-half hover layers are suppressed.
+      -->
+      <Style x:Key="NavSplitButtonStyle" TargetType="SplitButton">
+        <Setter Property="Foreground"                 Value="{ThemeResource ButtonForeground}" />
+        <Setter Property="HorizontalAlignment"        Value="Left" />
+        <Setter Property="VerticalAlignment"          Value="Center" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment"   Value="Center" />
+        <Setter Property="CornerRadius"               Value="{ThemeResource ControlCornerRadius}" />
+        <Setter Property="Height"                     Value="32" />
+        <Setter Property="Padding"                    Value="8,0" />
+        <Setter Property="UseSystemFocusVisuals"      Value="{StaticResource UseSystemFocusVisuals}" />
+        <Setter Property="FocusVisualMargin"          Value="-3" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="SplitButton">
+              <Grid x:Name="RootGrid"
+                    CornerRadius="{TemplateBinding CornerRadius}">
+
+                <!-- Unified hover / pressed fill that spans primary + secondary -->
+                <Border x:Name="BackgroundBorder"
+                        Background="Transparent"
+                        BorderBrush="Transparent"
+                        BorderThickness="1"
+                        CornerRadius="{TemplateBinding CornerRadius}" />
+
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MinWidth="0" />
+                    <ColumnDefinition Width="Auto" />
+                  </Grid.ColumnDefinitions>
+
+                  <!-- Primary (icon / content) area -->
+                  <Button x:Name="PrimaryButton"
+                          Grid.Column="0"
+                          Foreground="{TemplateBinding Foreground}"
+                          Content="{TemplateBinding Content}"
+                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                          ContentTransitions="{TemplateBinding ContentTransitions}"
+                          Padding="{TemplateBinding Padding}"
+                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                          MinWidth="0"
+                          IsTabStop="{TemplateBinding IsTabStop}"
+                          TabIndex="{TemplateBinding TabIndex}">
+                    <!-- Transparent template so this button adds no per-half highlight -->
+                    <Button.Template>
+                      <ControlTemplate TargetType="Button">
+                        <ContentPresenter Background="Transparent"
+                                          BorderBrush="Transparent"
+                                          BorderThickness="0"
+                                          Foreground="{TemplateBinding Foreground}"
+                                          Content="{TemplateBinding Content}"
+                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                                          ContentTransitions="{TemplateBinding ContentTransitions}"
+                                          Padding="{TemplateBinding Padding}"
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+                      </ControlTemplate>
+                    </Button.Template>
+                  </Button>
+
+                  <!-- Divider + chevron -->
+                  <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Rectangle Width="1"
+                               Fill="{ThemeResource DividerStrokeColorDefaultBrush}"
+                               Margin="0,8" />
+                    <Button x:Name="SecondaryButton"
+                            Width="28"
+                            MinWidth="0"
+                            Padding="0"
+                            IsTabStop="False">
+                      <!-- Transparent template so this button adds no per-half highlight -->
+                      <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                          <ContentPresenter Background="Transparent"
+                                            BorderBrush="Transparent"
+                                            BorderThickness="0"
+                                            Content="{TemplateBinding Content}"
+                                            Padding="{TemplateBinding Padding}"
+                                            HorizontalContentAlignment="Center"
+                                            VerticalContentAlignment="Center" />
+                        </ControlTemplate>
+                      </Button.Template>
+                      <FontIcon x:Name="ChevronIcon"
+                                FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                Glyph="&#xE70D;"
+                                FontSize="8"
+                                Foreground="{TemplateBinding Foreground}" />
+                    </Button>
+                  </StackPanel>
+                </Grid>
+
+                <VisualStateManager.VisualStateGroups>
+                  <VisualStateGroup x:Name="CommonStates">
+
+                    <VisualState x:Name="Normal" />
+
+                    <!-- WinUI 3 calls PrimaryPointerOver when hovering the icon half -->
+                    <VisualState x:Name="PrimaryPointerOver">
+                      <VisualState.Setters>
+                        <Setter Target="BackgroundBorder.Background" Value="{ThemeResource ButtonBackgroundPointerOver}" />
+                        <Setter Target="BackgroundBorder.BorderBrush" Value="{ThemeResource ButtonBorderBrushPointerOver}" />
+                        <Setter Target="PrimaryButton.Foreground" Value="{ThemeResource ButtonForegroundPointerOver}" />
+                      </VisualState.Setters>
+                    </VisualState>
+
+                    <!-- WinUI 3 calls SecondaryPointerOver when hovering the chevron half -->
+                    <VisualState x:Name="SecondaryPointerOver">
+                      <VisualState.Setters>
+                        <Setter Target="BackgroundBorder.Background" Value="{ThemeResource ButtonBackgroundPointerOver}" />
+                        <Setter Target="BackgroundBorder.BorderBrush" Value="{ThemeResource ButtonBorderBrushPointerOver}" />
+                        <Setter Target="ChevronIcon.Foreground" Value="{ThemeResource ButtonForegroundPointerOver}" />
+                      </VisualState.Setters>
+                    </VisualState>
+
+                    <VisualState x:Name="PrimaryPressed">
+                      <VisualState.Setters>
+                        <Setter Target="BackgroundBorder.Background" Value="{ThemeResource ButtonBackgroundPressed}" />
+                        <Setter Target="BackgroundBorder.BorderBrush" Value="{ThemeResource ButtonBorderBrushPressed}" />
+                        <Setter Target="PrimaryButton.Foreground" Value="{ThemeResource ButtonForegroundPressed}" />
+                      </VisualState.Setters>
+                    </VisualState>
+
+                    <VisualState x:Name="SecondaryPressed">
+                      <VisualState.Setters>
+                        <Setter Target="BackgroundBorder.Background" Value="{ThemeResource ButtonBackgroundPressed}" />
+                        <Setter Target="BackgroundBorder.BorderBrush" Value="{ThemeResource ButtonBorderBrushPressed}" />
+                        <Setter Target="ChevronIcon.Foreground" Value="{ThemeResource ButtonForegroundPressed}" />
+                      </VisualState.Setters>
+                    </VisualState>
+
+                    <!--
+                      Disabled: keep transparent fill; dim the foreground icons.
+                    -->
+                    <VisualState x:Name="Disabled">
+                      <VisualState.Setters>
+                        <Setter Target="PrimaryButton.Foreground" Value="{ThemeResource ButtonForegroundDisabled}" />
+                        <Setter Target="ChevronIcon.Foreground" Value="{ThemeResource ButtonForegroundDisabled}" />
+                      </VisualState.Setters>
+                    </VisualState>
+
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+
+              </Grid>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+    </Grid.Resources>
+
+    <Grid.RowDefinitions>
+      <!-- Navigation bar row -->
+      <RowDefinition Height="40" />
+      <!-- View toolbar row -->
+      <RowDefinition Height="42" />
+      <!-- Content row -->
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <!-- ── Navigation bar ─────────────────────────────────────────────── -->
+    <Grid x:Name="NavigationBar" Grid.Row="0" Padding="4,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <!-- Back -->
+        <ColumnDefinition Width="Auto" />
+        <!-- Forward -->
+        <ColumnDefinition Width="Auto" />
+        <!-- Up level -->
+        <ColumnDefinition Width="Auto" />
+        <!-- Refresh -->
+        <ColumnDefinition Width="*"    />
+        <!-- Address bar -->
+      </Grid.ColumnDefinitions>
+
+      <Button x:Name="BackButton"
+              Grid.Column="0"
+              IsEnabled="False"
+              Click="BackButton_Click"
+              ToolTipService.ToolTip="Back"
+              Style="{StaticResource NavButtonStyle}">
+        <FontIcon Glyph="&#xE72B;" FontSize="14" />
+      </Button>
+
+      <Button x:Name="ForwardButton"
+              Grid.Column="1"
+              IsEnabled="False"
+              Click="ForwardButton_Click"
+              ToolTipService.ToolTip="Forward"
+              Style="{StaticResource NavButtonStyle}">
+        <FontIcon Glyph="&#xE72A;" FontSize="14" />
+      </Button>
+
+      <Button x:Name="UpLevelButton"
+              Grid.Column="2"
+              IsEnabled="False"
+              Click="UpLevelButton_Click"
+              ToolTipService.ToolTip="Up one level"
+              Style="{StaticResource NavButtonStyle}">
+        <FontIcon Glyph="&#xE74A;" FontSize="14" />
+      </Button>
+
+      <Button x:Name="RefreshButton"
+              Grid.Column="3"
+              IsEnabled="False"
+              Click="RefreshButton_Click"
+              ToolTipService.ToolTip="Refresh"
+              Style="{StaticResource NavButtonStyle}">
+        <FontIcon Glyph="&#xE72C;" FontSize="14" />
+      </Button>
+
+      <local:ShellBreadcrumbBar x:Name="AddressBar"
+                                Grid.Column="4"
+                                Height="32"
+                                VerticalAlignment="Center"
+                                Margin="4,0,4,0"
+                                PathRequested="OnBreadcrumbPathRequested" />
+    </Grid>
+
+    <!-- ── View toolbar row ───────────────────────────────────────────── -->
+    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right"
+                Margin="5" Padding="4,0" Spacing="4">
+
+      <!-- Sort button -->
+      <Button x:Name="SortButton"
+              Style="{StaticResource NavButtonStyle}"
+              VerticalAlignment="Center"
+              ToolTipService.ToolTip="Sort">
+        <FontIcon Glyph="&#xE8CB;" FontSize="14" />
+        <Button.Flyout>
+          <Flyout x:Name="SortFlyout" Placement="Bottom">
+            <Flyout.FlyoutPresenterStyle>
+              <Style TargetType="FlyoutPresenter">
+                <Setter Property="Padding"      Value="8" />
+                <Setter Property="MinWidth"     Value="200" />
+                <Setter Property="MaxWidth"     Value="200" />
+                <Setter Property="CornerRadius" Value="8" />
+              </Style>
+            </Flyout.FlyoutPresenterStyle>
+            <StackPanel Spacing="2" MinWidth="160">
+              <TextBlock Text="Sort by" FontWeight="SemiBold" Margin="4,2,4,6" />
+              <RadioButton x:Name="SortMenuName"     Tag="Name" Content="Name"
+                           Style="{StaticResource SortMenuRadioButtonStyle}"
+                           GroupName="SortColumn" Click="SortColumnMenuItem_Click" />
+              <RadioButton x:Name="SortMenuDate"     Tag="Date" Content="Date modified"
+                           Style="{StaticResource SortMenuRadioButtonStyle}"
+                           GroupName="SortColumn" Click="SortColumnMenuItem_Click" />
+              <RadioButton x:Name="SortMenuType"     Tag="Type" Content="Type"
+                           Style="{StaticResource SortMenuRadioButtonStyle}"
+                           GroupName="SortColumn" Click="SortColumnMenuItem_Click" />
+              <RadioButton x:Name="SortMenuSize"     Tag="Size" Content="Size"
+                           Style="{StaticResource SortMenuRadioButtonStyle}"
+                           GroupName="SortColumn" Click="SortColumnMenuItem_Click" />
+              <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}"
+                      Margin="0,6" />
+              <TextBlock Text="Order" FontWeight="SemiBold" Margin="4,0,4,6" />
+              <RadioButton x:Name="SortMenuAscending"  Tag="Ascending"  Content="Ascending ▲"
+                           Style="{StaticResource SortMenuRadioButtonStyle}"
+                           GroupName="SortDirection" Click="SortDirectionMenuItem_Click" />
+              <RadioButton x:Name="SortMenuDescending" Tag="Descending" Content="Descending ▼"
+                           Style="{StaticResource SortMenuRadioButtonStyle}"
+                           GroupName="SortDirection" Click="SortDirectionMenuItem_Click" />
+            </StackPanel>
+          </Flyout>
+        </Button.Flyout>
+      </Button>
+
+      <!-- View mode button -->
+      <SplitButton x:Name="ViewButton"
+                   Style="{StaticResource NavSplitButtonStyle}"
+                   VerticalAlignment="Center"
+                   Click="ViewButton_Click"
+                   ToolTipService.ToolTip="Change view">
+        <FontIcon Glyph="&#xF462;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="14" />
+        <SplitButton.Flyout>
+          <Flyout Placement="Bottom">
+            <Flyout.FlyoutPresenterStyle>
+              <Style TargetType="FlyoutPresenter">
+                <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+                <Setter Property="ScrollViewer.HorizontalScrollMode"          Value="Disabled" />
+                <Setter Property="MinWidth"                                    Value="510" />
+                <Setter Property="MaxWidth"                                    Value="510" />
+                <Setter Property="Padding"                                     Value="0" />
+                <Setter Property="CornerRadius"                                Value="8" />
+              </Style>
+            </Flyout.FlyoutPresenterStyle>
+            <StackPanel Spacing="8" Margin="8" MinWidth="344">
+              <TextBlock FontWeight="SemiBold" Text="Layout" />
+              <!-- Row 1: icon views -->
+              <StackPanel Orientation="Horizontal" Spacing="4">
+                <RadioButton x:Name="ViewMenuExtraLargeIcons" Tag="ExtraLargeIcons"
+                             GroupName="ViewMode" Click="ViewMenuItem_Click"
+                             Style="{StaticResource ViewModeRadioButtonStyle}">
+                  <StackPanel Spacing="4">
+                    <FontIcon Glyph="&#xEDC2;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                    <TextBlock Text="Extra large" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ViewMenuLargeIcons" Tag="LargeIcons"
+                             GroupName="ViewMode" Click="ViewMenuItem_Click"
+                             Style="{StaticResource ViewModeRadioButtonStyle}">
+                  <StackPanel Spacing="4">
+                    <FontIcon Glyph="&#xEA0C;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                    <TextBlock Text="Large" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ViewMenuMediumIcons" Tag="MediumIcons"
+                             GroupName="ViewMode" Click="ViewMenuItem_Click"
+                             Style="{StaticResource ViewModeRadioButtonStyle}">
+                  <StackPanel Spacing="4">
+                    <FontIcon Glyph="&#xF462;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                    <TextBlock Text="Medium" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ViewMenuSmallIcons" Tag="SmallIcons"
+                             GroupName="ViewMode" Click="ViewMenuItem_Click"
+                             Style="{StaticResource ViewModeRadioButtonStyle}">
+                  <StackPanel Spacing="4">
+                    <FontIcon Glyph="&#xF376;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                    <TextBlock Text="Small" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                  </StackPanel>
+                </RadioButton>
+              </StackPanel>
+              <!-- Row 2: list/detail/tile views -->
+              <StackPanel Orientation="Horizontal" Spacing="4">
+                <RadioButton x:Name="ViewMenuList" Tag="List"
+                             GroupName="ViewMode" Click="ViewMenuItem_Click"
+                             Style="{StaticResource ViewModeRadioButtonStyle}">
+                  <StackPanel Spacing="4">
+                    <FontIcon Glyph="&#xF4EE;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                    <TextBlock Text="List" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ViewMenuDetails" Tag="Details"
+                             GroupName="ViewMode" Click="ViewMenuItem_Click"
+                             Style="{StaticResource ViewModeRadioButtonStyle}">
+                  <StackPanel Spacing="4">
+                    <FontIcon Glyph="&#xECF8;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                    <TextBlock Text="Details" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ViewMenuTiles" Tag="Tiles"
+                             GroupName="ViewMode" Click="ViewMenuItem_Click"
+                             Style="{StaticResource ViewModeRadioButtonStyle}">
+                  <StackPanel Spacing="4">
+                    <FontIcon Glyph="&#xE065;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                    <TextBlock Text="Tiles" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                  </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ViewMenuContent" Tag="Content"
+                             GroupName="ViewMode" Click="ViewMenuItem_Click"
+                             Style="{StaticResource ViewModeRadioButtonStyle}">
+                  <StackPanel Spacing="4">
+                    <FontIcon Glyph="&#xF8CB;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                    <TextBlock Text="Content" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                  </StackPanel>
+                </RadioButton>
+              </StackPanel>
+            </StackPanel>
+          </Flyout>
+        </SplitButton.Flyout>
+      </SplitButton>
+    </StackPanel>
+
+    <!-- ── Content: tree | gripper | file list ────────────────────────── -->
+    <Border Grid.Row="2" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" >
+      <Grid x:Name="ContentGrid">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition x:Name="TreeColumn" Width="220" MinWidth="120" MaxWidth="500" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <local:ShellTreeView x:Name="NavTreeView"
+                                    Grid.Column="0"
+                                    FolderSelected="OnTreeFolderSelected"
+                                    KnownFolderSelected="OnTreeKnownFolderSelected" />
+
+        <local:SplitterBorder Grid.Column="1"
+                      Width="5"
+                      Background="Transparent"
+                      PointerPressed="Splitter_PointerPressed"
+                      PointerMoved="Splitter_PointerMoved"
+                      PointerReleased="Splitter_PointerReleased"
+                      PointerCaptureLost="Splitter_PointerReleased">
+          <Border Width="1"
+                          HorizontalAlignment="Center"
+                          Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+        </local:SplitterBorder>
+
+        <local:ShellListView x:Name="FileList"
+                                    Grid.Column="2"
+                                    ViewMode="SmallIcons" />
+      </Grid>
+    </Border>
+  </Grid>
+</UserControl>

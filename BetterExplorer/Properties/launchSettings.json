@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "BetterExplorer (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "BetterExplorer (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
