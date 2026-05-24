@@ -13,16 +13,7 @@
     <MicaBackdrop />
   </Window.SystemBackdrop>
 
-  <Grid>
-    <Grid.RowDefinitions>
-      <RowDefinition Height="45" />
-      <RowDefinition Height="*" />
-    </Grid.RowDefinitions>
+  <!-- Tabbed file browser – tab strip lives in the title bar area. -->
+  <controls:TabbedExplorerBrowser x:Name="TabbedBrowser" />
 
-    <!-- Custom title bar drag region -->
-    <Grid x:Name="AppTitleBar" Grid.Row="0" Height="48" />
-
-    <!-- Full-featured browser control: nav bar + tree + list -->
-    <controls:ExplorerBrowser x:Name="Browser" Grid.Row="1" />
-  </Grid>
 </Window>

@@ -3337,15 +3337,19 @@ public sealed partial class ShellListView : UserControl {
   // ── Public context-menu actions ──────────────────────────────────────────
 
   /// <summary>
-  /// Opens the selected items via ShellExecute (same as double-tap).
+  /// Opens the selected items: folders are navigated in-app; files are launched via ShellExecute.
   /// </summary>
   public void OpenSelected() {
     foreach (var item in ShellView.SelectedItems.OfType<ShellItem>()) {
-      try {
-        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(item.FullPath) {
-          UseShellExecute = true
-        });
-      } catch { }
+      if (item.IsFolder) {
+        Navigate(item.FullPath);
+      } else {
+        try {
+          System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(item.FullPath) {
+            UseShellExecute = true
+          });
+        } catch { }
+      }
     }
   }
 

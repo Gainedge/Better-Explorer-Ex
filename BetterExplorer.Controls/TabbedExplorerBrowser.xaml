@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="BetterExplorer.Controls.TabbedExplorerBrowser"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:BetterExplorer.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+  <Grid>
+    <TabView x:Name="Tabs"
+             IsAddTabButtonVisible="True"
+             CanReorderTabs="True"
+             CanDragTabs="True"
+             TabWidthMode="SizeToContent"
+             VerticalAlignment="Stretch"
+             AddTabButtonClick="OnAddTabButtonClick"
+             TabCloseRequested="OnTabCloseRequested"
+             SelectionChanged="OnTabSelectionChanged">
+
+      <!--
+        TabStripHeader: a passive drag region to the left of the first tab.
+        Its width is set from code-behind to match AppWindowTitleBar.LeftInset
+        (the system icon / snap-layout area on the left).
+      -->
+      <TabView.TabStripHeader>
+        <Border x:Name="TitleBarDragLeft" Width="0" />
+      </TabView.TabStripHeader>
+
+      <!--
+        TabStripFooter: a passive drag region to the right of the + button.
+        Its width is set from code-behind to match AppWindowTitleBar.RightInset
+        (the caption-button cluster width) so tabs never slide under those buttons.
+      -->
+      <TabView.TabStripFooter>
+        <Border x:Name="TitleBarDragRight" Width="0" />
+      </TabView.TabStripFooter>
+
+    </TabView>
+  </Grid>
+</UserControl>

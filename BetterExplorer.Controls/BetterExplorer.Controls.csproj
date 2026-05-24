@@ -9,6 +9,12 @@
     <Platforms>x86;x64;ARM64</Platforms>
   </PropertyGroup>
   <ItemGroup>
+    <Page Update="TabbedExplorerBrowser.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+  </ItemGroup>
+  <ItemGroup>
     <Page Update="ShellBreadcrumbBar.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
@@ -32,4 +38,5 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+
 </Project>
