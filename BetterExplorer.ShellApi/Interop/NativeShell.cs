@@ -525,6 +525,277 @@ public static class NativeShell {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
   private static extern uint GetFileAttributesW(string lpFileName);
 
+  // ── Context-menu P/Invoke ─────────────────────────────────────────────────
+
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  internal static extern IntPtr ILCreateFromPathW([MarshalAs(UnmanagedType.LPWStr)] string pszPath);
+
+  [DllImport("shell32.dll")]
+  internal static extern void ILFree(IntPtr pidl);
+
+  [DllImport("shell32.dll", PreserveSig = true)]
+  internal static extern int SHCreateItemArrayFromIDLists(
+      uint cidl,
+      [In] IntPtr[] rgpidl,
+      [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out IShellItemArrayCM ppsiItemArray);
+
+  [DllImport("shell32.dll", PreserveSig = true)]
+  internal static extern int SHBindToParent(
+      IntPtr pidl,
+      [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out object ppv,
+      out IntPtr ppidlLast);
+
+  [DllImport("shell32.dll", PreserveSig = true)]
+  internal static extern int SHGetDesktopFolder(
+      [MarshalAs(UnmanagedType.Interface)] out object ppshf);
+
+  [DllImport("shell32.dll", PreserveSig = true)]
+  internal static extern int SHParseDisplayName(
+      [MarshalAs(UnmanagedType.LPWStr)] string pszName,
+      IntPtr pbc,
+      out IntPtr ppidl,
+      uint sfgaoIn,
+      out uint psfgaoOut);
+
+  // ── Public IShellFolder (for context-menu use) ────────────────────────────
+
+  [ComImport, Guid("000214E6-0000-0000-C000-000000000046"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IShellFolderCM {
+    [PreserveSig] int ParseDisplayName(IntPtr hwnd, IntPtr pbc,
+        [MarshalAs(UnmanagedType.LPWStr)] string pszDisplayName,
+        out uint pchEaten, out IntPtr ppidl, ref uint pdwAttributes);
+    [PreserveSig] int EnumObjects(IntPtr hwnd, uint grfFlags,
+        [MarshalAs(UnmanagedType.Interface)] out object ppenumIDList);
+    [PreserveSig] int BindToObject(IntPtr pidl, IntPtr pbc,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out object ppv);
+    [PreserveSig] int BindToStorage(IntPtr pidl, IntPtr pbc,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out object ppv);
+    [PreserveSig] int CompareIDs(IntPtr lParam, IntPtr pidl1, IntPtr pidl2);
+    [PreserveSig] int CreateViewObject(IntPtr hwndOwner,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out object ppv);
+    [PreserveSig] int GetAttributesOf(uint cidl,
+        [In, MarshalAs(UnmanagedType.LPArray)] IntPtr[] apidl,
+        ref uint rgfInOut);
+    [PreserveSig] int GetUIObjectOf(IntPtr hwndOwner, uint cidl,
+        [In, MarshalAs(UnmanagedType.LPArray)] IntPtr[] apidl,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        IntPtr rgfReserved,
+        [MarshalAs(UnmanagedType.Interface)] out object ppv);
+    [PreserveSig] int GetDisplayNameOf(IntPtr pidl, uint uFlags,
+        [MarshalAs(UnmanagedType.Interface)] out object pName);
+    [PreserveSig] int SetNameOf(IntPtr hwnd, IntPtr pidl,
+        [MarshalAs(UnmanagedType.LPWStr)] string pszName,
+        uint uFlags, out IntPtr ppidlOut);
+  }
+
+  [DllImport("user32.dll")]
+  internal static extern IntPtr CreatePopupMenu();
+
+  [DllImport("user32.dll")]
+  internal static extern bool DestroyMenu(IntPtr hMenu);
+
+  [DllImport("user32.dll")]
+  internal static extern int GetMenuItemCount(IntPtr hMenu);
+
+  [StructLayout(LayoutKind.Sequential)]
+  internal struct MSG {
+    public IntPtr hwnd;
+    public uint   message;
+    public IntPtr wParam;
+    public IntPtr lParam;
+    public uint   time;
+    public int    ptX, ptY;
+  }
+
+  [DllImport("user32.dll")]
+  internal static extern bool PeekMessageW(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin,
+      uint wMsgFilterMax, uint wRemoveMsg);
+
+  [DllImport("user32.dll")]
+  internal static extern bool TranslateMessage(ref MSG lpMsg);
+
+  [DllImport("user32.dll")]
+  internal static extern IntPtr DispatchMessageW(ref MSG lpMsg);
+
+  // Pump all pending messages on the current STA thread for up to <ms> milliseconds.
+  // This lets async COM shell extensions post their completion callbacks.
+  internal static void PumpMessagesFor(int ms) {
+    var deadline = Environment.TickCount64 + ms;
+    while (Environment.TickCount64 < deadline) {
+      while (PeekMessageW(out var msg, IntPtr.Zero, 0, 0, 1 /*PM_REMOVE*/)) {
+        TranslateMessage(ref msg);
+        DispatchMessageW(ref msg);
+      }
+      Thread.Sleep(1);
+    }
+  }
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  internal static extern bool GetMenuItemInfoW(IntPtr hMenu, uint item, bool fByPosition,
+      ref MENUITEMINFOW lpmii);
+
+  // ── IShellItemArray (context-menu variant) ────────────────────────────────
+
+  [ComImport, Guid("B63EA76D-1F85-456F-A19C-48159EFA858B"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IShellItemArrayCM {
+    [PreserveSig] int BindToHandler(IntPtr pbc,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid bhid,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out object ppv);
+    [PreserveSig] int GetPropertyStore(int flags,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out object ppv);
+    [PreserveSig] int GetPropertyDescriptionList(IntPtr keyType,
+        [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out object ppv);
+    [PreserveSig] int GetAttributes(uint AttribFlags, uint sfgaoMask, out uint psfgaoAttribs);
+    [PreserveSig] int GetCount(out uint pdwNumItems);
+    [PreserveSig] int GetItemAt(uint dwIndex,
+        [MarshalAs(UnmanagedType.Interface)] out object ppsi);
+    [PreserveSig] int EnumItems(
+        [MarshalAs(UnmanagedType.Interface)] out object ppenumShellItems);
+  }
+
+  // ── IContextMenu ──────────────────────────────────────────────────────────
+
+  [ComImport, Guid("000214E4-0000-0000-C000-000000000046"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IContextMenuCM {
+    [PreserveSig]
+    int QueryContextMenu(IntPtr hmenu, uint indexMenu, uint idCmdFirst, uint idCmdLast, uint uFlags);
+    [PreserveSig]
+    int InvokeCommand(ref CMINVOKECOMMANDINFOEX pici);
+    [PreserveSig]
+    int GetCommandString(UIntPtr idCmd, uint uType, IntPtr pReserved,
+        IntPtr pszName, uint cchMax);
+  }
+
+  // ── IContextMenu2 (adds HandleMenuMsg) ───────────────────────────────────
+
+  /// <summary>
+  /// COM interface for IContextMenu2. The vtable must list IContextMenu methods first
+  /// (in order), then the IContextMenu2 addition, to match the native COM vtable layout.
+  /// </summary>
+  [ComImport, Guid("000214F4-0000-0000-C000-000000000046"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IContextMenu2CM {
+    // ── IContextMenu ──────────────────────────────────────────────────────
+    [PreserveSig]
+    int QueryContextMenu(IntPtr hmenu, uint indexMenu, uint idCmdFirst, uint idCmdLast, uint uFlags);
+    [PreserveSig]
+    int InvokeCommand(ref CMINVOKECOMMANDINFOEX pici);
+    [PreserveSig]
+    int GetCommandString(UIntPtr idCmd, uint uType, IntPtr pReserved,
+        IntPtr pszName, uint cchMax);
+    // ── IContextMenu2 ─────────────────────────────────────────────────────
+    [PreserveSig]
+    int HandleMenuMsg(uint uMsg, IntPtr wParam, IntPtr lParam);
+  }
+
+  // ── IContextMenu3 (adds HandleMenuMsg2) ──────────────────────────────────
+
+  [ComImport, Guid("BCFCE0A0-EC17-11D0-8D10-00A0C90F2719"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  public interface IContextMenu3CM {
+    // ── IContextMenu ──────────────────────────────────────────────────────
+    [PreserveSig]
+    int QueryContextMenu(IntPtr hmenu, uint indexMenu, uint idCmdFirst, uint idCmdLast, uint uFlags);
+    [PreserveSig]
+    int InvokeCommand(ref CMINVOKECOMMANDINFOEX pici);
+    [PreserveSig]
+    int GetCommandString(UIntPtr idCmd, uint uType, IntPtr pReserved,
+        IntPtr pszName, uint cchMax);
+    // ── IContextMenu2 ─────────────────────────────────────────────────────
+    [PreserveSig]
+    int HandleMenuMsg(uint uMsg, IntPtr wParam, IntPtr lParam);
+    // ── IContextMenu3 ─────────────────────────────────────────────────────
+    [PreserveSig]
+    int HandleMenuMsg2(uint uMsg, IntPtr wParam, IntPtr lParam, out IntPtr plResult);
+  }
+
+  // ── GetCommandString type codes (GCS_*) ───────────────────────────────────
+
+  public const uint GCS_VERBA     = 0x00000000;  // ANSI verb string
+  public const uint GCS_HELPTEXTA = 0x00000001;  // ANSI help text
+  public const uint GCS_VALIDATEA = 0x00000002;  // validate ANSI verb
+  public const uint GCS_VERBW     = 0x00000004;  // Unicode verb string
+  public const uint GCS_HELPTEXTW = 0x00000005;  // Unicode help text
+  public const uint GCS_VALIDATEW = 0x00000006;  // validate Unicode verb
+  public const uint GCS_UNICODE   = 0x00000004;  // Unicode flag bit
+
+  // ── MENUITEMINFOW (Unicode) ───────────────────────────────────────────────
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct MENUITEMINFOW {
+    public uint cbSize;
+    public uint fMask;
+    public uint fType;
+    public uint fState;
+    public uint wID;
+    public IntPtr hSubMenu;
+    public IntPtr hbmpChecked;
+    public IntPtr hbmpUnchecked;
+    public UIntPtr dwItemData;
+    public IntPtr dwTypeData;   // pointer to caller-allocated WCHAR buffer
+    public uint cch;
+    public IntPtr hbmpItem;
+
+    // MIIM_* flags
+    public const uint MIIM_STATE    = 0x00000001;
+    public const uint MIIM_ID       = 0x00000002;
+    public const uint MIIM_SUBMENU  = 0x00000004;
+    public const uint MIIM_FTYPE    = 0x00000100;
+    public const uint MIIM_STRING   = 0x00000040;
+    public const uint MIIM_BITMAP   = 0x00000080;
+
+    // Special HBMMENU values
+    public static readonly IntPtr HBMMENU_CALLBACK = new(-1); // owner-draw icon
+
+    // MFT_* flags
+    public const uint MFT_SEPARATOR = 0x00000800;
+    public const uint MFT_STRING    = 0x00000000;
+
+    // MFS_* flags
+    public const uint MFS_DISABLED  = 0x00000003;
+    public const uint MFS_GRAYED    = 0x00000003;
+  }
+
+  // ── CMINVOKECOMMANDINFOEX ─────────────────────────────────────────────────
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+  public struct CMINVOKECOMMANDINFOEX {
+    public int    cbSize;       // sizeof(CMINVOKECOMMANDINFOEX)
+    public int    fMask;        // CMIC_MASK_* flags
+    public IntPtr hwnd;
+    public IntPtr lpVerb;       // verb or MAKEINTRESOURCE(offset)
+    public IntPtr lpParameters;
+    public IntPtr lpDirectory;
+    public int    nShow;        // SW_SHOWNORMAL
+    public int    dwHotKey;
+    public IntPtr hIcon;
+    // Ex fields
+    [MarshalAs(UnmanagedType.LPStr)]
+    public string? lpTitle;
+    public IntPtr lpVerbW;      // Unicode verb
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? lpParametersW;
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? lpDirectoryW;
+    [MarshalAs(UnmanagedType.LPWStr)]
+    public string? lpTitleW;
+    public POINT  ptInvoke;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT { public int X; public int Y; }
+
   // ── Cloud/offline detection ───────────────────────────────────────────────
 
   /// <summary>
@@ -1740,5 +2011,142 @@ public static class NativeShell {
     thread.IsBackground = true;
     thread.Start();
     return tcs.Task;
+  }
+
+  // ── Shell delete (to Recycle Bin) ─────────────────────────────────────────
+
+  private const uint FOF_ALLOWUNDO    = 0x0040;
+
+  /// <summary>
+  /// Deletes the given paths to the Recycle Bin via <c>IFileOperation</c>.
+  /// Shows the standard shell progress/confirmation UI.
+  /// </summary>
+  public static Task ShellDeleteAsync(
+      IReadOnlyList<string> paths,
+      IntPtr hwndOwner = default,
+      bool useDarkMode = false,
+      bool permanent = false) {
+    var tcs = new TaskCompletionSource();
+
+    var thread = new System.Threading.Thread(() => {
+      IFileOperation? fileOp = null;
+      uint cookie = 0;
+      var sink = new DeleteSink();
+      try {
+        int hr = CoCreateInstance(CLSID_FileOperation, IntPtr.Zero, 1,
+            IID_IFileOperation, out object opObj);
+        Marshal.ThrowExceptionForHR(hr);
+        fileOp = (IFileOperation)opObj;
+
+        if (hwndOwner != IntPtr.Zero)
+          fileOp.SetOwnerWindow(hwndOwner);
+
+        fileOp.SetOperationFlags(permanent
+            ? 0u
+            : FOF_ALLOWUNDO | FOFX_ADDUNDORECORD);
+        fileOp.Advise(sink, out cookie);
+
+        int itemsQueued = 0;
+        foreach (var path in paths) {
+          // Skip items that no longer exist — they may have been removed by a
+          // file-system watcher or a previous operation before we got here.
+          if (!System.IO.File.Exists(path) && !System.IO.Directory.Exists(path))
+            continue;
+          try {
+            SHCreateItemFromParsingNameOp(path, IntPtr.Zero, IID_IShellItemOp, out IShellItemOp srcItem);
+            fileOp.DeleteItem(srcItem, null);
+            itemsQueued++;
+          } catch {
+            // Path became unavailable between the existence check and binding —
+            // skip it silently so IFileOperation doesn't surface a "not found" dialog.
+          }
+        }
+
+        if (itemsQueued == 0) {
+          tcs.SetResult();
+          return;
+        }
+
+        try {
+          SetPreferredAppMode(useDarkMode ? 2 : 3);
+          FlushMenuThemes();
+        } catch { }
+
+        try {
+          hr = fileOp.PerformOperations();
+          Marshal.ThrowExceptionForHR(hr);
+        } finally {
+          try { SetPreferredAppMode(1); FlushMenuThemes(); } catch { }
+        }
+
+        tcs.SetResult();
+      } catch (Exception ex) {
+        tcs.SetException(ex);
+      } finally {
+        if (fileOp is not null && cookie != 0)
+          fileOp.Unadvise(cookie);
+      }
+    });
+
+    thread.SetApartmentState(System.Threading.ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+    return tcs.Task;
+  }
+
+  private sealed class DeleteSink : IFileOperationProgressSink {
+    public void StartOperations() { }
+    public void FinishOperations(int hrResult) { }
+    public void PreRenameItem(uint dwFlags, IShellItemOp psiItem, string pszNewName) { }
+    public void PostRenameItem(uint dwFlags, IShellItemOp psiItem, string pszNewName, int hrRename, IShellItemOp psiNewlyCreated) { }
+    public void PreMoveItem(uint dwFlags, IShellItemOp psiItem, IShellItemOp psiDestinationFolder, string pszNewName) { }
+    public void PostMoveItem(uint dwFlags, IShellItemOp psiItem, IShellItemOp psiDestinationFolder, string pszNewName, int hrMove, IShellItemOp psiNewlyCreated) { }
+    public void PreCopyItem(uint dwFlags, IShellItemOp psiItem, IShellItemOp psiDestinationFolder, string pszNewName) { }
+    public void PostCopyItem(uint dwFlags, IShellItemOp psiItem, IShellItemOp psiDestinationFolder, string pszNewName, int hrCopy, IShellItemOp psiNewlyCreated) { }
+    public void PreDeleteItem(uint dwFlags, IShellItemOp psiItem) { }
+    public void PostDeleteItem(uint dwFlags, IShellItemOp psiItem, int hrDelete, IShellItemOp psiNewlyCreated) { }
+    public void PreNewItem(uint dwFlags, IShellItemOp psiDestinationFolder, string pszNewName) { }
+    public void PostNewItem(uint dwFlags, IShellItemOp psiDestinationFolder, string pszNewName, string pszTemplateName, uint dwFileAttributes, int hrNew, IShellItemOp psiNewItem) { }
+    public void UpdateProgress(uint iWorkTotal, uint iWorkSoFar) { }
+    public void ResetTimer() { }
+    public void PauseTimer() { }
+    public void ResumeTimer() { }
+  }
+
+  // ── Shell Properties dialog ───────────────────────────────────────────────
+
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  private static extern bool ShellExecuteExW(ref SHELLEXECUTEINFOW lpExecInfo);
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct SHELLEXECUTEINFOW {
+    public int    cbSize;
+    public uint   fMask;
+    public IntPtr hwnd;
+    [MarshalAs(UnmanagedType.LPWStr)] public string lpVerb;
+    [MarshalAs(UnmanagedType.LPWStr)] public string lpFile;
+    [MarshalAs(UnmanagedType.LPWStr)] public string? lpParameters;
+    [MarshalAs(UnmanagedType.LPWStr)] public string? lpDirectory;
+    public int    nShow;
+    public IntPtr hInstApp;
+    public IntPtr lpIDList;
+    [MarshalAs(UnmanagedType.LPWStr)] public string? lpClass;
+    public IntPtr hkeyClass;
+    public uint   dwHotKey;
+    public IntPtr hIconOrMonitor;
+    public IntPtr hProcess;
+  }
+
+  /// <summary>Shows the Windows shell Properties dialog for <paramref name="path"/>.</summary>
+  public static void ShowShellProperties(string path, IntPtr hwnd = default) {
+    var sei = new SHELLEXECUTEINFOW {
+      cbSize = Marshal.SizeOf<SHELLEXECUTEINFOW>(),
+      fMask  = 0x0000000C, // SEE_MASK_INVOKEIDLIST
+      hwnd   = hwnd,
+      lpVerb = "properties",
+      lpFile = path,
+      nShow  = 5, // SW_SHOW
+    };
+    ShellExecuteExW(ref sei);
   }
 }

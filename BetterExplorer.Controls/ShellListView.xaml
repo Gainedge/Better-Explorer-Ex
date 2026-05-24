@@ -550,6 +550,7 @@
       <ListView x:Name="ShellView"
                       SelectionMode="Extended"
                       DoubleTapped="ShellView_DoubleTapped"
+                      RightTapped="OnShellViewRightTapped"
                       AllowDrop="True"
                       DragOver="OnShellViewDragOver"
                       DragLeave="OnShellViewDragLeave"

@@ -76,6 +76,26 @@ public sealed partial class ShellListView : UserControl {
   /// <summary>Raised whenever the current directory changes.</summary>
   public event EventHandler<string>? PathChanged;
 
+  /// <summary>Raised whenever the list-view selection changes.</summary>
+  public event EventHandler? SelectionChanged;
+
+  /// <summary>Raised whenever the internal clipboard content changes (after copy/cut/paste).</summary>
+  public event EventHandler? ClipboardChanged;
+
+  /// <summary>True when at least one item is selected.</summary>
+  public bool HasSelection => ShellView.SelectedItems.Count > 0;
+
+  /// <summary>True when exactly one item is selected.</summary>
+  public bool SelectionIsSingle => ShellView.SelectedItems.Count == 1;
+
+  /// <summary>True when more than one item is selected.</summary>
+  public bool SelectionIsMulti => ShellView.SelectedItems.Count > 1;
+
+  /// <summary>True when exactly one folder is selected.</summary>
+  public bool SelectionIsSingleFolder =>
+      ShellView.SelectedItems.Count == 1 &&
+      ShellView.SelectedItems[0] is ShellItem { IsFolder: true };
+
   /// <summary>Raised whenever sort column or direction changes (column-header tap or toolbar).</summary>
   public event EventHandler? SortChanged;
 
@@ -119,6 +139,12 @@ public sealed partial class ShellListView : UserControl {
   private FileSystemWatcher? _fsWatcher;
   // Shell-namespace watcher for virtual folders (::{GUID}) — e.g. "This PC", "Network".
   private ShellChangeWatcher? _shellWatcher;
+  // When set, we are waiting for a newly created item in this folder to appear so we can auto-rename it.
+  private string? _renameOnNewItemFolder;
+  private HashSet<string>? _renameOnNewItemSnapshot;
+  // Suppresses the name-expansion popup while we are waiting for a new item's
+  // container to be rendered before starting rename.
+  private bool _suppressNameExpansion;
   // Debounce: shell notifications arrive in bursts (e.g. USB enumeration fires multiple
   // events); collapse them into a single Refresh() after a quiet period.
   private DispatcherTimer? _shellRefreshDebounce;
@@ -173,6 +199,9 @@ public sealed partial class ShellListView : UserControl {
   // ── Rename popup (created in code — Popup children lose x:Name in WinUI 3) ──
   private readonly Microsoft.UI.Xaml.Controls.Primitives.Popup _renamePopup  = new();
   private readonly TextBox _renameTextBox = new();
+
+  // Stored so that AddHandler/RemoveHandler use the same delegate instance.
+  private KeyEventHandler? _keyDownHandler;
 
   private string _sortColumn = "Name";
   private bool _sortAscending = true;
@@ -245,9 +274,10 @@ public sealed partial class ShellListView : UserControl {
 
     // Register on the window-root element so Ctrl+C/X/V are caught
     // regardless of which control has focus (address bar, tree, buttons, etc.).
-    if (XamlRoot?.Content is UIElement root)
-      root.AddHandler(KeyDownEvent,
-          new KeyEventHandler(OnShellViewKeyDown), handledEventsToo: true);
+    if (XamlRoot?.Content is UIElement root) {
+      _keyDownHandler ??= new KeyEventHandler(OnShellViewKeyDown);
+      root.AddHandler(KeyDownEvent, _keyDownHandler, handledEventsToo: true);
+    }
 
     // Reposition the name-expansion popup whenever the list area is resized
     // (e.g. window resize, pane splitter drag) so it tracks the selected item.
@@ -257,9 +287,8 @@ public sealed partial class ShellListView : UserControl {
   private void ShellListView_Unloaded(object sender, RoutedEventArgs e) {
     StopFolderWatcher();
 
-    if (XamlRoot?.Content is UIElement root)
-      root.RemoveHandler(KeyDownEvent,
-          new KeyEventHandler(OnShellViewKeyDown));
+    if (XamlRoot?.Content is UIElement root && _keyDownHandler is not null)
+      root.RemoveHandler(KeyDownEvent, _keyDownHandler);
 
     DragSelectGrid.SizeChanged -= OnDragSelectGridSizeChanged;
   }
@@ -1122,9 +1151,10 @@ public sealed partial class ShellListView : UserControl {
     }
 
     UpdateNameExpansion();
+    SelectionChanged?.Invoke(this, EventArgs.Empty);
   }
 
-  // How many px of the popup card sit inside the item's own bounds (label row height
+  // How many px of the popup card sit inside the item's own bounds
   // = 47.5px + cpPad 4px = 51.5px total from popup top to item bottom).
   private const double NameExpansionInBoundsHeight = 47;
 
@@ -1147,6 +1177,7 @@ public sealed partial class ShellListView : UserControl {
   /// The popup is styled to look like the bottom portion of the selection border.
   /// </summary>
   private void UpdateNameExpansion() {
+    if (_suppressNameExpansion) return;
     if (!IsIconLabelExpandMode(ViewMode)) {
       CollapseAllNameExpansions();
       return;
@@ -1537,6 +1568,52 @@ public sealed partial class ShellListView : UserControl {
         });
       } catch { }
     }
+  }
+
+  // ── Context menu (right-tap) ──────────────────────────────────────────────
+
+  private void OnShellViewRightTapped(object sender, RightTappedRoutedEventArgs e) {
+    // Walk up to find the tapped ListViewItem, if any.
+    var dep = e.OriginalSource as DependencyObject;
+    while (dep is not null and not ListViewItem)
+      dep = VisualTreeHelper.GetParent(dep);
+
+    var hwnd  = GetOwnerHwnd();
+    var point = e.GetPosition(DragSelectGrid);
+
+    if (dep is ListViewItem { Content: ShellItem tappedItem }) {
+      // ── Item context menu ─────────────────────────────────────────────
+      if (!ShellView.SelectedItems.Contains(tappedItem)) {
+        ShellView.SelectedItems.Clear();
+        ShellView.SelectedItems.Add(tappedItem);
+      }
+
+      var selected = ShellView.SelectedItems.OfType<ShellItem>().ToList();
+      if (selected.Count > 0) {
+        var paths = selected.Select(i => i.FullPath).ToList();
+        _ = ShellContextMenuFlyout.ShowAsync(
+            paths,
+            CurrentPath,
+            hwnd,
+            point,
+            DragSelectGrid,
+            this);
+      }
+    } else {
+      // ── Background (empty-space) context menu ─────────────────────────
+      ShellView.SelectedItems.Clear();
+
+      if (!string.IsNullOrEmpty(CurrentPath)) {
+        _ = ShellContextMenuFlyout.ShowBackgroundAsync(
+            CurrentPath,
+            hwnd,
+            point,
+            DragSelectGrid,
+            this);
+      }
+    }
+
+    e.Handled = true;
   }
 
   // ── Rubber-band drag selection ────────────────────────────────────────────
@@ -2648,9 +2725,158 @@ public sealed partial class ShellListView : UserControl {
   private ShellItem? _renamingItem;
   private bool _renameActive;  // true while rename popup is open; guards against LostFocus re-entrance
 
+  /// <summary>
+  /// Queries the shell background menu for the current folder, extracts the "New" submenu,
+  /// builds a <see cref="MenuFlyout"/> from its entries, and shows it attached to
+  /// <paramref name="anchor"/>. Each item invokes the shell command and starts auto-rename.
+  /// </summary>
+  public async Task ShowNewMenuFlyoutAsync(Button anchor) {
+    if (string.IsNullOrEmpty(CurrentPath)) return;
+
+    var hwnd = GetOwnerHwnd();
+    ShellContextMenuSession? session = null;
+    try {
+      session = await ShellContextMenuService.QueryBackgroundAsync(CurrentPath, hwnd);
+    } catch (Exception ex) {
+      System.Diagnostics.Debug.WriteLine($"[NewMenu] QueryBackgroundAsync failed: {ex}");
+      return;
+    }
+    if (session is null) return;
+
+    // Find the "New" top-level submenu.
+    var newEntry = session.Items.FirstOrDefault(i =>
+        string.Equals(i.Label, "New", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(i.Verb,  "NewFolder", StringComparison.OrdinalIgnoreCase));
+    if (newEntry?.SubItems is not { Count: > 0 }) return;
+
+    var flyout = new MenuFlyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom };
+
+    foreach (var child in newEntry.SubItems) {
+      if (child.IsSeparator) {
+        flyout.Items.Add(new MenuFlyoutSeparator());
+        continue;
+      }
+      if (string.IsNullOrWhiteSpace(child.Label)) continue;
+
+      var mfi = new MenuFlyoutItem { Text = child.Label };
+      // Attach icon from shell bitmap pixels if available.
+      if (child.IconPixels is { Length: > 0 } px && child.IconW > 0 && child.IconH > 0) {
+        try {
+          var wb = NativeShell.PixelsToBitmapSync(px, child.IconW, child.IconH);
+          if (wb is not null)
+            mfi.Icon = new ImageIcon { Source = wb, Width = 16, Height = 16 };
+        } catch { }
+      }
+
+      var capturedId  = child.Id;
+      var capturedSes = session;
+      var capturedDir = CurrentPath;
+      mfi.Click += (_, _) => {
+        BeginRenameOnNewItem(capturedDir);
+        _ = Task.Run(async () => {
+          try { await (capturedSes?.InvokeCommandAsync(capturedId, hwnd, capturedDir) ?? Task.CompletedTask); }
+          catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[NewMenu] InvokeCommand failed: {ex}"); }
+        });
+      };
+      flyout.Items.Add(mfi);
+    }
+
+    flyout.Closed += (_, _) => { try { session?.Dispose(); } catch { } };
+    flyout.ShowAt(anchor);
+  }
 
   /// <summary>
-  /// Starts an inline rename for the single selected item (if any).
+  /// Call this immediately before invoking a "New" shell command for <paramref name="folder"/>.
+  /// Snapshots the current items in that folder and begins polling for the first new item
+  /// to appear, then auto-starts rename on it — exactly like real Explorer.
+  /// </summary>
+  public void BeginRenameOnNewItem(string folder) {
+    if (string.IsNullOrEmpty(folder)) return;
+    _renameOnNewItemFolder   = folder;
+    _renameOnNewItemSnapshot = Items
+        .Select(i => i.FullPath)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    PollForNewItem();
+  }
+
+  private async void PollForNewItem() {
+    var expectedFolder = _renameOnNewItemFolder;
+    var snapshot       = _renameOnNewItemSnapshot;
+    if (expectedFolder is null || snapshot is null) return;
+
+    // Poll at 100 ms intervals for up to 5 seconds.
+    for (int i = 0; i < 50; i++) {
+      await Task.Delay(100);
+
+      // Abort if user navigated away or a new poll was started.
+      if (!string.Equals(_renameOnNewItemFolder, expectedFolder, StringComparison.OrdinalIgnoreCase))
+        return;
+
+      // Look for an item in the current list that was NOT in the snapshot.
+      ShellItem? newItem = Items.FirstOrDefault(it =>
+          !snapshot.Contains(it.FullPath) &&
+          string.Equals(Path.GetDirectoryName(it.FullPath), expectedFolder,
+              StringComparison.OrdinalIgnoreCase));
+
+      if (newItem is not null) {
+        _renameOnNewItemFolder   = null;
+        _renameOnNewItemSnapshot = null;
+        SelectItemAndBeginRename(newItem);
+        return;
+      }
+    }
+
+    // Timed out — give up silently.
+    _renameOnNewItemFolder   = null;
+    _renameOnNewItemSnapshot = null;
+  }
+
+  /// <summary>
+  /// Selects <paramref name="item"/> and starts inline rename on it.
+  /// Waits until the ListView container is fully realized before calling
+  /// <see cref="BeginRename"/> so the rename box doesn't flash before the item renders.
+  /// </summary>
+  private async void SelectItemAndBeginRename(ShellItem item) {
+    // Block the name-expansion popup until the item is fully rendered and rename starts.
+    _suppressNameExpansion = true;
+    CollapseAllNameExpansions();
+    ShellView.SelectedItems.Clear();
+    ShellView.SelectedItems.Add(item);
+    ShellView.ScrollIntoView(item);
+
+    // Poll until ContainerFromItem returns a non-null, fully laid-out container.
+    // Each iteration yields one UI frame via a Low-priority enqueue, giving the
+    // ListView virtualisation panel time to create and measure the container.
+    for (int attempt = 0; attempt < 40; attempt++) {
+      // Yield one UI frame at Low priority so layout/render can run.
+      var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+          () => tcs.TrySetResult());
+      await tcs.Task;
+
+      var container = ShellView.ContainerFromItem(item) as ListViewItem;
+      if (container is null) continue;
+
+      // Ensure layout has been calculated (ActualHeight > 0 means a measure pass ran).
+      if (container.ActualHeight <= 0) {
+        container.UpdateLayout();
+        if (container.ActualHeight <= 0) continue;
+      }
+
+      // Container is ready — wait one more tick for the render pass to paint it,
+      // then start the rename so the box doesn't appear before the item is visible.
+      await Task.Delay(800);
+      _suppressNameExpansion = false;
+      BeginRename();
+      return;
+    }
+
+    // Fallback: give up waiting and just start rename anyway.
+    _suppressNameExpansion = false;
+    BeginRename();
+  }
+
+  /// <summary>
   /// Called by F2 key handler and can also be called from a context menu.
   /// </summary>
   public void BeginRename() {
@@ -2671,49 +2897,53 @@ public sealed partial class ShellListView : UserControl {
     _renamingItem = item;
     _renameActive = true;
 
-    // ── Capture geometry BEFORE hiding the label ──────────────────────────────
     // Setting IsLabelHidden collapses the Canvas/TextBlock which invalidates
     // TransformToVisual, so measure everything while it is still visible.
-    nameBlock.UpdateLayout();
     var nbTransform = nameBlock.TransformToVisual(DragSelectGrid);
     var nbPos = nbTransform.TransformPoint(new Windows.Foundation.Point(0, 0));
 
-    var ctTransform = container.TransformToVisual(DragSelectGrid);
-    var ctPos = ctTransform.TransformPoint(new Windows.Foundation.Point(0, 0));
+    // Derive the container top from the TextBlock position.
+    // The name TextBlock is VerticalAlignment="Center" inside the row, so:
+    //   containerTop = nbPos.Y - (container.ActualHeight - nameBlock.ActualHeight) / 2
+    // This avoids trusting container.TransformToVisual which can lag behind the
+    // panel's scroll position for newly inserted items, and avoids nameBlock.TransformToVisual(container)
+    // which would include ContentPresenter internal offsets that are not purely centering.
+    double containerTop = nbPos.Y - Math.Max(0, (container.ActualHeight - nameBlock.ActualHeight) / 2);
+    var ctPos = new Windows.Foundation.Point(
+        container.TransformToVisual(DragSelectGrid).TransformPoint(new Windows.Foundation.Point(0, 0)).X,
+        containerTop);
 
     double tbLeft, tbTop, tbWidth, tbHeight;
 
     if (IsIconLabelExpandMode(_currentMode)) {
       // ── Icon modes (ExtraLarge / Large / Medium / Small) ────────────────────
-      // Template: icon row + label Canvas (Width=itemWidth, Height=57, Canvas.Top=4 on TextBlock).
-      double canvasW = _currentMode switch {
-        ShellViewMode.ExtraLargeIcons => 276.0,
-        ShellViewMode.LargeIcons      => 148.0,
-        ShellViewMode.MediumIcons     => 116.0,
-        _                             =>  80.0,
-      };
-
-      if (NameExpansionPopup.IsOpen && _expandedItem == item) {
-        // Expansion popup is open — overlay the TextBox exactly over the card
-        // so the selection border is preserved as a natural frame.
-        tbLeft   = NameExpansionPopup.HorizontalOffset;
-        tbTop    = NameExpansionPopup.VerticalOffset;
-        tbWidth  = NameExpansionCard.Width;
-        tbHeight = Math.Max(NameExpansionCard.DesiredSize.Height, NameExpansionInBoundsHeight);
-      } else {
-        // No expansion popup — position over the label Canvas row.
-        tbLeft   = nbPos.X;
-        tbTop    = nbPos.Y - 4;   // Canvas.Top=4 shifts TextBlock down inside canvas
-        tbWidth  = canvasW;
-        tbHeight = 57.0;
+      // Always go through the expansion popup so the TextBox gets reliable geometry.
+      // For auto-rename the popup was suppressed up to this point, so open it now.
+      if (!NameExpansionPopup.IsOpen || _expandedItem != item) {
+        _suppressNameExpansion = false;
+        UpdateNameExpansion();
       }
+
+      // The popup was just opened (or was already open). Force a synchronous arrange
+      // pass on the card so ActualHeight reflects the true rendered size, not just
+      // the pre-arrange DesiredSize from the explicit Measure() call in UpdateNameExpansion.
+      NameExpansionCard.UpdateLayout();
+
+      // Overlay the TextBox exactly over the card using its now-accurate ActualHeight.
+      tbLeft   = NameExpansionPopup.HorizontalOffset;
+      tbTop    = NameExpansionPopup.VerticalOffset;
+      tbWidth  = NameExpansionCard.Width;
+      tbHeight = Math.Max(NameExpansionCard.ActualHeight, NameExpansionInBoundsHeight);
     } else {
       // ── Details / List / Tiles / Content ───────────────────────────────────
       tbWidth  = ComputeRenameTextBoxWidth(nameBlock);
-      tbHeight = ComputeRenameTextBoxHeight(container);
-      // Align left edge to name TextBlock; vertically center within the row.
+      tbHeight = ComputeRenameTextBoxHeight(container, nameBlock);
+      // Align left edge to the name TextBlock.
       tbLeft = nbPos.X - 4;
-      tbTop  = ctPos.Y + Math.Max(0, (container.ActualHeight - tbHeight) / 2);
+      // Top = container top + 1 px so the box sits inside the row borders on all sides.
+      // ctPos.Y is the container's painted top in DragSelectGrid coords; since
+      // tbHeight = container.ActualHeight - 2 the bottom edge lands at ctPos.Y + container.ActualHeight - 1.
+      tbTop  = ctPos.Y + 1;
     }
 
     // Hide the original label now that we have all measurements.
@@ -2852,15 +3082,21 @@ public sealed partial class ShellListView : UserControl {
 
   /// <summary>
   /// Returns the height for the rename TextBox.
-  /// For list-style modes the textbox fills the row (minus 1 px margin each side).
-  /// For icon modes and Tiles it is kept compact so it stays inside the label canvas.
+  /// By the time this is called the container is fully laid out by the panel,
+  /// so container.ActualHeight is the authoritative row height.
+  /// We subtract a small margin so the border stays inside the row.
   /// </summary>
-  private double ComputeRenameTextBoxHeight(ListViewItem container) {
-    return _currentMode switch {
-      ShellViewMode.Details or ShellViewMode.List or ShellViewMode.Content
-          => Math.Max(container.ActualHeight - 2, 20),
-      _   => 24   // icon modes and Tiles: compact single-line input
-    };
+  private double ComputeRenameTextBoxHeight(ListViewItem container, TextBlock nameBlock) {
+    // container.ActualHeight is reliable here — SelectItemAndBeginRename already
+    // waited for ActualHeight > 0 before calling BeginRename, and we never call
+    // UpdateLayout() inside BeginRename so the panel's measured value is intact.
+    double rowHeight = container.ActualHeight;
+    if (rowHeight > 0)
+      return Math.Max(rowHeight - 2, 20);   // 1 px top + 1 px bottom margin
+
+    // Fallback (F2 on a container that somehow has no height yet): use text height.
+    double labelHeight = nameBlock.ActualHeight;
+    return Math.Max(labelHeight > 0 ? labelHeight + 4 : 24, 20);
   }
 
   private void RenameTextBox_KeyDown(object sender, KeyRoutedEventArgs e) {
@@ -2933,6 +3169,15 @@ public sealed partial class ShellListView : UserControl {
       return;
     }
 
+    if (e.Key == Windows.System.VirtualKey.Delete) {
+      var shift = Microsoft.UI.Input.InputKeyboardSource
+          .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift);
+      bool shiftDown = shift.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+      _ = DeleteSelectedAsync(permanent: shiftDown);
+      e.Handled = true;
+      return;
+    }
+
     var ctrl = Microsoft.UI.Input.InputKeyboardSource
         .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control);
     bool ctrlDown = ctrl.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
@@ -2949,11 +3194,23 @@ public sealed partial class ShellListView : UserControl {
         e.Handled = true;
         break;
       case Windows.System.VirtualKey.V:
-        _ = PasteFromClipboardAsync();
+        _ = PasteFromClipboardAsyncImpl();
         e.Handled = true;
         break;
     }
   }
+
+  /// <summary>True when this view has content on the clipboard (from Cut or Copy).</summary>
+  public bool HasClipboardContent => _clipboardPaths is { Count: > 0 };
+
+  /// <summary>Copies the selected items to the clipboard.</summary>
+  public Task CopySelectedToClipboardAsync() => CopySelectedToClipboardAsync(cut: false);
+
+  /// <summary>Cuts the selected items to the clipboard.</summary>
+  public Task CutSelectedToClipboardAsync() => CopySelectedToClipboardAsync(cut: true);
+
+  /// <summary>Pastes clipboard content into the current folder.</summary>
+  public Task PasteFromClipboardAsync() => PasteFromClipboardAsyncImpl();
 
   private async Task CopySelectedToClipboardAsync(bool cut) {
     var selected = ShellView.SelectedItems.OfType<ShellItem>().ToList();
@@ -2996,9 +3253,10 @@ public sealed partial class ShellListView : UserControl {
     } else {
       _clipboardCutPaths = null;
     }
+    ClipboardChanged?.Invoke(this, EventArgs.Empty);
   }
 
-  private async Task PasteFromClipboardAsync() {
+  private async Task PasteFromClipboardAsyncImpl() {
     if (string.IsNullOrEmpty(CurrentPath))
       return;
 
@@ -3057,6 +3315,7 @@ public sealed partial class ShellListView : UserControl {
     ClearCutGhosts();
     _clipboardPaths = null;
     _clipboardIsCut = false;
+    ClipboardChanged?.Invoke(this, EventArgs.Empty);
   }
 
   private IntPtr GetOwnerHwnd() {
@@ -3073,6 +3332,56 @@ public sealed partial class ShellListView : UserControl {
       return ActualTheme == ElementTheme.Dark;
     } catch { }
     return false;
+  }
+
+  // ── Public context-menu actions ──────────────────────────────────────────
+
+  /// <summary>
+  /// Opens the selected items via ShellExecute (same as double-tap).
+  /// </summary>
+  public void OpenSelected() {
+    foreach (var item in ShellView.SelectedItems.OfType<ShellItem>()) {
+      try {
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(item.FullPath) {
+          UseShellExecute = true
+        });
+      } catch { }
+    }
+  }
+
+  /// <summary>
+  /// Moves the selected items to the Recycle Bin using IFileOperation with shell UI.
+  /// </summary>
+  public async Task DeleteSelectedAsync(bool permanent = false) {
+    var selected = ShellView.SelectedItems.OfType<ShellItem>().ToList();
+    if (selected.Count == 0)
+      return;
+
+    var paths = selected.Select(i => i.FullPath).ToList();
+    var hwnd  = GetOwnerHwnd();
+    await NativeShell.ShellDeleteAsync(paths, hwnd, IsDarkMode(), permanent);
+
+    // Remove items from view that were actually deleted.
+    foreach (var path in paths) {
+      if (!System.IO.File.Exists(path) && !System.IO.Directory.Exists(path)) {
+        var item = Items.FirstOrDefault(i =>
+            string.Equals(i.FullPath, path, StringComparison.OrdinalIgnoreCase));
+        if (item is not null)
+          Items.Remove(item);
+      }
+    }
+  }
+
+  /// <summary>
+  /// Shows the shell Properties dialog for the selected items.
+  /// </summary>
+  public void ShowPropertiesForSelected() {
+    var hwnd = GetOwnerHwnd();
+    foreach (var item in ShellView.SelectedItems.OfType<ShellItem>()) {
+      try {
+        NativeShell.ShowShellProperties(item.FullPath, hwnd);
+      } catch { }
+    }
   }
 
   /// <summary>

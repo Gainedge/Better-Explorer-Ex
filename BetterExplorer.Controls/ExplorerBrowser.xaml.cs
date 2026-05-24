@@ -50,6 +50,8 @@ public sealed partial class ExplorerBrowser : UserControl
         FileList.PathChanged  += OnPathChanged;
         FileList.SortChanged  += OnSortChanged;
         FileList.GroupChanged += OnGroupChanged;
+        FileList.SelectionChanged += (_, _) => UpdateToolbarButtonStates();
+        FileList.ClipboardChanged += (_, _) => UpdateToolbarButtonStates();
         FileList.TreeDriveAdded     += (_, root) => NavTreeView.NotifyDriveAdded(root);
         FileList.TreeDriveRemoved   += (_, root) => NavTreeView.NotifyDriveRemoved(root);
         FileList.TreeFolderCreated  += (_, path) => NavTreeView.NotifyFolderCreated(path);
@@ -84,6 +86,7 @@ public sealed partial class ExplorerBrowser : UserControl
         UpdateSortCheckmarks(FileList.SortColumn, FileList.SortAscending);
         UpdateGroupCheckmarks(FileList.GroupColumn);
         PathChanged?.Invoke(this, path);
+        UpdateToolbarButtonStates();
     }
 
     private void OnBreadcrumbPathRequested(object? sender, string path)
@@ -121,6 +124,43 @@ public sealed partial class ExplorerBrowser : UserControl
     private void ForwardButton_Click(object sender, RoutedEventArgs e)    => FileList.GoForward();
     private void UpLevelButton_Click(object sender, RoutedEventArgs e)    => FileList.GoUp();
     private void RefreshButton_Click(object sender, RoutedEventArgs e)    => FileList.Refresh();
+
+    // ── New button ────────────────────────────────────────────────────────────
+
+    private void NewButton_Click(object sender, RoutedEventArgs e) {
+      _ = FileList.ShowNewMenuFlyoutAsync(NewButton);
+    }
+
+    // ── Shell primary toolbar buttons ─────────────────────────────────────────
+
+    private void UpdateToolbarButtonStates() {
+      bool hasSelection  = FileList.HasSelection;
+      bool isSingle      = FileList.SelectionIsSingle;
+      bool isFolder      = FileList.SelectionIsSingleFolder;
+      bool hasClip       = FileList.HasClipboardContent;
+
+      TbOpenButton.IsEnabled       = hasSelection;
+      ToolTipService.SetToolTip(TbOpenButton, isFolder ? "Open folder" : "Open");
+      TbCutButton.IsEnabled        = hasSelection;
+      TbCopyButton.IsEnabled       = hasSelection;
+      TbPasteButton.IsEnabled      = hasClip;
+      TbRenameButton.IsEnabled     = isSingle;
+      TbDeleteButton.IsEnabled     = hasSelection;
+      TbPropertiesButton.IsEnabled = hasSelection;
+    }
+
+    private void TbOpenButton_Click(object sender, RoutedEventArgs e)       => FileList.OpenSelected();
+    private void TbCutButton_Click(object sender, RoutedEventArgs e)        => _ = FileList.CutSelectedToClipboardAsync();
+    private void TbCopyButton_Click(object sender, RoutedEventArgs e)       => _ = FileList.CopySelectedToClipboardAsync();
+    private void TbPasteButton_Click(object sender, RoutedEventArgs e)      => _ = FileList.PasteFromClipboardAsync();
+    private void TbRenameButton_Click(object sender, RoutedEventArgs e)     => FileList.BeginRename();
+    private void TbDeleteButton_Click(object sender, RoutedEventArgs e) {
+      var shift = Microsoft.UI.Input.InputKeyboardSource
+          .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift);
+      bool permanent = shift.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+      _ = FileList.DeleteSelectedAsync(permanent);
+    }
+    private void TbPropertiesButton_Click(object sender, RoutedEventArgs e) => FileList.ShowPropertiesForSelected();
 
     // ── View-mode switcher ────────────────────────────────────────────────────
 

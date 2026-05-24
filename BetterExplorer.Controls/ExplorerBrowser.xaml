@@ -469,133 +469,232 @@
     </Grid>
 
     <!-- ── View toolbar row ───────────────────────────────────────────── -->
-    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right"
-                Margin="5" Padding="4,0" Spacing="4">
+    <Grid Grid.Row="1" Margin="5">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
 
-      <!-- Sort button -->
-      <Button x:Name="SortButton"
-              Style="{StaticResource NavButtonStyle}"
-              VerticalAlignment="Center"
-              ToolTipService.ToolTip="Sort">
-        <FontIcon Glyph="&#xE8CB;" FontSize="14" />
-        <Button.Flyout>
-          <MenuFlyout x:Name="SortFlyout" Placement="Bottom">
-            <MenuFlyoutSubItem Text="Sort by">
-              <RadioMenuFlyoutItem x:Name="SortMenuName" Text="Name"          GroupName="SortColumn"    Tag="Name" Click="SortColumnMenuItem_Click" />
-              <RadioMenuFlyoutItem x:Name="SortMenuDate" Text="Date modified"  GroupName="SortColumn"    Tag="Date" Click="SortColumnMenuItem_Click" />
-              <RadioMenuFlyoutItem x:Name="SortMenuType" Text="Type"           GroupName="SortColumn"    Tag="Type" Click="SortColumnMenuItem_Click" />
-              <RadioMenuFlyoutItem x:Name="SortMenuSize" Text="Size"           GroupName="SortColumn"    Tag="Size" Click="SortColumnMenuItem_Click" />
-            </MenuFlyoutSubItem>
-            <MenuFlyoutSubItem Text="Group by">
-              <RadioMenuFlyoutItem x:Name="GroupMenuNone" Text="None"          GroupName="GroupColumn"   Tag=""     Click="GroupColumnMenuItem_Click" />
-              <RadioMenuFlyoutItem x:Name="GroupMenuName" Text="Name"          GroupName="GroupColumn"   Tag="Name" Click="GroupColumnMenuItem_Click" />
-              <RadioMenuFlyoutItem x:Name="GroupMenuDate" Text="Date modified"  GroupName="GroupColumn"   Tag="Date" Click="GroupColumnMenuItem_Click" />
-              <RadioMenuFlyoutItem x:Name="GroupMenuType" Text="Type"           GroupName="GroupColumn"   Tag="Type" Click="GroupColumnMenuItem_Click" />
-              <RadioMenuFlyoutItem x:Name="GroupMenuSize" Text="Size"           GroupName="GroupColumn"   Tag="Size" Click="GroupColumnMenuItem_Click" />
-            </MenuFlyoutSubItem>
-            <MenuFlyoutSeparator />
-            <RadioMenuFlyoutItem x:Name="SortMenuAscending"  Text="Ascending ▲"  GroupName="SortDirection" Tag="Ascending"  Click="SortDirectionMenuItem_Click" />
-            <RadioMenuFlyoutItem x:Name="SortMenuDescending" Text="Descending ▼" GroupName="SortDirection" Tag="Descending" Click="SortDirectionMenuItem_Click" />
-          </MenuFlyout>
-        </Button.Flyout>
-      </Button>
+      <!-- New button + primary shell command strip — left side -->
+      <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
 
-      <!-- View mode button -->
-      <SplitButton x:Name="ViewButton"
-                   Style="{StaticResource NavSplitButtonStyle}"
-                   VerticalAlignment="Center"
-                   Click="ViewButton_Click"
-                   ToolTipService.ToolTip="Change view">
-        <FontIcon Glyph="&#xF462;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="14" />
-        <SplitButton.Flyout>
-          <Flyout Placement="Bottom">
-            <Flyout.FlyoutPresenterStyle>
-              <Style TargetType="FlyoutPresenter">
-                <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
-                <Setter Property="ScrollViewer.HorizontalScrollMode"          Value="Disabled" />
-                <Setter Property="MinWidth"                                    Value="510" />
-                <Setter Property="MaxWidth"                                    Value="510" />
-                <Setter Property="Padding"                                     Value="0" />
-                <Setter Property="CornerRadius"                                Value="8" />
-              </Style>
-            </Flyout.FlyoutPresenterStyle>
-            <StackPanel Spacing="8" Margin="8" MinWidth="344">
-              <TextBlock FontWeight="SemiBold" Text="Layout" />
-              <!-- Row 1: icon views -->
-              <StackPanel Orientation="Horizontal" Spacing="4">
-                <RadioButton x:Name="ViewMenuExtraLargeIcons" Tag="ExtraLargeIcons"
-                             GroupName="ViewMode" Click="ViewMenuItem_Click"
-                             Style="{StaticResource ViewModeRadioButtonStyle}">
-                  <StackPanel Spacing="4">
-                    <FontIcon Glyph="&#xEDC2;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
-                    <TextBlock Text="Extra large" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
-                  </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="ViewMenuLargeIcons" Tag="LargeIcons"
-                             GroupName="ViewMode" Click="ViewMenuItem_Click"
-                             Style="{StaticResource ViewModeRadioButtonStyle}">
-                  <StackPanel Spacing="4">
-                    <FontIcon Glyph="&#xEA0C;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
-                    <TextBlock Text="Large" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
-                  </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="ViewMenuMediumIcons" Tag="MediumIcons"
-                             GroupName="ViewMode" Click="ViewMenuItem_Click"
-                             Style="{StaticResource ViewModeRadioButtonStyle}">
-                  <StackPanel Spacing="4">
-                    <FontIcon Glyph="&#xF462;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
-                    <TextBlock Text="Medium" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
-                  </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="ViewMenuSmallIcons" Tag="SmallIcons"
-                             GroupName="ViewMode" Click="ViewMenuItem_Click"
-                             Style="{StaticResource ViewModeRadioButtonStyle}">
-                  <StackPanel Spacing="4">
-                    <FontIcon Glyph="&#xF376;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
-                    <TextBlock Text="Small" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
-                  </StackPanel>
-                </RadioButton>
+        <Button x:Name="NewButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                Width="75"
+                ToolTipService.ToolTip="New"
+                Click="NewButton_Click">
+          <StackPanel Orientation="Horizontal" Spacing="4">
+            <FontIcon Glyph="&#xE710;" FontSize="14" />
+            <TextBlock Text="New" VerticalAlignment="Center" FontSize="12" />
+          </StackPanel>
+        </Button>
+
+        <!-- Vertical separator -->
+        <Rectangle Width="1" Height="20" Fill="{ThemeResource DividerStrokeColorDefaultBrush}"
+                   Margin="4,0" VerticalAlignment="Center" />
+
+        <!-- Open -->
+        <Button x:Name="TbOpenButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Open"
+                Click="TbOpenButton_Click">
+          <FontIcon Glyph="&#xE8A7;" FontSize="14" />
+        </Button>
+
+        <!-- Cut -->
+        <Button x:Name="TbCutButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Cut  Ctrl+X"
+                Click="TbCutButton_Click">
+          <FontIcon Glyph="&#xE8C6;" FontSize="14" />
+        </Button>
+
+        <!-- Copy -->
+        <Button x:Name="TbCopyButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Copy  Ctrl+C"
+                Click="TbCopyButton_Click">
+          <FontIcon Glyph="&#xE8C8;" FontSize="14" />
+        </Button>
+
+        <!-- Paste -->
+        <Button x:Name="TbPasteButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Paste  Ctrl+V"
+                Click="TbPasteButton_Click">
+          <FontIcon Glyph="&#xE77F;" FontSize="14" />
+        </Button>
+
+        <!-- Rename -->
+        <Button x:Name="TbRenameButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Rename  F2"
+                Click="TbRenameButton_Click">
+          <FontIcon Glyph="&#xE8AC;" FontSize="14" />
+        </Button>
+
+        <!-- Delete -->
+        <Button x:Name="TbDeleteButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Delete  Del"
+                Click="TbDeleteButton_Click">
+          <FontIcon Glyph="&#xE74D;" FontSize="14" />
+        </Button>
+
+        <!-- Properties -->
+        <Button x:Name="TbPropertiesButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Properties  Alt+Enter"
+                Click="TbPropertiesButton_Click">
+          <FontIcon Glyph="&#xE946;" FontSize="14" />
+        </Button>
+
+      </StackPanel>
+
+      <!-- Sort + View buttons — right side -->
+      <StackPanel Grid.Column="2" Orientation="Horizontal" Padding="4,0" Spacing="4">
+
+        <!-- Sort button -->
+        <Button x:Name="SortButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                ToolTipService.ToolTip="Sort">
+          <FontIcon Glyph="&#xE8CB;" FontSize="14" />
+          <Button.Flyout>
+            <MenuFlyout x:Name="SortFlyout" Placement="Bottom">
+              <MenuFlyoutSubItem Text="Sort by">
+                <RadioMenuFlyoutItem x:Name="SortMenuName" Text="Name"          GroupName="SortColumn"    Tag="Name" Click="SortColumnMenuItem_Click" />
+                <RadioMenuFlyoutItem x:Name="SortMenuDate" Text="Date modified"  GroupName="SortColumn"    Tag="Date" Click="SortColumnMenuItem_Click" />
+                <RadioMenuFlyoutItem x:Name="SortMenuType" Text="Type"           GroupName="SortColumn"    Tag="Type" Click="SortColumnMenuItem_Click" />
+                <RadioMenuFlyoutItem x:Name="SortMenuSize" Text="Size"           GroupName="SortColumn"    Tag="Size" Click="SortColumnMenuItem_Click" />
+              </MenuFlyoutSubItem>
+              <MenuFlyoutSubItem Text="Group by">
+                <RadioMenuFlyoutItem x:Name="GroupMenuNone" Text="None"          GroupName="GroupColumn"   Tag=""     Click="GroupColumnMenuItem_Click" />
+                <RadioMenuFlyoutItem x:Name="GroupMenuName" Text="Name"          GroupName="GroupColumn"   Tag="Name" Click="GroupColumnMenuItem_Click" />
+                <RadioMenuFlyoutItem x:Name="GroupMenuDate" Text="Date modified"  GroupName="GroupColumn"   Tag="Date" Click="GroupColumnMenuItem_Click" />
+                <RadioMenuFlyoutItem x:Name="GroupMenuType" Text="Type"           GroupName="GroupColumn"   Tag="Type" Click="GroupColumnMenuItem_Click" />
+                <RadioMenuFlyoutItem x:Name="GroupMenuSize" Text="Size"           GroupName="GroupColumn"   Tag="Size" Click="GroupColumnMenuItem_Click" />
+              </MenuFlyoutSubItem>
+              <MenuFlyoutSeparator />
+              <RadioMenuFlyoutItem x:Name="SortMenuAscending"  Text="Ascending ▲"  GroupName="SortDirection" Tag="Ascending"  Click="SortDirectionMenuItem_Click" />
+              <RadioMenuFlyoutItem x:Name="SortMenuDescending" Text="Descending ▼" GroupName="SortDirection" Tag="Descending" Click="SortDirectionMenuItem_Click" />
+            </MenuFlyout>
+          </Button.Flyout>
+        </Button>
+
+        <!-- View mode button -->
+        <SplitButton x:Name="ViewButton"
+                     Style="{StaticResource NavSplitButtonStyle}"
+                     VerticalAlignment="Center"
+                     Click="ViewButton_Click"
+                     ToolTipService.ToolTip="Change view">
+          <FontIcon Glyph="&#xF462;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="14" />
+          <SplitButton.Flyout>
+            <Flyout Placement="Bottom">
+              <Flyout.FlyoutPresenterStyle>
+                <Style TargetType="FlyoutPresenter">
+                  <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+                  <Setter Property="ScrollViewer.HorizontalScrollMode"          Value="Disabled" />
+                  <Setter Property="MinWidth"                                    Value="510" />
+                  <Setter Property="MaxWidth"                                    Value="510" />
+                  <Setter Property="Padding"                                     Value="0" />
+                  <Setter Property="CornerRadius"                                Value="8" />
+                </Style>
+              </Flyout.FlyoutPresenterStyle>
+              <StackPanel Spacing="8" Margin="8" MinWidth="344">
+                <TextBlock FontWeight="SemiBold" Text="Layout" />
+                <!-- Row 1: icon views -->
+                <StackPanel Orientation="Horizontal" Spacing="4">
+                  <RadioButton x:Name="ViewMenuExtraLargeIcons" Tag="ExtraLargeIcons"
+                               GroupName="ViewMode" Click="ViewMenuItem_Click"
+                               Style="{StaticResource ViewModeRadioButtonStyle}">
+                    <StackPanel Spacing="4">
+                      <FontIcon Glyph="&#xEDC2;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                      <TextBlock Text="Extra large" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </RadioButton>
+                  <RadioButton x:Name="ViewMenuLargeIcons" Tag="LargeIcons"
+                               GroupName="ViewMode" Click="ViewMenuItem_Click"
+                               Style="{StaticResource ViewModeRadioButtonStyle}">
+                    <StackPanel Spacing="4">
+                      <FontIcon Glyph="&#xEA0C;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                      <TextBlock Text="Large" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </RadioButton>
+                  <RadioButton x:Name="ViewMenuMediumIcons" Tag="MediumIcons"
+                               GroupName="ViewMode" Click="ViewMenuItem_Click"
+                               Style="{StaticResource ViewModeRadioButtonStyle}">
+                    <StackPanel Spacing="4">
+                      <FontIcon Glyph="&#xF462;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                      <TextBlock Text="Medium" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </RadioButton>
+                  <RadioButton x:Name="ViewMenuSmallIcons" Tag="SmallIcons"
+                               GroupName="ViewMode" Click="ViewMenuItem_Click"
+                               Style="{StaticResource ViewModeRadioButtonStyle}">
+                    <StackPanel Spacing="4">
+                      <FontIcon Glyph="&#xF376;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                      <TextBlock Text="Small" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </RadioButton>
+                </StackPanel>
+                <!-- Row 2: list/detail/tile views -->
+                <StackPanel Orientation="Horizontal" Spacing="4">
+                  <RadioButton x:Name="ViewMenuList" Tag="List"
+                               GroupName="ViewMode" Click="ViewMenuItem_Click"
+                               Style="{StaticResource ViewModeRadioButtonStyle}">
+                    <StackPanel Spacing="4">
+                      <FontIcon Glyph="&#xF4EE;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                      <TextBlock Text="List" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </RadioButton>
+                  <RadioButton x:Name="ViewMenuDetails" Tag="Details"
+                               GroupName="ViewMode" Click="ViewMenuItem_Click"
+                               Style="{StaticResource ViewModeRadioButtonStyle}">
+                    <StackPanel Spacing="4">
+                      <FontIcon Glyph="&#xECF8;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                      <TextBlock Text="Details" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </RadioButton>
+                  <RadioButton x:Name="ViewMenuTiles" Tag="Tiles"
+                               GroupName="ViewMode" Click="ViewMenuItem_Click"
+                               Style="{StaticResource ViewModeRadioButtonStyle}">
+                    <StackPanel Spacing="4">
+                      <FontIcon Glyph="&#xE065;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                      <TextBlock Text="Tiles" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </RadioButton>
+                  <RadioButton x:Name="ViewMenuContent" Tag="Content"
+                               GroupName="ViewMode" Click="ViewMenuItem_Click"
+                               Style="{StaticResource ViewModeRadioButtonStyle}">
+                    <StackPanel Spacing="4">
+                      <FontIcon Glyph="&#xF8CB;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
+                      <TextBlock Text="Content" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
+                    </StackPanel>
+                  </RadioButton>
+                </StackPanel>
               </StackPanel>
-              <!-- Row 2: list/detail/tile views -->
-              <StackPanel Orientation="Horizontal" Spacing="4">
-                <RadioButton x:Name="ViewMenuList" Tag="List"
-                             GroupName="ViewMode" Click="ViewMenuItem_Click"
-                             Style="{StaticResource ViewModeRadioButtonStyle}">
-                  <StackPanel Spacing="4">
-                    <FontIcon Glyph="&#xF4EE;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
-                    <TextBlock Text="List" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
-                  </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="ViewMenuDetails" Tag="Details"
-                             GroupName="ViewMode" Click="ViewMenuItem_Click"
-                             Style="{StaticResource ViewModeRadioButtonStyle}">
-                  <StackPanel Spacing="4">
-                    <FontIcon Glyph="&#xECF8;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
-                    <TextBlock Text="Details" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
-                  </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="ViewMenuTiles" Tag="Tiles"
-                             GroupName="ViewMode" Click="ViewMenuItem_Click"
-                             Style="{StaticResource ViewModeRadioButtonStyle}">
-                  <StackPanel Spacing="4">
-                    <FontIcon Glyph="&#xE065;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
-                    <TextBlock Text="Tiles" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
-                  </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="ViewMenuContent" Tag="Content"
-                             GroupName="ViewMode" Click="ViewMenuItem_Click"
-                             Style="{StaticResource ViewModeRadioButtonStyle}">
-                  <StackPanel Spacing="4">
-                    <FontIcon Glyph="&#xF8CB;" FontFamily="{StaticResource FluentSystemIconsFont}" FontSize="28" HorizontalAlignment="Center" />
-                    <TextBlock Text="Content" FontSize="11" HorizontalAlignment="Center" TextWrapping="NoWrap" />
-                  </StackPanel>
-                </RadioButton>
-              </StackPanel>
-            </StackPanel>
-          </Flyout>
-        </SplitButton.Flyout>
-      </SplitButton>
-    </StackPanel>
+            </Flyout>
+          </SplitButton.Flyout>
+        </SplitButton>
+      </StackPanel>
+    </Grid>
 
     <!-- ── Content: tree | gripper | file list ────────────────────────── -->
     <Border Grid.Row="2" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" >
