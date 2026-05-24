@@ -82,6 +82,19 @@ public sealed partial class ShellListView : UserControl {
   /// <summary>Raised whenever the group-by column changes.</summary>
   public event EventHandler? GroupChanged;
 
+  // ── Tree-sync events (forwarded to ShellTreeView by ExplorerBrowser) ─────
+
+  /// <summary>Raised when a new drive root is detected (real FS or shell notification).</summary>
+  public event EventHandler<string>? TreeDriveAdded;
+  /// <summary>Raised when a drive root is removed.</summary>
+  public event EventHandler<string>? TreeDriveRemoved;
+  /// <summary>Raised when a folder is created inside any watched directory.</summary>
+  public event EventHandler<string>? TreeFolderCreated;
+  /// <summary>Raised when a folder is deleted from any watched directory.</summary>
+  public event EventHandler<string>? TreeFolderDeleted;
+  /// <summary>Raised when a folder is renamed. Item1 = old path, Item2 = new path.</summary>
+  public event EventHandler<(string OldPath, string NewPath)>? TreeFolderRenamed;
+
   public string SortColumn    => _sortColumn;
   public bool   SortAscending => _sortAscending;
   /// <summary>Current group-by column key, or empty string when grouping is off.</summary>
@@ -101,6 +114,17 @@ public sealed partial class ShellListView : UserControl {
   // restarting the thumbnail worker does not cancel an ongoing navigation.
   private CancellationTokenSource _navCts = new();
   private const int ThumbConcurrency = 8;
+
+  // ── Filesystem watcher ───────────────────────────────────────────────────
+  private FileSystemWatcher? _fsWatcher;
+  // Shell-namespace watcher for virtual folders (::{GUID}) — e.g. "This PC", "Network".
+  private ShellChangeWatcher? _shellWatcher;
+  // Debounce: shell notifications arrive in bursts (e.g. USB enumeration fires multiple
+  // events); collapse them into a single Refresh() after a quiet period.
+  private DispatcherTimer? _shellRefreshDebounce;
+  // Per-path debounce: rapid Changed events (e.g. file copy in progress) are
+  // coalesced into one update after a 350 ms quiet period.
+  private readonly Dictionary<string, DispatcherTimer> _changeDebounce = new(StringComparer.OrdinalIgnoreCase);
   private const int CloudThumbRetryMax = 16;   // ~40 s total with progressive back-off
   private const int CloudThumbRetryBaseMs = 500;  // delay = min(retry * 500, 4000)
   private const int CloudThumbRetryMaxMs = 4000;
@@ -231,6 +255,8 @@ public sealed partial class ShellListView : UserControl {
   }
 
   private void ShellListView_Unloaded(object sender, RoutedEventArgs e) {
+    StopFolderWatcher();
+
     if (XamlRoot?.Content is UIElement root)
       root.RemoveHandler(KeyDownEvent,
           new KeyEventHandler(OnShellViewKeyDown));
@@ -243,6 +269,231 @@ public sealed partial class ShellListView : UserControl {
     // coordinates — the item may have shifted during a window/pane resize.
     if (NameExpansionPopup.IsOpen)
       UpdateNameExpansion();
+  }
+
+  // ── Navigation API ───────────────────────────────────────────────────────
+
+  // ── Filesystem watcher helpers ───────────────────────────────────────────
+
+  private void StartFolderWatcher(string path) {
+    StopFolderWatcher();
+
+    // Virtual shell-namespace paths (::{GUID}) have no backing directory;
+    // use SHChangeNotifyRegister instead of FileSystemWatcher.
+    if (path.StartsWith("::", StringComparison.Ordinal)) {
+      _shellWatcher = new ShellChangeWatcher(path);
+      _shellWatcher.Changed += OnShellWatcher_Changed;
+      _shellWatcher.Start();
+      return;
+    }
+
+    if (!Directory.Exists(path))
+      return;
+    try {
+      _fsWatcher = new FileSystemWatcher(path) {
+        NotifyFilter = NotifyFilters.FileName
+                     | NotifyFilters.DirectoryName
+                     | NotifyFilters.LastWrite
+                     | NotifyFilters.Size,
+        IncludeSubdirectories = false,
+        EnableRaisingEvents = true
+      };
+      _fsWatcher.Created += OnWatcher_Created;
+      _fsWatcher.Deleted += OnWatcher_Deleted;
+      _fsWatcher.Renamed += OnWatcher_Renamed;
+      _fsWatcher.Changed += OnWatcher_Changed;
+      _fsWatcher.Error   += OnWatcher_Error;
+    } catch { /* network share or permission denied — watch silently fails */ }
+  }
+
+  private void StopFolderWatcher() {
+    // Stop FileSystemWatcher (real FS paths).
+    if (_fsWatcher is not null) {
+      _fsWatcher.EnableRaisingEvents = false;
+      _fsWatcher.Created -= OnWatcher_Created;
+      _fsWatcher.Deleted -= OnWatcher_Deleted;
+      _fsWatcher.Renamed -= OnWatcher_Renamed;
+      _fsWatcher.Changed -= OnWatcher_Changed;
+      _fsWatcher.Error   -= OnWatcher_Error;
+      _fsWatcher.Dispose();
+      _fsWatcher = null;
+    }
+
+    // Stop ShellChangeWatcher (virtual paths).
+    if (_shellWatcher is not null) {
+      _shellWatcher.Changed -= OnShellWatcher_Changed;
+      _shellWatcher.Dispose();
+      _shellWatcher = null;
+    }
+
+    // Cancel the shell-notification debounce timer.
+    if (_shellRefreshDebounce is not null) {
+      _shellRefreshDebounce.Stop();
+      _shellRefreshDebounce = null;
+    }
+
+    // Cancel all FS-path debounce timers.
+    foreach (var t in _changeDebounce.Values)
+      t.Stop();
+    _changeDebounce.Clear();
+  }
+
+  // Each watcher event is raised on a thread-pool thread; marshal everything
+  // back to the UI DispatcherQueue before touching Items.
+
+  // ── Shell-namespace (virtual folder) change handler ──────────────────────
+
+  private void OnShellWatcher_Changed(object? sender, ShellChangeEventArgs e) {
+    // This is called on the STA message-pump thread; dispatch to the UI thread.
+    DispatcherQueue.TryEnqueue(() => {
+      // Raise targeted tree-sync events for drive add/remove.
+      switch (e.EventType) {
+        case ShellChangeType.DriveAdd when e.Path is not null:
+          TreeDriveAdded?.Invoke(this, e.Path);
+          break;
+        case ShellChangeType.DriveRemoved when e.Path is not null:
+          TreeDriveRemoved?.Invoke(this, e.Path);
+          break;
+        case ShellChangeType.MkDir when e.Path is not null:
+          TreeFolderCreated?.Invoke(this, e.Path);
+          break;
+        case ShellChangeType.RmDir when e.Path is not null:
+          TreeFolderDeleted?.Invoke(this, e.Path);
+          break;
+        case ShellChangeType.RenameFolder when e.Path is not null && e.Path2 is not null:
+          TreeFolderRenamed?.Invoke(this, (e.Path, e.Path2));
+          break;
+      }
+      // Debounce: USB enumeration and similar events come in rapid bursts.
+      // Collapse them into a single Refresh() after 500 ms of quiet.
+      if (_shellRefreshDebounce is null) {
+        _shellRefreshDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _shellRefreshDebounce.Tick += (_, _) => {
+          _shellRefreshDebounce?.Stop();
+          _shellRefreshDebounce = null;
+          Refresh();
+        };
+      }
+      _shellRefreshDebounce.Stop();
+      _shellRefreshDebounce.Start();
+    });
+  }
+
+
+  private void OnWatcher_Created(object sender, FileSystemEventArgs e) {
+    DispatcherQueue.TryEnqueue(() => {
+      // Skip if we navigated away since the event was raised.
+      if (!string.Equals(Path.GetDirectoryName(e.FullPath), CurrentPath,
+              StringComparison.OrdinalIgnoreCase))
+        return;
+      // Item may already exist (rapid create+rename pairs can fire twice).
+      if (Items.Any(i => string.Equals(i.FullPath, e.FullPath, StringComparison.OrdinalIgnoreCase)))
+        return;
+      var item = NativeShell.GetSingleItemMetadata(e.FullPath);
+      if (item is null)
+        return;
+      // Insert in sorted position relative to current sort.
+      var merged = Items.ToList();
+      merged.Add(item);
+      merged = SortItems(merged);
+      int idx = merged.IndexOf(item);
+      Items.Insert(idx, item);
+      // Icon will be loaded the next time the container becomes visible; queue
+      // a thumbnail for it now so it isn't blank longer than necessary.
+      // Capture ViewMode on the UI thread before jumping to the thread pool,
+      // since DependencyProperty access requires STA/UI-thread affinity.
+      var viewMode = ViewMode;
+      _ = Task.Run(() => {
+        var size = ThumbnailSizeForMode(viewMode);
+        NativeShell.TryGetShellHBitmap(item.FullPath, size, NativeShell.SIIGBF.ResizeToFit);
+      });
+      ApplyGrouping();
+      // Notify tree if this is a folder.
+      if (item.IsFolder)
+        TreeFolderCreated?.Invoke(this, e.FullPath);
+    });
+  }
+
+  private void OnWatcher_Deleted(object sender, FileSystemEventArgs e) {
+    DispatcherQueue.TryEnqueue(() => {
+      var item = Items.FirstOrDefault(i =>
+          string.Equals(i.FullPath, e.FullPath, StringComparison.OrdinalIgnoreCase));
+      if (item is null) {
+        // Not in the list (e.g. navigated away), but still notify tree.
+        if (Directory.Exists(e.FullPath) == false && !Path.HasExtension(e.FullPath))
+          TreeFolderDeleted?.Invoke(this, e.FullPath);
+        return;
+      }
+      bool wasFolder = item.IsFolder;
+      Items.Remove(item);
+      ApplyGrouping();
+      if (wasFolder)
+        TreeFolderDeleted?.Invoke(this, e.FullPath);
+    });
+  }
+
+  private void OnWatcher_Renamed(object sender, RenamedEventArgs e) {
+    DispatcherQueue.TryEnqueue(() => {
+      var item = Items.FirstOrDefault(i =>
+          string.Equals(i.FullPath, e.OldFullPath, StringComparison.OrdinalIgnoreCase));
+      if (item is null) {
+        // Might have been created outside the watched window — treat as Create.
+        OnWatcher_Created(sender, e);
+        return;
+      }
+      bool wasFolder = item.IsFolder;
+      item.Name = e.Name ?? Path.GetFileName(e.FullPath);
+      item.FullPath = e.FullPath;
+      // Re-sort: the item may have moved to a different position in the list.
+      var sorted = SortItems(Items.ToList());
+      int oldIdx = Items.IndexOf(item);
+      int newIdx = sorted.IndexOf(item);
+      if (oldIdx != newIdx) {
+        Items.Remove(item);
+        Items.Insert(newIdx > Items.Count ? Items.Count : newIdx, item);
+      }
+      ApplyGrouping();
+      if (wasFolder)
+        TreeFolderRenamed?.Invoke(this, (e.OldFullPath, e.FullPath));
+    });
+  }
+
+  private void OnWatcher_Changed(object sender, FileSystemEventArgs e) {
+    DispatcherQueue.TryEnqueue(() => {
+      // Debounce: reset a per-path timer so that bursts (e.g. large file copy)
+      // only issue one metadata read after the last event settles.
+      if (!_changeDebounce.TryGetValue(e.FullPath, out var timer)) {
+        timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+        var captured = e.FullPath;
+        timer.Tick += (_, _) => {
+          _changeDebounce.Remove(captured);
+          timer.Stop();
+          ApplyChangedMetadata(captured);
+        };
+        _changeDebounce[e.FullPath] = timer;
+      }
+      // Restart the timer on each new event.
+      timer.Stop();
+      timer.Start();
+    });
+  }
+
+  private void ApplyChangedMetadata(string fullPath) {
+    var item = Items.FirstOrDefault(i =>
+        string.Equals(i.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
+    if (item is null)
+      return;
+    var fresh = NativeShell.GetSingleItemMetadata(fullPath);
+    if (fresh is null)
+      return;
+    item.DateModified = fresh.DateModified;
+    item.Size = fresh.Size;
+    item.SizeBytes = fresh.SizeBytes;
+  }
+
+  private void OnWatcher_Error(object sender, ErrorEventArgs e) {
+    // Buffer overflow or network disconnect — fall back to a full reload.
+    DispatcherQueue.TryEnqueue(Refresh);
   }
 
   // ── Navigation API ───────────────────────────────────────────────────────
@@ -337,6 +588,9 @@ public sealed partial class ShellListView : UserControl {
 
   public async void NavigateToKnownFolder(Guid folderId) {
     var virtualPath = $"::{folderId:B}";
+    // Stop watching the outgoing folder immediately.
+    StopFolderWatcher();
+
     await ApplyFolderSettings(virtualPath);
 
     // Break any existing grouped CollectionViewSource binding before clearing items.
@@ -401,11 +655,17 @@ public sealed partial class ShellListView : UserControl {
     CanGoBack = _backStack.Count > 0;
     CanGoForward = _forwardStack.Count > 0;
     ApplyPendingSelection();
+    // Watch the virtual folder for shell change notifications (drive add/remove, etc.).
+    StartFolderWatcher(virtualPath);
   }
 
   // ── Directory loading ────────────────────────────────────────────────────
 
   private async void LoadDirectory(string path) {
+    // Stop watching the outgoing folder immediately so stale events from the
+    // previous directory do not race with the new navigation.
+    StopFolderWatcher();
+
     await ApplyFolderSettings(path);
 
     // Break any existing grouped CollectionViewSource binding so the old grouped
@@ -472,6 +732,8 @@ public sealed partial class ShellListView : UserControl {
       PathChanged?.Invoke(this, path);
       UpdateSortIndicators();
       ApplyPendingSelection();
+      // Start a ShellChangeWatcher for this virtual path so drive/media events are caught.
+      StartFolderWatcher(path);
       return;
     }
 
@@ -528,6 +790,8 @@ public sealed partial class ShellListView : UserControl {
     PathChanged?.Invoke(this, path);
     UpdateSortIndicators();
     ApplyPendingSelection();
+    // Watch the folder for live filesystem changes now that it is fully loaded.
+    StartFolderWatcher(path);
   }
 
   /// <summary>

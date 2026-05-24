@@ -50,6 +50,11 @@ public sealed partial class ExplorerBrowser : UserControl
         FileList.PathChanged  += OnPathChanged;
         FileList.SortChanged  += OnSortChanged;
         FileList.GroupChanged += OnGroupChanged;
+        FileList.TreeDriveAdded     += (_, root) => NavTreeView.NotifyDriveAdded(root);
+        FileList.TreeDriveRemoved   += (_, root) => NavTreeView.NotifyDriveRemoved(root);
+        FileList.TreeFolderCreated  += (_, path) => NavTreeView.NotifyFolderCreated(path);
+        FileList.TreeFolderDeleted  += (_, path) => NavTreeView.NotifyFolderDeleted(path);
+        FileList.TreeFolderRenamed  += (_, e)    => NavTreeView.NotifyFolderRenamed(e.OldPath, e.NewPath);
         UpdateViewModeCheckmarks(FileList.ViewMode);
         UpdateSortCheckmarks(FileList.SortColumn, FileList.SortAscending);
         UpdateGroupCheckmarks(FileList.GroupColumn);

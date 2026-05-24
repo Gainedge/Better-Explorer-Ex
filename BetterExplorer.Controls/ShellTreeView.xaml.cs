@@ -448,6 +448,167 @@ public sealed partial class ShellTreeView : UserControl
         return null;
     }
 
+    // ── Shell-change notification API (called by ExplorerBrowser) ────────────
+
+    /// <summary>
+    /// Called when a new drive has been attached or a removable volume has been mounted.
+    /// Adds the drive node under "This PC" if it is not already present.
+    /// </summary>
+    public void NotifyDriveAdded(string driveRoot)
+    {
+        driveRoot = driveRoot.TrimEnd('\\') + '\\';
+        var pc = FindNodeByKnownFolderGuid(Roots, NativeShell.FOLDERID_ComputerFolder);
+        if (pc == null) return;
+
+        // If the node is already there (spurious notification), ignore.
+        foreach (var child in pc.Children)
+            if (string.Equals(child.FullPath?.TrimEnd('\\') + '\\', driveRoot, StringComparison.OrdinalIgnoreCase))
+                return;
+
+        var label = NativeShell.GetShellDisplayName(driveRoot);
+        if (string.IsNullOrEmpty(label)) label = driveRoot.TrimEnd('\\');
+
+        var iconSize = (uint)Math.Ceiling(16 * _iconScale);
+        var node = new ShellTreeNode { Name = label, FullPath = driveRoot, IsFolder = true };
+        node.Children.Add(ShellTreeNode.Dummy);
+        pc.Children.Add(node);
+        LoadNodeIcon(node, driveRoot, iconSize);
+    }
+
+    /// <summary>
+    /// Called when a drive has been removed or a removable volume unmounted.
+    /// Removes the matching drive node from "This PC".
+    /// </summary>
+    public void NotifyDriveRemoved(string driveRoot)
+    {
+        driveRoot = driveRoot.TrimEnd('\\') + '\\';
+        var pc = FindNodeByKnownFolderGuid(Roots, NativeShell.FOLDERID_ComputerFolder);
+        if (pc == null) return;
+
+        var toRemove = pc.Children.FirstOrDefault(n =>
+            string.Equals(n.FullPath?.TrimEnd('\\') + '\\', driveRoot, StringComparison.OrdinalIgnoreCase));
+        if (toRemove != null)
+            pc.Children.Remove(toRemove);
+    }
+
+    /// <summary>
+    /// Called when a new folder has been created on the filesystem.
+    /// If the parent folder is already expanded in the tree the new node is added.
+    /// </summary>
+    public void NotifyFolderCreated(string folderPath)
+    {
+        var parentPath = Path.GetDirectoryName(folderPath);
+        if (parentPath == null) return;
+
+        var parentNode = FindNodeByPath(Roots, parentPath);
+        if (parentNode == null || parentNode.HasDummyChild) return; // not yet expanded – the expand will pick it up
+
+        // Guard: do not add duplicates.
+        foreach (var existing in parentNode.Children)
+            if (string.Equals(existing.FullPath, folderPath, StringComparison.OrdinalIgnoreCase))
+                return;
+
+        var iconSize = (uint)Math.Ceiling(16 * _iconScale);
+        var node = new ShellTreeNode
+        {
+            Name     = Path.GetFileName(folderPath),
+            FullPath = folderPath,
+            IsFolder = true,
+        };
+        if (HasSubfolders(folderPath))
+            node.Children.Add(ShellTreeNode.Dummy);
+
+        // Insert in alphabetical order.
+        int insertAt = 0;
+        for (int i = 0; i < parentNode.Children.Count; i++)
+        {
+            if (string.Compare(parentNode.Children[i].Name, node.Name, StringComparison.OrdinalIgnoreCase) <= 0)
+                insertAt = i + 1;
+            else
+                break;
+        }
+        parentNode.Children.Insert(insertAt, node);
+        LoadNodeIcon(node, folderPath, iconSize);
+    }
+
+    /// <summary>
+    /// Called when a folder has been deleted from the filesystem.
+    /// Removes the matching node (and any descendant selection state).
+    /// </summary>
+    public void NotifyFolderDeleted(string folderPath)
+    {
+        RemoveNodeByPath(Roots, folderPath);
+    }
+
+    /// <summary>
+    /// Called when a folder has been renamed on the filesystem.
+    /// Updates the node name and <see cref="ShellTreeNode.FullPath"/> in-place
+    /// and recursively fixes all descendant paths.
+    /// </summary>
+    public void NotifyFolderRenamed(string oldPath, string newPath)
+    {
+        var node = FindNodeByPath(Roots, oldPath);
+        if (node == null) return;
+
+        node.Name     = Path.GetFileName(newPath);
+        node.FullPath = newPath;
+        FixDescendantPaths(node, oldPath, newPath);
+    }
+
+    // ── Tree search / mutation helpers ───────────────────────────────────────
+
+    private static ShellTreeNode? FindNodeByPath(IEnumerable<ShellTreeNode> nodes, string path)
+    {
+        path = path.TrimEnd('\\', '/');
+        foreach (var node in nodes)
+        {
+            if (ReferenceEquals(node, ShellTreeNode.Dummy)) continue;
+            var nodePath = node.FullPath?.TrimEnd('\\', '/');
+            if (string.Equals(nodePath, path, StringComparison.OrdinalIgnoreCase))
+                return node;
+            if (node.IsExpanded || (nodePath != null && path.StartsWith(nodePath, StringComparison.OrdinalIgnoreCase)))
+            {
+                var found = FindNodeByPath(node.Children, path);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private static bool RemoveNodeByPath(ObservableCollection<ShellTreeNode> children, string path)
+    {
+        path = path.TrimEnd('\\', '/');
+        for (int i = 0; i < children.Count; i++)
+        {
+            var node = children[i];
+            if (ReferenceEquals(node, ShellTreeNode.Dummy)) continue;
+            var nodePath = node.FullPath?.TrimEnd('\\', '/');
+            if (string.Equals(nodePath, path, StringComparison.OrdinalIgnoreCase))
+            {
+                children.RemoveAt(i);
+                return true;
+            }
+            if (nodePath != null && path.StartsWith(nodePath, StringComparison.OrdinalIgnoreCase))
+            {
+                if (RemoveNodeByPath(node.Children, path)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static void FixDescendantPaths(ShellTreeNode node, string oldBase, string newBase)
+    {
+        foreach (var child in node.Children)
+        {
+            if (ReferenceEquals(child, ShellTreeNode.Dummy)) continue;
+            if (child.FullPath != null && child.FullPath.StartsWith(oldBase, StringComparison.OrdinalIgnoreCase))
+            {
+                child.FullPath = newBase + child.FullPath.Substring(oldBase.Length);
+                FixDescendantPaths(child, oldBase, newBase);
+            }
+        }
+    }
+
     // ── Visual-tree helpers ───────────────────────────────────────────────────
 
     /// <summary>

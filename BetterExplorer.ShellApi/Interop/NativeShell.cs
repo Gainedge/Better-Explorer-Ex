@@ -1308,6 +1308,57 @@ public static class NativeShell {
     return (folders, files);
   }
 
+  /// <summary>
+  /// Returns a single <see cref="ShellItem"/> for <paramref name="fullPath"/>, populated
+  /// from the file system the same way <see cref="EnumerateWithFindFirstFileEx"/> does.
+  /// Returns <see langword="null"/> when the path does not exist or cannot be read.
+  /// Safe to call from any thread.
+  /// </summary>
+  public static ShellItem? GetSingleItemMetadata(string fullPath) {
+    try {
+      var dir = Path.GetDirectoryName(fullPath);
+      if (dir is null)
+        return null;
+      var hFind = FindFirstFileEx(fullPath,
+          FINDEX_INFO_BASIC, out var data, FINDEX_SEARCH_NAME, IntPtr.Zero, LARGE_FETCH);
+      if (hFind == INVALID_HANDLE_VALUE)
+        return null;
+      FindClose(hFind);
+
+      var name = data.cFileName;
+      var attrs = data.dwFileAttributes;
+      if ((attrs & FILE_ATTRIBUTE_REPARSE) != 0)
+        return null;
+      bool isDir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      bool isHidden = (attrs & FILE_ATTRIBUTE_HIDDEN) != 0;
+      var modified = DateTime.FromFileTimeUtc(data.ftLastWriteTime).ToLocalTime();
+
+      if (isDir) {
+        return new ShellItem {
+          Name = name,
+          FullPath = fullPath,
+          ItemType = "File folder",
+          IsFolder = true,
+          IsHidden = isHidden,
+          DateModified = modified
+        };
+      } else {
+        long size = ((long)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+        var ext = Path.GetExtension(name);
+        return new ShellItem {
+          Name = name,
+          FullPath = fullPath,
+          ItemType = GetItemTypeString(ext),
+          IsFolder = false,
+          IsHidden = isHidden,
+          Size = FormatSize(size),
+          SizeBytes = size,
+          DateModified = modified
+        };
+      }
+    } catch { return null; }
+  }
+
   // ── Library XML parser ────────────────────────────────────────────────────
 
   public static string? ResolveLibraryDefaultPath(string libraryFile) {
