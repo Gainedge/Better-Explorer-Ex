@@ -91,6 +91,8 @@ public sealed partial class TabbedExplorerBrowser : UserControl
         Tabs.TabItems.Add(tabItem);
         Tabs.SelectedItem = tabItem;
 
+        SyncContentBackground();
+
         if (!string.IsNullOrWhiteSpace(path))
             browser.Navigate(path);
         else if (!string.IsNullOrWhiteSpace(DefaultPath))
@@ -120,9 +122,24 @@ public sealed partial class TabbedExplorerBrowser : UserControl
 
     private void OnTabSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        SyncContentBackground();
+
         var path = ActiveBrowser?.CurrentPath;
         if (!string.IsNullOrWhiteSpace(path))
             PathChanged?.Invoke(this, path!);
+    }
+
+    /// <summary>
+    /// Reads the background of the currently selected <see cref="TabViewItem"/> and
+    /// applies it to <see cref="ContentGrid"/> so the content area looks like a
+    /// continuation of the active tab.
+    /// </summary>
+    private void SyncContentBackground()
+    {
+        if (Tabs.SelectedItem is TabViewItem selected)
+            ContentGrid.Background = selected.Background;
+        else
+            ContentGrid.Background = null;
     }
 
     // ── Browser event forwarding ──────────────────────────────────────────────

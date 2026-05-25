@@ -9,7 +9,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-  <Grid>
+  <Grid Background="{ThemeResource TabViewItemHeaderBackgroundSelected}">
     <Grid.Resources>
       <FontFamily x:Key="FluentSystemIconsFont">ms-appx:///BetterExplorer.Controls/Assets/Fonts/FluentSystemIcons-Regular.ttf#FluentSystemIcons-Regular</FontFamily>
       <FontFamily x:Key="CustomGlyphsFont">ms-appx:///BetterExplorer.Controls/Assets/Fonts/Custom-Glyphs.ttf#Custom-Glyphs</FontFamily>
@@ -569,6 +569,42 @@
 
       <!-- Sort + View buttons — right side -->
       <StackPanel Grid.Column="2" Orientation="Horizontal" Padding="4,0" Spacing="4">
+
+        <!-- Select button -->
+        <Button x:Name="SelectButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                ToolTipService.ToolTip="Select">
+          <FontIcon Glyph="&#xE762;" FontSize="14" />
+          <Button.Flyout>
+            <MenuFlyout Placement="Bottom">
+              <MenuFlyoutItem x:Name="SelectAllMenuItem"
+                              Text="Select all"
+                              KeyboardAcceleratorTextOverride="Ctrl+A"
+                              Click="SelectAllMenuItem_Click">
+                <MenuFlyoutItem.Icon>
+                  <FontIcon Glyph="&#xE8B3;" />
+                </MenuFlyoutItem.Icon>
+              </MenuFlyoutItem>
+              <MenuFlyoutItem x:Name="SelectNoneMenuItem"
+                              Text="Select none"
+                              KeyboardAcceleratorTextOverride="Ctrl+D"
+                              Click="SelectNoneMenuItem_Click">
+                <MenuFlyoutItem.Icon>
+                  <FontIcon Glyph="&#xE8E6;" />
+                </MenuFlyoutItem.Icon>
+              </MenuFlyoutItem>
+              <MenuFlyoutItem x:Name="InvertSelectionMenuItem"
+                              Text="Invert selection"
+                              KeyboardAcceleratorTextOverride="Ctrl+I"
+                              Click="InvertSelectionMenuItem_Click">
+                <MenuFlyoutItem.Icon>
+                  <FontIcon Glyph="&#xE8CB;" />
+                </MenuFlyoutItem.Icon>
+              </MenuFlyoutItem>
+            </MenuFlyout>
+          </Button.Flyout>
+        </Button>
 
         <!-- Sort button -->
         <Button x:Name="SortButton"

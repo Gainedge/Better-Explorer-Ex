@@ -3197,6 +3197,14 @@ public sealed partial class ShellListView : UserControl {
         _ = PasteFromClipboardAsyncImpl();
         e.Handled = true;
         break;
+      case Windows.System.VirtualKey.I:
+        InvertSelection();
+        e.Handled = true;
+        break;
+      case Windows.System.VirtualKey.D:
+        SelectNone();
+        e.Handled = true;
+        break;
     }
   }
 
@@ -3351,6 +3359,22 @@ public sealed partial class ShellListView : UserControl {
         } catch { }
       }
     }
+  }
+
+  /// <summary>Selects all items in the current view (Ctrl+A).</summary>
+  public void SelectAll() => ShellView.SelectAll();
+
+  /// <summary>Clears the selection (Ctrl+D).</summary>
+  public void SelectNone() => ShellView.SelectedItems.Clear();
+
+  /// <summary>Inverts the current selection (Ctrl+I).</summary>
+  public void InvertSelection() {
+    var allItems  = Items.ToList();
+    var currently = ShellView.SelectedItems.Cast<object>().ToHashSet();
+    ShellView.SelectedItems.Clear();
+    foreach (var item in allItems)
+      if (!currently.Contains(item))
+        ShellView.SelectedItems.Add(item);
   }
 
   /// <summary>

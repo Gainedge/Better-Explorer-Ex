@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <UserControl
     x:Class="BetterExplorer.Controls.ShellBreadcrumbBar"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -98,22 +98,19 @@
     <!-- Root border that looks like a text field -->
     <Border x:Name="RootBorder"
             Background="{ThemeResource TextControlBackground}"
-            BorderBrush="{ThemeResource TextControlBorderBrush}"
-            BorderThickness="1"
+            BorderThickness="0"
             CornerRadius="4"
             VerticalAlignment="Stretch">
 
         <Grid>
 
-            <!-- â”€â”€ Breadcrumb display mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+            <!-- Breadcrumb display mode -->
             <Grid x:Name="BreadcrumbView"
                   Visibility="Visible"
                   PointerPressed="OnBreadcrumbViewPressed">
 
                 <Grid.ColumnDefinitions>
-                    <!-- Root (drive/shell icon) button -->
                     <ColumnDefinition Width="Auto" />
-                    <!-- Scrollable segment strip -->
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
@@ -127,7 +124,7 @@
                     <Image x:Name="RootMenuIcon" Width="16" Height="16" Stretch="UniformToFill" />
                 </Button>
 
-                <!-- Horizontal scroll viewer â€” clips and scrolls the chips -->
+                <!-- Horizontal scroll viewer - clips and scrolls the chips -->
                 <ScrollViewer x:Name="ChipScroller"
                               Grid.Column="1"
                               HorizontalScrollMode="Enabled"
@@ -145,23 +142,63 @@
                 </ScrollViewer>
             </Grid>
 
-            <!-- â”€â”€ Edit mode overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-            <AutoSuggestBox x:Name="EditBox"
-                            Visibility="Collapsed"
-                            PlaceholderText="Type a path or search..."
-                            QueryIcon="Find"
-                            VerticalAlignment="Stretch"
-                            BorderThickness="0"
-                            Background="Transparent"
-                            FontSize="12"
-                            FontFamily="Segoe UI Variable Text"
-                            TextChanged="OnEditBoxTextChanged"
-                            SuggestionChosen="OnEditBoxSuggestionChosen"
-                            QuerySubmitted="OnEditBoxQuerySubmitted"
-                            KeyDown="OnEditBoxKeyDown" />
+            <!-- Edit mode overlay: plain TextBox with no border/focus chrome + popup suggestions -->
+            <Grid x:Name="EditPanel" Visibility="Collapsed">
+
+                <!-- Custom-templated TextBox: no FocusedBorderElement, no blue line -->
+                <TextBox x:Name="EditBox"
+                         PlaceholderText="Type a path..."
+                         VerticalAlignment="Stretch"
+                         VerticalContentAlignment="Center"
+                         FontSize="12"
+                         FontFamily="Segoe UI Variable Text"
+                         TextChanged="OnEditBoxTextChanged"
+                         KeyDown="OnEditBoxKeyDown">
+                    <TextBox.Style>
+                        <Style TargetType="TextBox">
+                            <Setter Property="Background"      Value="Transparent" />
+                            <Setter Property="BorderThickness" Value="0" />
+                            <Setter Property="Padding"         Value="6,0" />
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <!-- Minimal template: just the scroll host, no border elements at all -->
+                                    <ControlTemplate TargetType="TextBox">
+                                        <ScrollViewer x:Name="ContentElement"
+                                                      HorizontalScrollMode="Auto"
+                                                      HorizontalScrollBarVisibility="Hidden"
+                                                      VerticalScrollMode="Disabled"
+                                                      VerticalScrollBarVisibility="Disabled"
+                                                      VerticalAlignment="Center"
+                                                      Margin="{TemplateBinding Padding}"
+                                                      Background="Transparent"
+                                                      AutomationProperties.AccessibilityView="Raw" />
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </TextBox.Style>
+                </TextBox>
+
+                <!-- Suggestion dropdown -->
+                <Popup x:Name="SuggestPopup"
+                       ShouldConstrainToRootBounds="False">
+                    <Border Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4">
+                        <ListView x:Name="SuggestList"
+                                  MaxHeight="220"
+                                  MinWidth="300"
+                                  SelectionMode="Single"
+                                  IsItemClickEnabled="True"
+                                  ItemClick="OnSuggestItemClick"
+                                  FontSize="12"
+                                  FontFamily="Segoe UI Variable Text" />
+                    </Border>
+                </Popup>
+
+            </Grid>
 
         </Grid>
     </Border>
 </UserControl>
-
-

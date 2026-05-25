@@ -70,6 +70,8 @@ public sealed partial class ShellBreadcrumbBar : UserControl
 
     public ShellBreadcrumbBar()
     {
+        _outsideClickHandler = new PointerEventHandler(OnOutsidePointerPressed);
+
         InitializeComponent();
 
         // F2 enters edit mode from anywhere on the bar.
@@ -88,7 +90,7 @@ public sealed partial class ShellBreadcrumbBar : UserControl
     public void SetPath(string path)
     {
         _currentPath = path;
-        if (EditBox.Visibility == Visibility.Collapsed)
+        if (EditPanel.Visibility == Visibility.Collapsed)
             RebuildChips();
     }
 
@@ -418,43 +420,58 @@ public sealed partial class ShellBreadcrumbBar : UserControl
     /// <summary>Switches the bar from breadcrumb display to text-edit mode.</summary>
     public void EnterEditMode()
     {
-        EditBox.Text       = _currentPath;
-        EditBox.Visibility = Visibility.Visible;
+        EditBox.Text = _currentPath;
+        // Move caret to end so user can keep typing immediately.
+        EditBox.SelectionStart = EditBox.Text.Length;
+
+        EditPanel.Visibility      = Visibility.Visible;
         BreadcrumbView.Visibility = Visibility.Collapsed;
-        RootBorder.BorderBrush = (Brush)Application.Current.Resources["TextControlBorderBrushFocused"];
 
         EditBox.Focus(FocusState.Programmatic);
+
+        // Dismiss edit mode when the user clicks anywhere outside this control.
+        if (XamlRoot?.Content is UIElement root)
+            root.AddHandler(PointerPressedEvent, _outsideClickHandler, handledEventsToo: true);
     }
 
     private void LeaveEditMode()
     {
-        EditBox.Visibility        = Visibility.Collapsed;
+        SuggestPopup.IsOpen = false;
+        SuggestList.ItemsSource = null;
+
+        if (XamlRoot?.Content is UIElement root)
+            root.RemoveHandler(PointerPressedEvent, _outsideClickHandler);
+
+        EditPanel.Visibility      = Visibility.Collapsed;
         BreadcrumbView.Visibility = Visibility.Visible;
-        RootBorder.BorderBrush    = (Brush)Application.Current.Resources["TextControlBorderBrush"];
+    }
+
+    private readonly PointerEventHandler _outsideClickHandler;
+
+    private void OnOutsidePointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        var pos = e.GetCurrentPoint(this).Position;
+        if (pos.X >= 0 && pos.Y >= 0 && pos.X <= ActualWidth && pos.Y <= ActualHeight)
+            return;
+        LeaveEditMode();
     }
 
     // Click on the breadcrumb strip's empty space enters edit mode.
     private void OnBreadcrumbViewPressed(object sender, PointerRoutedEventArgs e)
     {
-        // Only enter edit mode if the press was NOT handled by a chip/chevron button.
         if (!e.Handled) EnterEditMode();
     }
 
-    // ── AutoSuggestBox callbacks ───────────────────────────────────────────────
+    // ── TextBox + Popup suggestion callbacks ──────────────────────────────────
 
-    private void OnEditBoxTextChanged(AutoSuggestBox sender,
-                                      AutoSuggestBoxTextChangedEventArgs args)
+    private void OnEditBoxTextChanged(object sender, TextChangedEventArgs args)
     {
-        if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
-
-        var typed = sender.Text;
+        var typed = EditBox.Text;
         var suggestions = new List<string>();
 
-        // History entries that match the typed prefix.
         suggestions.AddRange(
             _history.Where(h => h.StartsWith(typed, StringComparison.OrdinalIgnoreCase)));
 
-        // Live sub-folder suggestions for the deepest valid directory segment.
         var dirPart = typed;
         if (!Directory.Exists(dirPart))
             dirPart = Path.GetDirectoryName(typed) ?? string.Empty;
@@ -481,60 +498,92 @@ public sealed partial class ShellBreadcrumbBar : UserControl
             catch { }
         }
 
-        sender.ItemsSource = suggestions;
+        SuggestList.ItemsSource = suggestions;
+
+        if (suggestions.Count > 0)
+        {
+            // Position popup directly below this control.
+            SuggestList.MinWidth  = ActualWidth;
+            SuggestPopup.HorizontalOffset = 0;
+            SuggestPopup.VerticalOffset   = ActualHeight;
+            SuggestPopup.IsOpen = true;
+        }
+        else
+        {
+            SuggestPopup.IsOpen = false;
+        }
     }
 
-    private void OnEditBoxSuggestionChosen(AutoSuggestBox sender,
-                                           AutoSuggestBoxSuggestionChosenEventArgs args)
+    private void OnSuggestItemClick(object sender, ItemClickEventArgs e)
     {
-        sender.Text = args.SelectedItem?.ToString() ?? sender.Text;
-    }
-
-    private bool _querySubmittedHandled;
-
-    private void OnEditBoxQuerySubmitted(AutoSuggestBox sender,
-                                         AutoSuggestBoxQuerySubmittedEventArgs args)
-    {
-        // Guard against WinUI 3's AutoSuggestBox firing QuerySubmitted twice
-        // (once for the Enter key, once when the suggestion dropdown closes).
-        if (_querySubmittedHandled) { _querySubmittedHandled = false; return; }
-        _querySubmittedHandled = true;
-        DispatcherQueue.TryEnqueue(() => _querySubmittedHandled = false);
-
-        // ChosenSuggestion is set only when the user explicitly clicks/arrows to a
-        // suggestion.  For plain Enter, use QueryText (the verbatim box text).
-        var raw = (args.ChosenSuggestion as string)
-                  ?? args.QueryText
-                  ?? sender.Text;
-        var path = raw.Trim().Trim('"');
-        path = Environment.ExpandEnvironmentVariables(path);
-        if (string.IsNullOrEmpty(path)) { LeaveEditMode(); return; }
-
-        AddToHistory(path);
-        Navigate(path);
-        LeaveEditMode();
+        if (e.ClickedItem is string chosen)
+        {
+            EditBox.Text = chosen;
+            EditBox.SelectionStart = chosen.Length;
+            SuggestPopup.IsOpen = false;
+            CommitPath(chosen);
+        }
     }
 
     private void OnEditBoxKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key == VirtualKey.Escape)
+        switch (e.Key)
         {
-            LeaveEditMode();
-            e.Handled = true;
+            case VirtualKey.Escape:
+                LeaveEditMode();
+                e.Handled = true;
+                break;
+
+            case VirtualKey.Enter:
+            {
+                // If popup is open and an item is selected, accept it.
+                string? path = SuggestList.SelectedItem as string ?? EditBox.Text;
+                path = path.Trim().Trim('"');
+                path = Environment.ExpandEnvironmentVariables(path);
+                SuggestPopup.IsOpen = false;
+                CommitPath(path);
+                e.Handled = true;
+                break;
+            }
+
+            case VirtualKey.Down:
+                // Move selection into the suggestion list.
+                if (SuggestPopup.IsOpen && SuggestList.Items.Count > 0)
+                {
+                    var next = SuggestList.SelectedIndex < SuggestList.Items.Count - 1
+                        ? SuggestList.SelectedIndex + 1 : 0;
+                    SuggestList.SelectedIndex = next;
+                    SuggestList.ScrollIntoView(SuggestList.SelectedItem);
+                }
+                e.Handled = true;
+                break;
+
+            case VirtualKey.Up:
+                if (SuggestPopup.IsOpen && SuggestList.Items.Count > 0)
+                {
+                    var prev = SuggestList.SelectedIndex > 0
+                        ? SuggestList.SelectedIndex - 1 : SuggestList.Items.Count - 1;
+                    SuggestList.SelectedIndex = prev;
+                    SuggestList.ScrollIntoView(SuggestList.SelectedItem);
+                }
+                e.Handled = true;
+                break;
         }
-        else if (e.Key == VirtualKey.Enter)
-        {
-            // Prevent the Enter key from bubbling to parent controls (e.g. SplitButton)
-            // after QuerySubmitted has already handled navigation.
-            e.Handled = true;
-        }
+    }
+
+    private void CommitPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) { LeaveEditMode(); return; }
+        AddToHistory(path);
+        Navigate(path);
+        LeaveEditMode();
     }
 
     // ── History management ────────────────────────────────────────────────────
 
     private void AddToHistory(string path)
     {
-        _history.Remove(path);         // remove duplicate if present
+        _history.Remove(path);
         _history.Insert(0, path);
         if (_history.Count > 50)
             _history.RemoveAt(_history.Count - 1);

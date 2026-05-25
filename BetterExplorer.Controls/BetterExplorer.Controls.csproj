@@ -9,13 +9,11 @@
     <Platforms>x86;x64;ARM64</Platforms>
   </PropertyGroup>
   <ItemGroup>
-    <Page Update="TabbedExplorerBrowser.xaml">
+    <Page Update="ShellBreadcrumbBar.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>
-  </ItemGroup>
-  <ItemGroup>
-    <Page Update="ShellBreadcrumbBar.xaml">
+    <Page Update="TabbedExplorerBrowser.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>
@@ -38,5 +36,6 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+  <!-- ShellBreadcrumbBar is registered as a Page above; no None entry needed -->
 
 </Project>

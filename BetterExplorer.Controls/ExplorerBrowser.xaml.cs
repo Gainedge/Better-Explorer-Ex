@@ -162,6 +162,10 @@ public sealed partial class ExplorerBrowser : UserControl
     }
     private void TbPropertiesButton_Click(object sender, RoutedEventArgs e) => FileList.ShowPropertiesForSelected();
 
+    private void SelectAllMenuItem_Click(object sender, RoutedEventArgs e)      => FileList.SelectAll();
+    private void SelectNoneMenuItem_Click(object sender, RoutedEventArgs e)     => FileList.SelectNone();
+    private void InvertSelectionMenuItem_Click(object sender, RoutedEventArgs e) => FileList.InvertSelection();
+
     // ── View-mode switcher ────────────────────────────────────────────────────
 
     private static readonly ShellViewMode[] _viewCycle =
