@@ -190,6 +190,24 @@ public sealed partial class ShellListView : UserControl {
   private const int CloudThumbRetryMaxMs = 4000;
   private Channel<(ShellItem Item, uint Size, int Retry)> _thumbChannel = CreateChannel();
 
+  // ── Overlay icon channel ─────────────────────────────────────────────────
+  // Separate lightweight channel for shell overlay icons (shortcut arrow, OneDrive sync,
+  // Git status from TortoiseGit, etc.).  Workers are cancelled together with the
+  // thumbnail workers so overlays don't outlive the current navigation.
+  private Channel<ShellItem> _overlayChannel = CreateOverlayChannel();
+  private const int OverlayConcurrency = 2;
+
+  private static Channel<ShellItem> CreateOverlayChannel() =>
+      Channel.CreateBounded<ShellItem>(new BoundedChannelOptions(512) {
+        FullMode = BoundedChannelFullMode.DropOldest,
+        SingleReader = false,
+        SingleWriter = false
+      });
+
+  // Per-overlay bitmap cache. The pixel array from NativeShell._overlayPixelCache is reused
+  // by reference for the same overlay slot, so we key on object identity to deduplicate bitmaps.
+  private static readonly Dictionary<int, WriteableBitmap?> _overlayBitmapCache = new();
+
   private static readonly Dictionary<(string Ext, uint Size), WriteableBitmap> _typeIconCache = new();
 
   // Per-item thumbnail cache for cloud/Storage-API items — persists across navigation
@@ -1169,10 +1187,23 @@ public sealed partial class ShellListView : UserControl {
   /// Synchronously stamps already-cached type icons onto items before they are
   /// added to the collection, so the first rendered frame shows icons.
   /// </summary>
-  // Every folder is considered per-item: shell icon overlays from Git/SVN/TortoiseSVN,
-  // desktop.ini custom icons, drive-type icons, virtual-path folders, etc. can all
-  // produce a different icon for each folder path.
-  private static bool IsPerItemFolder(ShellItem item) => item.IsFolder;
+  /// <summary>
+  /// Returns <see langword="true"/> for folders whose icon varies per path (drives,
+  /// virtual shell-namespace paths) and that must therefore use <c>IconOnly</c> rather
+  /// than <c>ResizeToFit</c> — the shell does not produce a content-preview thumbnail
+  /// for these items and would return a generic drive/folder icon at full cost.
+  /// Regular folders are <em>not</em> per-item folders and go through the normal
+  /// thumbnail pipeline so their content preview is displayed.
+  /// </summary>
+  private static bool IsPerItemFolder(ShellItem item) =>
+      item.IsFolder && (
+          // Virtual shell-namespace paths (e.g. ::{GUID}, ::{GUID}\sub)
+          item.FullPath.StartsWith("::", StringComparison.Ordinal) ||
+          // Drive roots: "C:\", "D:\", etc. (length == 3, last char is '\')
+          (item.FullPath.Length == 3 && item.FullPath[1] == ':' && item.FullPath[2] == '\\') ||
+          // UNC roots: "\\server\share\" and bare "\\server\"
+          (item.FullPath.StartsWith("\\\\", StringComparison.Ordinal) &&
+           item.FullPath.IndexOf('\\', 2) == item.FullPath.LastIndexOf('\\')));
 
   // Returns a type-cache key for an item.
   // All folders get a unique per-path key so shell-extension overlays (Git, SVN, …)
@@ -1625,6 +1656,12 @@ public sealed partial class ShellListView : UserControl {
     SetContainerSelectionBorder(args.ItemContainer, item.IsSelected);
     SetContainerDropTarget(args.ItemContainer, false);
 
+    // Overlay icons are independent of whether a real thumbnail is already loaded.
+    // Enqueue before the HasRealThumbnail early-return so folders whose thumbnails
+    // were pre-populated by PreloadCachedThumbnailsAsync still get their overlays.
+    if (item.OverlayIcon is null && !item.FullPath.StartsWith("::", StringComparison.Ordinal))
+      _overlayChannel.Writer.TryWrite(item);
+
     // Phase 1 — enqueue thumbnail upgrade if needed. Zero blocking work here.
     if (item.HasRealThumbnail)
       return;
@@ -1646,11 +1683,16 @@ public sealed partial class ShellListView : UserControl {
     _thumbCts.Cancel();
     _thumbCts = new CancellationTokenSource();
     _thumbChannel = CreateChannel();
+    _overlayChannel = CreateOverlayChannel();
 
     var reader = _thumbChannel.Reader;
     var ct = _thumbCts.Token;
     for (var i = 0; i < ThumbConcurrency; i++)
       _ = ProcessThumbnailQueueAsync(reader, ct);
+
+    var overlayReader = _overlayChannel.Reader;
+    for (var i = 0; i < OverlayConcurrency; i++)
+      _ = ProcessOverlayQueueAsync(overlayReader, ct);
   }
 
   private async Task ProcessThumbnailQueueAsync(
@@ -1843,6 +1885,45 @@ public sealed partial class ShellListView : UserControl {
     } catch (OperationCanceledException) {
     } catch { }
     finally { _storageApiSem.Release(); }
+  }
+
+  // ── Overlay icon worker ───────────────────────────────────────────────────
+  // Runs independently of the thumbnail pipeline.  Queries shell overlay index
+  // via SHGetFileInfo, then extracts the overlay HICON from the system image list.
+  // All COM/GDI work stays off the UI thread; only the final bitmap assignment
+  // is dispatched at Low priority to avoid interfering with layout passes.
+
+  private async Task ProcessOverlayQueueAsync(
+      ChannelReader<ShellItem> reader, CancellationToken ct) {
+    var dq = DispatcherQueue;
+    try {
+      await foreach (var item in reader.ReadAllAsync(ct).ConfigureAwait(false)) {
+        if (ct.IsCancellationRequested) break;
+        if (item.OverlayIcon is not null) continue;   // already loaded
+
+        try {
+          var (px, w, h, slot) = await NativeShell.GetOverlayIconPixelsAsync(item.FullPath, ct)
+              .ConfigureAwait(false);
+          if (ct.IsCancellationRequested) continue;
+          if (px is null || slot == 0) continue;   // no overlay for this item
+
+          // Materialise (or reuse) a WriteableBitmap for this overlay slot.
+          // All files sharing the same shell extension handler get the same bitmap object.
+          var capPx = px; var capW = w; var capH = h; var capSlot = slot;
+          dq.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
+            if (ct.IsCancellationRequested || item.OverlayIcon is not null) return;
+            WriteableBitmap? wb;
+            lock (_overlayBitmapCache) {
+              if (!_overlayBitmapCache.TryGetValue(capSlot, out wb)) {
+                wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
+                _overlayBitmapCache[capSlot] = wb;
+              }
+            }
+            if (wb is not null) item.OverlayIcon = wb;
+          });
+        } catch (OperationCanceledException) { break; } catch { }
+      }
+    } catch (OperationCanceledException) { }
   }
 
   // ── Double-tap navigation ─────────────────────────────────────────────────

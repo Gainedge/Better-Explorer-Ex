@@ -133,6 +133,18 @@ public sealed class ShellItem : INotifyPropertyChanged
     public Microsoft.UI.Xaml.Visibility LabelVisibility =>
         _isLabelHidden ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
 
+    private ImageSource? _overlayIcon;
+
+    /// <summary>Small overlay badge rendered on top of the main icon (e.g. shortcut arrow, OneDrive sync, Git status).</summary>
+    public ImageSource? OverlayIcon {
+        get => _overlayIcon;
+        set { _overlayIcon = value; OnPropertyChanged(); OnPropertyChanged(nameof(OverlayIconVisibility)); }
+    }
+
+    /// <summary>Visible when a shell overlay icon has been loaded for this item.</summary>
+    public Microsoft.UI.Xaml.Visibility OverlayIconVisibility =>
+        _overlayIcon == null ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -333,6 +333,42 @@ public static class NativeShell {
     [PreserveSig] int GetAnyOperationsAborted(out bool pfAnyOperationsAborted);
   }
 
+  // ── IImageList (system image list — used to extract overlay icons) ─────────
+
+  [ComImport, Guid("46EB5926-582E-4017-9FDF-E8998DAA0950"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  private interface IImageList {
+    [PreserveSig] int Add(IntPtr hbmImage, IntPtr hbmMask, out int pi);
+    [PreserveSig] int ReplaceIcon(int i, IntPtr hicon, out int pi);
+    [PreserveSig] int SetOverlayImage(int iImage, int iOverlay);
+    [PreserveSig] int Replace(int i, IntPtr hbmImage, IntPtr hbmMask);
+    [PreserveSig] int AddMasked(IntPtr hbmImage, int crMask, out int pi);
+    [PreserveSig] int Draw(IntPtr pimldp);
+    [PreserveSig] int Remove(int i);
+    [PreserveSig] int GetIcon(int i, uint flags, out IntPtr picon);
+    [PreserveSig] int GetImageInfo(int i, IntPtr pImageInfo);
+    [PreserveSig] int Copy(int iDst, IntPtr punkSrc, int iSrc, uint uFlags);
+    [PreserveSig] int Merge(int i1, IntPtr punk2, int i2, int dx, int dy, ref Guid riid, out IntPtr ppv);
+    [PreserveSig] int Clone(ref Guid riid, out IntPtr ppv);
+    [PreserveSig] int GetImageRect(int i, IntPtr prc);
+    [PreserveSig] int GetIconSize(out int cx, out int cy);
+    [PreserveSig] int SetIconSize(int cx, int cy);
+    [PreserveSig] int GetImageCount(out int pi);
+    [PreserveSig] int SetImageCount(uint uNewCount);
+    [PreserveSig] int SetBkColor(int clrBk, out int pclr);
+    [PreserveSig] int GetBkColor(out int pclr);
+    [PreserveSig] int BeginDrag(int iTrack, int dxHotspot, int dyHotspot);
+    [PreserveSig] int EndDrag();
+    [PreserveSig] int DragEnter(IntPtr hwndLock, int x, int y);
+    [PreserveSig] int DragLeave(IntPtr hwndLock);
+    [PreserveSig] int DragMove(int x, int y);
+    [PreserveSig] int SetDragCursorImage(IntPtr punk, int iDrag, int dxHotspot, int dyHotspot);
+    [PreserveSig] int DragShowNolock(bool fShow);
+    [PreserveSig] int GetDragImage(IntPtr ppt, IntPtr pptHotspot, ref Guid riid, out IntPtr ppv);
+    [PreserveSig] int GetItemFlags(int i, out uint dwFlags);
+    [PreserveSig] int GetOverlayImage(int iOverlay, out int piIndex);
+  }
+
   // ── Structs ───────────────────────────────────────────────────────────────
 
   [StructLayout(LayoutKind.Sequential)]
@@ -425,11 +461,29 @@ public static class NativeShell {
 
   // ── SHGetFileInfo constants ───────────────────────────────────────────────
 
-  private const uint SHGFI_ICON = 0x100;
-  private const uint SHGFI_LARGEICON = 0x0;
-  private const uint SHGFI_SMALLICON = 0x1;
+  private const uint SHGFI_ICON           = 0x100;
+  private const uint SHGFI_LARGEICON      = 0x0;
+  private const uint SHGFI_SMALLICON      = 0x1;
+  private const uint SHGFI_SYSICONINDEX   = 0x4000;
+  private const uint SHGFI_OVERLAYINDEX   = 0x40;
+  private const uint SHGFI_PIDL           = 0x8;    // pszPath is an ITEMIDLIST (PIDL)
   private const uint SHGFI_USEFILEATTRIBUTES = 0x10;   // don't touch file; use dwFileAttributes
   private const uint DI_NORMAL = 0x3;
+
+  // System image list size identifiers for SHGetImageList.
+  private const int SHIL_LARGE = 0;   // 32×32
+  private const int SHIL_SMALL = 1;   // 16×16
+
+  // IID for IImageList — used by SHGetImageList.
+  private static readonly Guid IID_IImageList = new("46EB5926-582E-4017-9FDF-E8998DAA0950");
+
+
+  // Per-overlay-slot pixel cache (overlay slot 1-15 → premultiplied BGRA bytes + dimensions).
+  // A null Pixels value means "slot exists but icon could not be rendered".
+  private static readonly Dictionary<int, (byte[]? Pixels, int W, int H)> _overlayPixelCache = new();
+  private static readonly object _overlayPixelCacheLock = new();
+  // Tracks which slots are currently being fetched; other callers wait in the lock.
+  private static readonly HashSet<int> _overlayPixelInFlight = new();
 
   // ── FindFirstFileEx constants ─────────────────────────────────────────────
 
@@ -501,6 +555,16 @@ public static class NativeShell {
   private static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes,
       ref SHFILEINFO psfi, uint cbSizeFileInfo, uint uFlags);
 
+  // PIDL overload — pszPath is treated as an ITEMIDLIST* when SHGFI_PIDL is set.
+  [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+  private static extern IntPtr SHGetFileInfo(IntPtr pidl, uint dwFileAttributes,
+      ref SHFILEINFO psfi, uint cbSizeFileInfo, uint uFlags);
+
+  [DllImport("shell32.dll", PreserveSig = true)]
+  private static extern int SHGetImageList(int iImageList,
+      [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out IImageList ppv);
+
   [DllImport("ole32.dll")]
   private static extern void CoTaskMemFree(IntPtr pv);
 
@@ -536,6 +600,30 @@ public static class NativeShell {
   [DllImport("user32.dll")]
   private static extern bool DrawIconEx(IntPtr hdc, int xLeft, int yTop, IntPtr hIcon,
       int cxWidth, int cyHeight, uint istepIfAniCur, IntPtr hbrFlickerFreeDraw, uint diFlags);
+  [DllImport("user32.dll")]
+  private static extern bool GetIconInfo(IntPtr hIcon, out ICONINFO piconinfo);
+  [DllImport("gdi32.dll")]
+  private static extern int GetObject(IntPtr hgdiobj, int cbBuffer, out BITMAP lpvObject);
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct ICONINFO {
+    public bool fIcon;
+    public uint xHotspot;
+    public uint yHotspot;
+    public IntPtr hbmMask;
+    public IntPtr hbmColor;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct BITMAP {
+    public int bmType;
+    public int bmWidth;
+    public int bmHeight;
+    public int bmWidthBytes;
+    public short bmPlanes;
+    public short bmBitsPixel;
+    public IntPtr bmBits;
+  }
 
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
   private static extern uint GetFileAttributesW(string lpFileName);
@@ -1095,6 +1183,170 @@ public static class NativeShell {
     if (pixels is null || ct.IsCancellationRequested)
       return (null, hr);
     return (PixelsToBitmapSync(pixels, w, h), hr);
+  }
+
+  // ── Shell overlay icons ──────────────────────────────────────────────────
+
+  /// <summary>
+  /// Returns premultiplied 32×32 BGRA pixel data for the shell overlay icon of
+  /// <paramref name="path"/>, or <c>(null, 0, 0, 0)</c> when no overlay is registered.
+  /// The <c>Slot</c> value (1-15) is stable per overlay handler and can be used to
+  /// deduplicate bitmaps across items that share the same extension handler.
+  /// Results are cached per slot so every handler's icon is only fetched once per process.
+  /// </summary>
+  public static async Task<(byte[]? Pixels, int W, int H, int Slot)> GetOverlayIconPixelsAsync(
+      string path, CancellationToken ct) {
+    return await Task.Run(() => GetOverlayIconPixelsCore(path), ct).ConfigureAwait(false);
+  }
+
+  private static (byte[]? Pixels, int W, int H, int Slot) GetOverlayIconPixelsCore(string path) {
+    // ── Step 1: obtain the overlay slot via PIDL (thread-pool MTA is fine here) ──
+    IntPtr pidl = ILCreateFromPathW(path);
+    if (pidl == IntPtr.Zero)
+      return (null, 0, 0, 0);
+
+    int overlaySlot;
+    try {
+      var sfi = new SHFILEINFO();
+      SHGetFileInfo(pidl, 0, ref sfi, (uint)Marshal.SizeOf<SHFILEINFO>(),
+          SHGFI_SYSICONINDEX | SHGFI_OVERLAYINDEX | SHGFI_PIDL | 0x20 | 0x100);
+      overlaySlot = (int)((uint)sfi.iIcon >> 24) & 0x0F;
+      if (sfi.hIcon != IntPtr.Zero)
+        DestroyIcon(sfi.hIcon);
+    } finally {
+      ILFree(pidl);
+    }
+
+    if (overlaySlot == 0)
+      return (null, 0, 0, 0);
+
+    // ── Step 2: fast path — pixel data already cached for this slot ──────────
+    //  Also waits for any in-flight fetch of the same slot to complete so we
+    //  never spin up two STA threads that both call SHGetImageList for the same
+    //  system image list (a process-wide COM singleton whose RCW must not be
+    //  released while another thread still holds a reference to it).
+    lock (_overlayPixelCacheLock) {
+      // Wait until no other thread is fetching this slot.
+      // Use a timeout as a safety net: if the in-flight thread crashes without
+      // clearing the flag, we re-check the cache and try again rather than blocking forever.
+      while (_overlayPixelInFlight.Contains(overlaySlot))
+        Monitor.Wait(_overlayPixelCacheLock, millisecondsTimeout: 2000);
+
+      if (_overlayPixelCache.TryGetValue(overlaySlot, out var cached))
+        return cached.Pixels is null
+            ? (null, 0, 0, overlaySlot)
+            : (cached.Pixels, cached.W, cached.H, overlaySlot);
+
+      // Mark this slot as in-flight so concurrent callers wait above.
+      _overlayPixelInFlight.Add(overlaySlot);
+    }
+
+    // ── Step 3: fetch icon on a dedicated STA thread ──────────────────────
+    // IImageList is a free-threaded COM object in practice, but SHGetImageList
+    // must be called from the same apartment that will use the interface.
+    // Using a short-lived STA thread avoids the “COM object separated from its
+    // underlying RCW” error that occurs when a cached RCW outlives its STA thread.
+    byte[]? pixels = null;
+    int pw = 0, ph = 0;
+    Exception? innerEx = null;
+
+    var staThread = new System.Threading.Thread(() => {
+      try {
+        IImageList? imageList = null;
+        // Overlay images exist only in SHIL_EXTRALARGE (0x2); SHIL_JUMBO (0x4) does not
+        // support GetOverlayImage and would return null pixels, poisoning the cache.
+        if (SHGetImageList(0x2, IID_IImageList, out imageList) != 0 || imageList == null)
+          return;
+        try {
+          if (imageList.GetOverlayImage(overlaySlot, out int ilIndex) != 0)
+            return;
+          const uint ILD_TRANSPARENT = 0x1;
+          if (imageList.GetIcon(ilIndex, 0x00001000, out IntPtr hIcon) != 0 || hIcon == IntPtr.Zero)
+            return;
+          try {
+            var (px, w, h) = HIconToPixels(hIcon, 0, 0);  // 0,0 = detect native size
+            pixels = px;
+            pw = w;
+            ph = h;
+          } finally {
+            DestroyIcon(hIcon);
+          }
+        } finally {
+          // Do NOT call Marshal.ReleaseComObject here. SHGetImageList returns the
+          // process-wide system image list singleton; releasing its RCW disconnects
+          // it for every other caller and causes the "COM object separated from its
+          // underlying RCW" exception on concurrent threads.
+          GC.KeepAlive(imageList);
+        }
+      } catch (Exception ex) {
+        innerEx = ex;
+      }
+    });
+    staThread.SetApartmentState(System.Threading.ApartmentState.STA);
+    staThread.IsBackground = true;
+    staThread.Start();
+    staThread.Join();
+
+    // Cache the result and clear the in-flight marker so waiting threads wake up.
+    lock (_overlayPixelCacheLock) {
+      _overlayPixelCache.TryAdd(overlaySlot, (pixels, pw, ph));
+      _overlayPixelInFlight.Remove(overlaySlot);
+      Monitor.PulseAll(_overlayPixelCacheLock);
+    }
+
+    return pixels is null ? (null, 0, 0, overlaySlot) : (pixels, pw, ph, overlaySlot);
+  }
+
+  /// <summary>
+  /// Renders an HICON into a premultiplied BGRA byte array (top-down) via a temporary DIBSection.
+  /// Pass <c>targetW = 0, targetH = 0</c> to auto-detect the icon's native pixel dimensions via
+  /// <c>GetIconInfo</c>/<c>GetObject</c> so the icon is rendered at its true size without upscaling.
+  /// </summary>
+  private static (byte[]? pixels, int w, int h) HIconToPixels(IntPtr hIcon, int targetW, int targetH) {
+    // When 0,0 is passed, derive the icon's native pixel dimensions so we never
+    // upscale (which destroys quality).  SHIL_JUMBO gives 256×256 natively;
+    // SHIL_EXTRALARGE gives 48×48.  Both are rendered at their true size.
+    if ((targetW == 0 || targetH == 0) && GetIconInfo(hIcon, out var iconInfo)) {
+      IntPtr hbmForSize = iconInfo.hbmColor != IntPtr.Zero ? iconInfo.hbmColor : iconInfo.hbmMask;
+      if (hbmForSize != IntPtr.Zero && GetObject(hbmForSize, Marshal.SizeOf<BITMAP>(), out var bm) != 0) {
+        targetW = Math.Max(bm.bmWidth,  1);
+        // For a mask-only icon the bitmap stores both mask and inverted-mask stacked, so height is doubled.
+        targetH = iconInfo.hbmColor != IntPtr.Zero
+            ? Math.Max(bm.bmHeight, 1)
+            : Math.Max(bm.bmHeight / 2, 1);
+      }
+      if (iconInfo.hbmMask  != IntPtr.Zero) DeleteObject(iconInfo.hbmMask);
+      if (iconInfo.hbmColor != IntPtr.Zero) DeleteObject(iconInfo.hbmColor);
+    }
+    if (targetW <= 0 || targetH <= 0) return (null, 0, 0);
+
+    IntPtr hdc = CreateCompatibleDC(IntPtr.Zero);
+    if (hdc == IntPtr.Zero) return (null, 0, 0);
+    try {
+      var bmi = new BITMAPINFOHEADER {
+        biSize = Marshal.SizeOf<BITMAPINFOHEADER>(),
+        biWidth = targetW,
+        biHeight = -targetH,  // negative = top-down
+        biPlanes = 1,
+        biBitCount = 32,
+        biCompression = 0
+      };
+      IntPtr hbm = CreateDIBSection(hdc, ref bmi, 0, out _, IntPtr.Zero, 0);
+      if (hbm == IntPtr.Zero) return (null, 0, 0);
+      try {
+        IntPtr hOld = SelectObject(hdc, hbm);
+        try {
+          DrawIconEx(hdc, 0, 0, hIcon, targetW, targetH, 0, IntPtr.Zero, DI_NORMAL);
+        } finally {
+          SelectObject(hdc, hOld);
+        }
+        return HBitmapToPixels(hbm);
+      } finally {
+        DeleteObject(hbm);
+      }
+    } finally {
+      DeleteDC(hdc);
+    }
   }
 
   /// <summary>

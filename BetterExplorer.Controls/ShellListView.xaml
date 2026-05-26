@@ -111,12 +111,17 @@
         <Viewbox Grid.Row="0" Width="256" Height="256"
                          Stretch="Uniform" StretchDirection="DownOnly"
                          HorizontalAlignment="Center" VerticalAlignment="Bottom">
-          <Grid Width="256" Height="284">
+          <Grid Width="256" Height="256">
             <FontIcon Glyph="{x:Bind IconGlyph, Mode=OneWay, FallbackValue=&#xE8A5;}"
                                   FontSize="192"
                                   Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="None" />
+            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+            <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                   Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                   Width="64" Height="64"
+                   HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Stretch="Uniform" IsHitTestVisible="False" />
           </Grid>
         </Viewbox>
         <Canvas Grid.Row="1" Width="276" Height="57" HorizontalAlignment="Left"
@@ -146,7 +151,12 @@
                                   FontSize="96"
                                   Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="None" />
+            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+            <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                   Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                   Width="64" Height="64"
+                   HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Stretch="Uniform" IsHitTestVisible="False" />
           </Grid>
         </Viewbox>
         <Canvas Grid.Row="1" Width="148" Height="57" HorizontalAlignment="Left"
@@ -176,7 +186,12 @@
                                   FontSize="72"
                                   Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
-            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="None" />
+            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+            <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                   Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                   Width="48" Height="48"
+                   HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Stretch="Uniform" IsHitTestVisible="False" />
           </Grid>
         </Viewbox>
         <Canvas Grid.Row="1" Width="116" Height="57" HorizontalAlignment="Left"
@@ -190,7 +205,7 @@
     </DataTemplate>
 
     <!-- ═══════════════════════════════════════════════
-             Small Icons  (16 px) — horizontal wrap
+             Small Icons  (48 px)
         ════════════════════════════════════════════════ -->
     <DataTemplate x:Key="SmallIconsTemplate" x:DataType="shellapi:ShellItem">
       <Grid Width="80" Opacity="{x:Bind IconOpacity, Mode=OneWay, FallbackValue=1.0}">
@@ -206,10 +221,15 @@
                               FontSize="36"
                               Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                               HorizontalAlignment="Center" VerticalAlignment="Center" />
-            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="None" />
+            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+            <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                   Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                   Width="48" Height="48"
+                   HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Stretch="Uniform" IsHitTestVisible="False" />
           </Grid>
         </Viewbox>
-        <Canvas Grid.Row="1" Width="80" Height="57" HorizontalAlignment="Left"
+        <Canvas Grid.Row="1" Width="80"
             Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="80"
                            Text="{x:Bind Name, Mode=OneWay}"
@@ -227,7 +247,7 @@
                                               FontSize="12"
                                               Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
-            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="None" />
+            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
           </Grid>
         </Viewbox>
         <TextBlock Text="{x:Bind Name}" VerticalAlignment="Center"
@@ -248,7 +268,12 @@
                                               FontSize="12"
                                               Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
-            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="None" />
+            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+            <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                   Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                   Width="8" Height="8"
+                   HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Stretch="Uniform" IsHitTestVisible="False" />
           </Grid>
         </Viewbox>
         <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center"
@@ -279,6 +304,11 @@
                                       Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
               <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+              <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                     Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                     Width="8" Height="8"
+                     HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                     Stretch="Uniform" IsHitTestVisible="False" />
             </Grid>
           </Viewbox>
           <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center"
@@ -313,6 +343,11 @@
                                   Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
             <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+            <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                   Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                   Width="24" Height="24"
+                   HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Stretch="Uniform" IsHitTestVisible="False" />
           </Grid>
         </Viewbox>
         <StackPanel VerticalAlignment="Center" Spacing="2">
@@ -469,6 +504,11 @@
                                   Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
             <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+            <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                   Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                   Width="16" Height="16"
+                   HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Stretch="Uniform" IsHitTestVisible="False" />
           </Grid>
         </Viewbox>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
