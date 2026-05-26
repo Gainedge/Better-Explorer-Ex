@@ -3,10 +3,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Runtime.InteropServices.WindowsRuntime;
+using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Xml.Linq;
+using BExplorer.Shell;
+using BExplorer.Shell.Interop;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics.Imaging;
 using Windows.Storage;
@@ -381,7 +386,6 @@ public static class NativeShell {
   private static readonly Guid IID_IShellFolder = new("000214E6-0000-0000-C000-000000000046");
   private static readonly Guid IID_IShellItem = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
   private static readonly Guid IID_IKnownFolderManager = new("8BE2D872-86AA-4D47-B776-32CCA40C7018");
-  private static readonly Guid IID_IKnownFolder = new("3AA7AF7E-9B36-420C-A8E3-F77D4674A488");
   private static readonly Guid CLSID_KnownFolderManager = new("4DF0C730-DF9D-4AE3-9153-AA6B82E9795A");
   private static readonly Guid CLSID_ShellLink = new("00021401-0000-0000-C000-000000000046");
   private static readonly Guid IID_IShellLinkW = new("000214F9-0000-0000-C000-000000000046");
@@ -391,6 +395,17 @@ public static class NativeShell {
   private static readonly Guid CLSID_FileOperation = new("3ad05575-8857-4850-9277-11b85bdb8e09");
   private static readonly Guid IID_IFileOperation = new("947aab5f-0a5c-4c13-b4d6-4bf7836fc9f8");
   private static readonly Guid IID_IShellItemOp = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
+
+  // ISearchFolderItemFactory GUIDs (Windows Search virtual-folder search)
+  private static readonly Guid CLSID_SearchFolderItemFactory  = new("14010E02-BBBD-41F0-88E3-EDA371216584");
+  private static readonly Guid IID_ISearchFolderItemFactory   = new("A0FFBC28-5482-4366-BE27-3E81E78E06C2");
+  private static readonly Guid IID_IShellItemArray            = new("B63EA76D-1F85-456F-A19C-48159EFA858B");
+  // IConditionFactory2 / ICondition (structuredquery)
+  private static readonly Guid CLSID_ConditionFactory         = new("E03E85B0-7BE3-4000-BA98-6C13DE9FA486");
+  private static readonly Guid IID_IConditionFactory2         = new("71D222E1-432F-429e-8C13-B6DAFDE5077A");
+  private static readonly Guid IID_ICondition                 = new("0FC988D4-C935-4b97-A973-46282EA175C8");
+  // Folder type for generic search results (ShlGuid.h FOLDERTYPEID_GenericSearchResults)
+  private static readonly Guid FOLDERTYPEID_GenericSearchResults = new("7fde1a1e-8b31-49a5-93b8-6be14cfa4943");
 
   // IFileOperation flags
   private const uint FOF_NOCONFIRMMKDIR   = 0x0200;
@@ -541,6 +556,12 @@ public static class NativeShell {
       [MarshalAs(UnmanagedType.Interface)] out IShellItemArrayCM ppsiItemArray);
 
   [DllImport("shell32.dll", PreserveSig = true)]
+  private static extern int SHCreateShellItemArrayFromShellItem(
+      [MarshalAs(UnmanagedType.Interface)] IShellItem psi,
+      [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out object ppv);
+
+  [DllImport("shell32.dll", PreserveSig = true)]
   internal static extern int SHBindToParent(
       IntPtr pidl,
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
@@ -558,6 +579,16 @@ public static class NativeShell {
       out IntPtr ppidl,
       uint sfgaoIn,
       out uint psfgaoOut);
+
+  // Binds a PIDL directly to an interface without needing the parent IShellFolder.
+  // Passing null (IntPtr.Zero) for psfParent uses the desktop folder as root.
+  [DllImport("shell32.dll", PreserveSig = true)]
+  private static extern int SHBindToObject(
+      IntPtr psfParent,
+      IntPtr pidl,
+      IntPtr pbc,
+      [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out object ppv);
 
   // ── Public IShellFolder (for context-menu use) ────────────────────────────
 
@@ -661,6 +692,15 @@ public static class NativeShell {
         [MarshalAs(UnmanagedType.Interface)] out object ppsi);
     [PreserveSig] int EnumItems(
         [MarshalAs(UnmanagedType.Interface)] out object ppenumShellItems);
+  }
+
+
+  
+  // PROPERTYKEY: fmtid (GUID) + pid (DWORD) — must be sequential/no padding
+  [StructLayout(LayoutKind.Sequential)]
+  private struct PROPERTYKEY {
+    public Guid fmtid;
+    public uint pid;
   }
 
   // ── IContextMenu ──────────────────────────────────────────────────────────
@@ -1291,6 +1331,20 @@ public static class NativeShell {
   }
 
   /// <summary>
+  /// Resolves any shell parsing path to its real filesystem path via
+  /// <c>SIGDN_FILESYSPATH</c>.  Returns <c>null</c> when the item has no
+  /// filesystem representation (e.g. a purely virtual known folder).
+  /// </summary>
+  public static string? TryGetFileSystemPath(string parsingPath) {
+    if (string.IsNullOrEmpty(parsingPath)) return null;
+    try {
+      SHCreateItemFromParsingNameShell(parsingPath, IntPtr.Zero, IID_IShellItem, out var item);
+      item.GetDisplayName(SIGDN_FILESYSPATH, out var fsPath);
+      return string.IsNullOrEmpty(fsPath) ? null : fsPath;
+    } catch { return null; }
+  }
+
+  /// <summary>
   /// Returns the display name for a virtual root path like ::{GUID}.
   /// For filesystem paths, delegates to <see cref="GetShellDisplayName"/>.
   /// </summary>
@@ -1510,6 +1564,57 @@ public static class NativeShell {
     return result;
   }
 
+  /// <summary>
+  /// Enumerates the direct children of any shell item reachable by <paramref name="parsingPath"/>.
+  /// Works for virtual paths like <c>::{GUID}\foo.library-ms</c> that cannot be handled
+  /// by <see cref="EnumerateKnownFolderChildren"/> or <c>FindFirstFileEx</c>.
+  /// </summary>
+  public static List<ShellItem> EnumerateShellItemChildrenByPath(string parsingPath) {
+    var result = new List<ShellItem>();
+    try {
+      SHCreateItemFromParsingNameShell(parsingPath, IntPtr.Zero, IID_IShellItem, out var folderItem);
+      folderItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var folderObj);
+      var folder = (IShellFolder)folderObj;
+
+      if (folder.EnumObjects(IntPtr.Zero,
+              SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_FASTITEMS,
+              out var enumIdList) != 0 || enumIdList == null)
+        return result;
+
+      while (enumIdList.Next(1, out var childPidl, out _) == 0) {
+        try {
+          var strret = default(STRRET);
+          folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
+          string? parsePath = strret.uType == 0
+              ? Marshal.PtrToStringUni(strret.pOleStr) : null;
+          if (parsePath == null)
+            continue;
+
+          var strretDisplay = default(STRRET);
+          folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
+          string? displayName = strretDisplay.uType == 0
+              ? Marshal.PtrToStringUni(strretDisplay.pOleStr)
+              : Path.GetFileName(parsePath);
+
+          uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
+          folder.GetAttributesOf(1, [childPidl], ref attrs);
+          bool isFolder = (attrs & SFGAO_FOLDER) != 0;
+          bool isFs = (attrs & SFGAO_FILESYSTEM) != 0;
+
+          if (!isFolder && !isFs && !Directory.Exists(parsePath))
+            continue;
+
+          result.Add(new ShellItem {
+            Name = displayName ?? Path.GetFileName(parsePath),
+            FullPath = parsePath,
+            IsFolder = isFolder,
+          });
+        } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
+      }
+    } catch { }
+    return result;
+  }
+
   // ── FindFirstFileEx directory enumeration ─────────────────────────────────
 
   // Cache "EXT file" strings so repeated extensions don't heap-allocate a new string every item.
@@ -1630,7 +1735,240 @@ public static class NativeShell {
     } catch { return null; }
   }
 
-  // ── Library XML parser ────────────────────────────────────────────────────
+  // ── Windows Search via ISearchFolderItemFactory (STA thread) ─────────────
+
+  /// <summary>
+  /// Searches <paramref name="folderPath"/> recursively for items whose names match
+  /// <paramref name="query"/> using the shell <c>ISearchFolderItemFactory</c> COM interface
+  /// on a dedicated STA thread (as required by shell COM).
+  /// Glob patterns (<c>*.exe</c>, <c>doc?</c>) match the whole file name;
+  /// plain text performs a contains match.
+  /// </summary>
+  /// <summary>
+  /// Streaming variant of <see cref="SearchFolderAsync"/>: returns a
+  /// <see cref="ChannelReader{T}"/> that yields <see cref="ShellItem"/> results
+  /// as they are found on an STA worker thread, so the caller can display each
+  /// batch immediately without waiting for the full enumeration to complete.
+  /// </summary>
+  public static ChannelReader<ShellItem> SearchFolderStreamAsync(
+      string folderPath, string query, CancellationToken ct) {
+    var channel = Channel.CreateUnbounded<ShellItem>(
+        new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+
+    if (string.IsNullOrWhiteSpace(folderPath)
+        || folderPath.StartsWith("::", StringComparison.Ordinal)
+        || string.IsNullOrWhiteSpace(query)
+        || !Directory.Exists(folderPath)) {
+      channel.Writer.Complete();
+      return channel.Reader;
+    }
+
+    bool isGlob = query.Contains('*') || query.Contains('?');
+    string regexPattern = isGlob
+        ? "^" + Regex.Escape(query).Replace(@"\*", ".*").Replace(@"\?", ".") + "$"
+        : Regex.Escape(query);
+    var nameRegex = new Regex(regexPattern,
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    var thread = new Thread(() => {
+      try {
+        ct.ThrowIfCancellationRequested();
+        DoShellItemSearchStreaming(folderPath, nameRegex, query, isGlob, ct, channel.Writer);
+        channel.Writer.Complete();
+      } catch (OperationCanceledException) {
+        channel.Writer.Complete();
+      } catch (Exception ex) {
+        System.Diagnostics.Debug.WriteLine($"[SearchFolderStreamAsync] {ex.GetType().Name}: {ex.Message}");
+        channel.Writer.Complete();
+      }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+    return channel.Reader;
+  }
+
+  public static async Task<List<ShellItem>> SearchFolderAsync(
+      string folderPath, string query, CancellationToken ct) {
+    if (string.IsNullOrWhiteSpace(folderPath)
+        || folderPath.StartsWith("::", StringComparison.Ordinal)
+        || string.IsNullOrWhiteSpace(query)
+        || !Directory.Exists(folderPath))
+      return [];
+
+    bool isGlob = query.Contains('*') || query.Contains('?');
+    string regexPattern = isGlob
+        ? "^" + Regex.Escape(query).Replace(@"\*", ".*").Replace(@"\?", ".") + "$"
+        : Regex.Escape(query);
+    var nameRegex = new Regex(regexPattern,
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    var tcs = new TaskCompletionSource<List<ShellItem>>();
+    var thread = new Thread(() => {
+      try {
+        ct.ThrowIfCancellationRequested();
+        tcs.SetResult(DoShellItemSearch(folderPath, nameRegex, query, isGlob, ct));
+      } catch (OperationCanceledException) {
+        tcs.SetCanceled(ct);
+      } catch (Exception ex) {
+        System.Diagnostics.Debug.WriteLine($"[SearchFolderAsync] {ex.GetType().Name}: {ex.Message}");
+        tcs.SetResult([]);
+      }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+
+    return await tcs.Task.ConfigureAwait(false);
+  }
+
+  private static String PrepareSearchQuery(String query) {
+    var prefix = "System.Generic.String:";
+    if (query.StartsWith("*.")) {
+      prefix = "fileextension:";
+    }
+
+    if (query.Contains(":")) {
+      prefix = String.Empty;
+    }
+
+    return prefix + query;
+  }
+
+  /// <summary>
+  /// COM/STA worker: creates a <c>SearchFolderItemFactory</c> scoped to
+  /// <paramref name="folderPath"/> with an <c>ICondition</c> (built via
+  /// <c>IConditionFactory2.CreateStringLeaf</c>) that targets
+  /// <c>System.ItemNameDisplay</c> using DOS-wildcard or contains matching.
+  /// Setting <c>FOLDERTYPEID_GenericSearchResults</c> and providing an explicit
+  /// <c>ICondition</c> causes Windows Search to crawl non-indexed locations
+  /// in addition to the index, so the results match what Explorer's search box
+  /// returns for any folder.
+  /// </summary>
+  private static List<ShellItem> DoShellItemSearch(
+      string folderPath, Regex nameRegex, string rawQuery, bool isGlob, CancellationToken ct) {
+    var results = new List<ShellItem>();
+
+
+
+    var factory = (BExplorer.Shell.Interop.ISearchFolderItemFactory)new SearchFolderItemFactoryCoClass();
+    var searchCondition = SearchConditionFactory.ParseStructuredQuery(PrepareSearchQuery(rawQuery));
+    var shellItems = new List<ShellLibrary.Interop.IShellItem>(1);
+    //SHCreateItemFromParsingNameShell(folderPath, IntPtr.Zero, IID_IShellItem, out var folderItem);
+    var folderItem = Shell32.SHCreateItemFromParsingName(folderPath, IntPtr.Zero, IID_IShellItem);
+    shellItems.Add(folderItem);
+    IShellItemArray scopeShellItemArray = new ShellItemArray(shellItems.ToArray());
+    //var hr = SHCreateShellItemArrayFromShellItem(folderItem, IID_IShellItemArray, out var scopeObj);
+
+    //if (hr == 0 && scopeObj is not null)
+      factory.SetScope(scopeShellItemArray);
+
+    // Pass the condition (or null to match everything).
+    factory.SetCondition(searchCondition.NativeSearchCondition);
+
+
+    // ── 3. Enumerate the virtual search-results IShellFolder ──────────────
+    var hr = factory.GetShellItem(IID_IShellItem, out var searchItemObj);
+    if (hr != 0 || searchItemObj is not IShellItem searchItem)
+      return results;
+
+    searchItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var sfObj);
+    if (sfObj is not IShellFolder sf)
+      return results;
+
+    hr = sf.EnumObjects(IntPtr.Zero,
+        (uint)(SHCONTF.FOLDERS | SHCONTF.INCLUDEHIDDEN | SHCONTF.INCLUDESUPERHIDDEN |
+          SHCONTF.NONFOLDERS | SHCONTF.FASTITEMS),
+        out var enumIDList);
+    if (hr != 0 || enumIDList is null)
+      return results;
+
+    while (true) {
+      ct.ThrowIfCancellationRequested();
+      hr = enumIDList.Next(1, out var childPidl, out var fetched);
+      if (hr != 0 || fetched == 0) break;
+
+      try {
+        var strret = default(STRRET);
+        sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
+        string? fullPath = strret.uType == 0
+            ? Marshal.PtrToStringUni(strret.pOleStr) : null;
+        if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
+          Marshal.FreeCoTaskMem(strret.pOleStr);
+
+        if (string.IsNullOrEmpty(fullPath)) continue;
+        string name = Path.GetFileName(fullPath);
+        if (string.IsNullOrEmpty(name)) continue;
+
+        var item = GetSingleItemMetadata(fullPath);
+        if (item is not null) results.Add(item);
+      } finally {
+        Marshal.FreeCoTaskMem(childPidl);
+      }
+    }
+
+    return results;
+  }
+
+  /// <summary>
+  /// Streaming variant of <see cref="DoShellItemSearch"/>: writes each matching
+  /// <see cref="ShellItem"/> to <paramref name="writer"/> as soon as it is found
+  /// so the consumer can display results incrementally.
+  /// </summary>
+  private static void DoShellItemSearchStreaming(
+      string folderPath, Regex nameRegex, string rawQuery, bool isGlob,
+      CancellationToken ct, ChannelWriter<ShellItem> writer) {
+    var factory = (BExplorer.Shell.Interop.ISearchFolderItemFactory)new SearchFolderItemFactoryCoClass();
+    var searchCondition = SearchConditionFactory.ParseStructuredQuery(PrepareSearchQuery(rawQuery));
+    var shellItems = new List<ShellLibrary.Interop.IShellItem>(1);
+    var folderItem = Shell32.SHCreateItemFromParsingName(folderPath, IntPtr.Zero, IID_IShellItem);
+    shellItems.Add(folderItem);
+    IShellItemArray scopeShellItemArray = new ShellItemArray(shellItems.ToArray());
+    factory.SetScope(scopeShellItemArray);
+    factory.SetCondition(searchCondition.NativeSearchCondition);
+
+    var hr = factory.GetShellItem(IID_IShellItem, out var searchItemObj);
+    if (hr != 0 || searchItemObj is not IShellItem searchItem)
+      return;
+
+    searchItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var sfObj);
+    if (sfObj is not IShellFolder sf)
+      return;
+
+    hr = sf.EnumObjects(IntPtr.Zero,
+        (uint)(SHCONTF.FOLDERS | SHCONTF.INCLUDEHIDDEN | SHCONTF.INCLUDESUPERHIDDEN |
+               SHCONTF.NONFOLDERS | SHCONTF.FASTITEMS),
+        out var enumIDList);
+    if (hr != 0 || enumIDList is null)
+      return;
+
+    while (true) {
+      ct.ThrowIfCancellationRequested();
+      hr = enumIDList.Next(1, out var childPidl, out var fetched);
+      if (hr != 0 || fetched == 0) break;
+
+      try {
+        var strret = default(STRRET);
+        sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
+        string? fullPath = strret.uType == 0
+            ? Marshal.PtrToStringUni(strret.pOleStr) : null;
+        if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
+          Marshal.FreeCoTaskMem(strret.pOleStr);
+
+        if (string.IsNullOrEmpty(fullPath)) continue;
+        string name = Path.GetFileName(fullPath);
+        if (string.IsNullOrEmpty(name)) continue;
+
+        var item = GetSingleItemMetadata(fullPath);
+        if (item is not null)
+          writer.TryWrite(item);
+      } finally {
+        Marshal.FreeCoTaskMem(childPidl);
+      }
+    }
+  }
+
+    // ── Library XML parser ────────────────────────────────────────────────────
 
   public static string? ResolveLibraryDefaultPath(string libraryFile) {
     try {
@@ -2149,4 +2487,9 @@ public static class NativeShell {
     };
     ShellExecuteExW(ref sei);
   }
+}
+
+public struct PROPERTYKEY {
+  public Guid fmtid;
+  public int pid;
 }

@@ -33,6 +33,9 @@ public sealed partial class ShellTreeView : UserControl
     private readonly object _iconCacheLock = new();
 
     private double _iconScale = 1.0;
+    private bool   _rootsReady;
+    private string? _pendingSyncPath;
+    private Task?  _librariesLoadTask;
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -45,6 +48,13 @@ public sealed partial class ShellTreeView : UserControl
         {
             _iconScale = XamlRoot?.RasterizationScale ?? 1.0;
             await PopulateRootsAsync();
+            _rootsReady = true;
+            if (_pendingSyncPath is not null)
+            {
+                var p = _pendingSyncPath;
+                _pendingSyncPath = null;
+                SyncToPath(p);
+            }
         };
     }
 
@@ -105,21 +115,23 @@ public sealed partial class ShellTreeView : UserControl
         };
         Roots.Add(pc);
         LoadIDListKnownFolderIcon(pc, NativeShell.FOLDERID_ComputerFolder, "::pc", iconSize);
-        _ = LoadDrivesAsync(pc, iconSize, ct);
+        // Await drives so that drive nodes exist before SyncToPath runs.
+        await LoadDrivesAsync(pc, iconSize, ct);
 
         // ── Libraries ─────────────────────────────────────────────────────────
         var lib = new ShellTreeNode
         {
-            Name          = "Libraries",
-            FullPath      = null,
-            IsVirtual     = true,
-            IsGroupHeader = true,
-            IsFolder      = false,
-            TopMargin     = new Thickness(0, 8, 0, 0),
+            Name             = "Libraries",
+            FullPath         = null,
+            IsVirtual        = true,
+            IsGroupHeader    = true,
+            IsFolder         = false,
+            KnownFolderGuid  = NativeShell.FOLDERID_Libraries,
+            TopMargin        = new Thickness(0, 8, 0, 0),
         };
         Roots.Add(lib);
         LoadIDListKnownFolderIcon(lib, NativeShell.FOLDERID_Libraries, "::lib", iconSize);
-        _ = LoadLibrariesAsync(lib, iconSize, ct);
+        _librariesLoadTask = LoadLibrariesAsync(lib, iconSize, ct);
 
         // ── Network ───────────────────────────────────────────────────────────
         var net = new ShellTreeNode
@@ -134,8 +146,6 @@ public sealed partial class ShellTreeView : UserControl
         net.Children.Add(ShellTreeNode.Dummy);
         Roots.Add(net);
         LoadIDListKnownFolderIcon(net, NativeShell.FOLDERID_NetworkFolder, "::net", iconSize);
-
-        await Task.CompletedTask;
     }
 
     // ── Quick Access children ─────────────────────────────────────────────────
@@ -310,6 +320,12 @@ public sealed partial class ShellTreeView : UserControl
         path = path.TrimEnd('\\', '/');
         if (string.IsNullOrEmpty(path)) return;
 
+        if (!_rootsReady)
+        {
+            _pendingSyncPath = path;
+            return;
+        }
+
         // Virtual known-folder path e.g. ::{20D04FE0-3AEA-1069-A2D8-08002B30309D}
         // These paths have no filesystem ancestors — match directly by KnownFolderGuid.
         if (path.StartsWith("::{", StringComparison.Ordinal))
@@ -317,6 +333,7 @@ public sealed partial class ShellTreeView : UserControl
             var guidStr = path.Substring(2); // strip leading ::
             if (Guid.TryParse(guidStr, out var knownGuid))
             {
+                // Bare known-folder GUID — select the matching root node directly.
                 var kfNode = FindNodeByKnownFolderGuid(Roots, knownGuid);
                 if (kfNode != null)
                 {
@@ -326,6 +343,87 @@ public sealed partial class ShellTreeView : UserControl
                     DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
                         ScrollTreeToNode(kfNode));
                 }
+                return;
+            }
+
+            // Compound virtual path e.g. ::{GUID}\Documents.library-ms
+            // Strategy 1: try to resolve to a real filesystem path via the shell.
+            var fsResolved = NativeShell.TryGetFileSystemPath(path);
+
+            // If the shell gave us a .library-ms file path, resolve its default
+            // save location so we get the actual directory (e.g. C:\Users\Joe\Documents).
+            if (!string.IsNullOrEmpty(fsResolved)
+                && fsResolved.EndsWith(".library-ms", StringComparison.OrdinalIgnoreCase))
+                fsResolved = NativeShell.ResolveLibraryDefaultPath(fsResolved);
+
+            if (!string.IsNullOrEmpty(fsResolved))
+            {
+                // Strategy 2: search all root children directly for a node whose
+                // FullPath matches the resolved path. Library nodes live directly
+                // under the Libraries root without intermediate C:\, C:\Users\... nodes,
+                // so the normal ancestor walk would never find them.
+                var target = fsResolved.TrimEnd('\\', '/');
+                foreach (var root in Roots)
+                {
+                    var direct = FindNodeByFullPath(root.Children, target);
+                    if (direct != null)
+                    {
+                        root.IsExpanded = true;
+                        _suppressItemInvoked = true;
+                        NavTree.SelectedItem = direct;
+                        _suppressItemInvoked = false;
+                        DispatcherQueue.TryEnqueue(
+                            Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                            () => ScrollTreeToNode(direct));
+                        return;
+                    }
+                }
+
+                // Strategy 3: the resolved path may be nested deeper (e.g. inside a
+                // library folder); fall through to the normal ancestor walk.
+                SyncToPath(fsResolved);
+                return;
+            }
+
+            // Strategy 4: path contains .library-ms — match by library name under
+            // the Libraries root. LoadLibrariesAsync stores Name = GetFileNameWithoutExtension,
+            // so "Documents.library-ms" matches the node whose Name == "Documents".
+            var lastSegment = path.Split('\\', '/').LastOrDefault() ?? string.Empty;
+            if (lastSegment.EndsWith(".library-ms", StringComparison.OrdinalIgnoreCase))
+            {
+                var libName = Path.GetFileNameWithoutExtension(lastSegment);
+                var libRoot = FindNodeByKnownFolderGuid(Roots, NativeShell.FOLDERID_Libraries);
+                if (libRoot != null)
+                {
+                    // Wait for LoadLibrariesAsync if it hasn't finished yet.
+                    if (_librariesLoadTask != null)
+                        await _librariesLoadTask;
+
+                    var libNode = libRoot.Children.FirstOrDefault(n =>
+                        string.Equals(n.Name, libName, StringComparison.OrdinalIgnoreCase));
+                    if (libNode != null)
+                    {
+                        libRoot.IsExpanded = true;
+                        _suppressItemInvoked = true;
+                        NavTree.SelectedItem = libNode;
+                        _suppressItemInvoked = false;
+                        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+                            ScrollTreeToNode(libNode));
+                        return;
+                    }
+                }
+            }
+
+            // Strategy 5: no filesystem representation at all — try a direct
+            // virtual-path match against any already-loaded tree node.
+            var virtualNode = FindNodeByFullPath(Roots, path);
+            if (virtualNode != null)
+            {
+                _suppressItemInvoked = true;
+                NavTree.SelectedItem = virtualNode;
+                _suppressItemInvoked = false;
+                DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+                    ScrollTreeToNode(virtualNode));
             }
             return;
         }
@@ -365,6 +463,26 @@ public sealed partial class ShellTreeView : UserControl
         {
             if (node.KnownFolderGuid == guid) return node;
             var found = FindNodeByKnownFolderGuid(node.Children, guid);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Recursively searches <paramref name="nodes"/> for a node whose
+    /// <see cref="ShellTreeNode.FullPath"/> matches <paramref name="path"/> exactly
+    /// (case-insensitive, trailing separators ignored). Used to locate virtual-path
+    /// nodes and library nodes that have no GUID.
+    /// </summary>
+    private static ShellTreeNode? FindNodeByFullPath(
+        IEnumerable<ShellTreeNode> nodes, string path)
+    {
+        var target = path.TrimEnd('\\', '/');
+        foreach (var node in nodes)
+        {
+            if (string.Equals(node.FullPath?.TrimEnd('\\', '/'), target, StringComparison.OrdinalIgnoreCase))
+                return node;
+            var found = FindNodeByFullPath(node.Children, target);
             if (found != null) return found;
         }
         return null;

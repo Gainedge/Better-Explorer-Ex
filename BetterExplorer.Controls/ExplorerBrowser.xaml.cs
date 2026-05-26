@@ -42,6 +42,19 @@ public sealed partial class ExplorerBrowser : UserControl
     /// <summary>Forwarded from the inner <see cref="ShellListView.PathChanged"/>.</summary>
     public event EventHandler<string>? PathChanged;
 
+    /// <summary>Forwarded from the inner <see cref="ShellListView.BusyChanged"/>.
+    /// True while a navigation or search is in progress; false when complete.</summary>
+    public event EventHandler<bool>? BusyChanged;
+
+    /// <summary>Forwarded from the inner <see cref="ShellListView.SearchQueryChanged"/>.
+    /// Non-null when a search is active; null when the search is cleared.</summary>
+    public event EventHandler<string?>? SearchQueryChanged;
+
+    // ── Search debounce ───────────────────────────────────────────────────────
+
+    private readonly DispatcherTimer _searchDebounce = new() { Interval = TimeSpan.FromMilliseconds(400) };
+    private string _pendingSearchText = string.Empty;
+
     // ── Constructor ───────────────────────────────────────────────────────────
 
     public ExplorerBrowser()
@@ -52,11 +65,21 @@ public sealed partial class ExplorerBrowser : UserControl
         FileList.GroupChanged += OnGroupChanged;
         FileList.SelectionChanged += (_, _) => UpdateToolbarButtonStates();
         FileList.ClipboardChanged += (_, _) => UpdateToolbarButtonStates();
+        FileList.BusyChanged        += (_, busy) => BusyChanged?.Invoke(this, busy);
+        FileList.SearchQueryChanged += OnSearchQueryChanged;
+        FileList.SearchQueryChanged += (_, q)    => SearchQueryChanged?.Invoke(this, q);
         FileList.TreeDriveAdded     += (_, root) => NavTreeView.NotifyDriveAdded(root);
         FileList.TreeDriveRemoved   += (_, root) => NavTreeView.NotifyDriveRemoved(root);
         FileList.TreeFolderCreated  += (_, path) => NavTreeView.NotifyFolderCreated(path);
         FileList.TreeFolderDeleted  += (_, path) => NavTreeView.NotifyFolderDeleted(path);
         FileList.TreeFolderRenamed  += (_, e)    => NavTreeView.NotifyFolderRenamed(e.OldPath, e.NewPath);
+        _searchDebounce.Tick += (_, _) => {
+            _searchDebounce.Stop();
+            if (string.IsNullOrEmpty(_pendingSearchText))
+                FileList.ClearSearch();
+            else
+                FileList.SearchCurrentFolder(_pendingSearchText);
+        };
         UpdateViewModeCheckmarks(FileList.ViewMode);
         UpdateSortCheckmarks(FileList.SortColumn, FileList.SortAscending);
         UpdateGroupCheckmarks(FileList.GroupColumn);
@@ -75,12 +98,22 @@ public sealed partial class ExplorerBrowser : UserControl
 
     private void OnPathChanged(object? sender, string path)
     {
+        // Kill any pending search debounce — the user navigated away before
+        // the timer fired, so the old query must not be replayed in the new folder.
+        _searchDebounce.Stop();
+        _pendingSearchText = string.Empty;
+
         AddressBar.SetPath(path);
         BackButton.IsEnabled    = FileList.CanGoBack;
         ForwardButton.IsEnabled = FileList.CanGoForward;
         var (fsParent, kfParent) = NativeShell.TryGetShellParent(path);
         UpLevelButton.IsEnabled = fsParent is not null || kfParent != Guid.Empty;
         RefreshButton.IsEnabled = true;
+        SearchBox.IsEnabled     = !path.StartsWith("::", StringComparison.Ordinal);
+        // Clear the search text without triggering a new search — navigation is already done.
+        SearchBox.TextChanged -= SearchBox_TextChanged;
+        SearchBox.Text = string.Empty;
+        SearchBox.TextChanged += SearchBox_TextChanged;
         NavTreeView.SyncToPath(path);
         UpdateViewModeCheckmarks(FileList.ViewMode);
         UpdateSortCheckmarks(FileList.SortColumn, FileList.SortAscending);
@@ -88,6 +121,28 @@ public sealed partial class ExplorerBrowser : UserControl
         PathChanged?.Invoke(this, path);
         UpdateToolbarButtonStates();
     }
+
+    /// <summary>
+    /// Called when the list view starts or clears a search.
+    /// Updates the breadcrumb to show a search chip and keeps Back enabled.
+    /// </summary>
+    private void OnSearchQueryChanged(object? sender, string? query)
+    {
+        if (query is not null)
+        {
+            AddressBar.SetSearchMode(query);
+            BackButton.IsEnabled    = FileList.CanGoBack;
+            ForwardButton.IsEnabled = FileList.CanGoForward;
+        }
+        // null means the search was cleared — OnPathChanged fires next and resets everything.
+    }
+
+    /// <summary>
+    /// Called when the tab hosting this browser becomes the active tab.
+    /// Forwards focus and name-expansion popup refresh to the inner list view.
+    /// </summary>
+    public void Activate() => FileList.NotifyActivated();
+    public void Deactivate() => FileList.NotifyDeactivated();
 
     private void OnBreadcrumbPathRequested(object? sender, string path)
     {
@@ -124,6 +179,26 @@ public sealed partial class ExplorerBrowser : UserControl
     private void ForwardButton_Click(object sender, RoutedEventArgs e)    => FileList.GoForward();
     private void UpLevelButton_Click(object sender, RoutedEventArgs e)    => FileList.GoUp();
     private void RefreshButton_Click(object sender, RoutedEventArgs e)    => FileList.Refresh();
+
+    // ── Search box ────────────────────────────────────────────────────────────
+
+    private void SearchBox_TextChanged(AutoSuggestBox sender,
+        AutoSuggestBoxTextChangedEventArgs args) {
+        if (args.Reason == AutoSuggestionBoxTextChangeReason.UserInput) {
+            _pendingSearchText = sender.Text;
+            _searchDebounce.Stop();
+            _searchDebounce.Start();
+        }
+    }
+
+    private void SearchBox_QuerySubmitted(AutoSuggestBox sender,
+        AutoSuggestBoxQuerySubmittedEventArgs args) {
+        var query = args.QueryText ?? sender.Text;
+        if (string.IsNullOrWhiteSpace(query))
+            FileList.ClearSearch();
+        else
+            FileList.SearchCurrentFolder(query);
+    }
 
     // ── New button ────────────────────────────────────────────────────────────
 

@@ -16,6 +16,10 @@
     <!-- Shared column-width state — both the header and each item row bind to this. -->
     <shellapi:DetailsColumnSettings x:Key="DetailsColumns" />
 
+    <!-- Fixed height for the details column header row. Applied to both the header
+         grid and each DataTemplate item so the gripper Border stretches fully. -->
+    <x:Double x:Key="DetailsHeaderHeight">35</x:Double>
+
     <!-- ═══════════════════════════════════════════════
              Rename TextBox — no delete/clear button
         ════════════════════════════════════════════════ -->
@@ -491,9 +495,11 @@
 
     <!-- Details header row -->
     <Grid x:Name="DetailsHeader" Grid.Row="0"
+              Height="{StaticResource DetailsHeaderHeight}"
               BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
-              BorderThickness="0,0,0,1" Padding="12,4">
+              BorderThickness="0,0,0,1" Padding="12,0">
       <ItemsRepeater x:Name="DetailsHeaderRepeater"
+                     VerticalAlignment="Stretch"
                      ItemsSource="{Binding Columns, Source={StaticResource DetailsColumns}}"
                      ElementPrepared="OnDetailsHeaderElementPrepared">
         <ItemsRepeater.Layout>
@@ -502,6 +508,8 @@
         <ItemsRepeater.ItemTemplate>
           <DataTemplate x:DataType="shellapi:DetailsColumn">
             <Grid Width="{x:Bind Width, Mode=OneWay}"
+                  Height="{StaticResource DetailsHeaderHeight}"
+                  VerticalAlignment="Stretch"
                   Background="Transparent"
                   Tag="{x:Bind Key}"
                   Tapped="OnColumnHeaderTapped">
@@ -510,6 +518,7 @@
                 <TextBlock Text="{x:Bind SortIndicator, Mode=OneWay}" FontWeight="Normal" FontSize="12" VerticalAlignment="Center" />
               </StackPanel>
               <Border Tag="{x:Bind Key}" Width="8" HorizontalAlignment="Right"
+                      VerticalAlignment="Stretch"
                       Background="Transparent" BorderThickness="0,0,1,0"
                       BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" />
             </Grid>

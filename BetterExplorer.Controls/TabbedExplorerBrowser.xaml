@@ -10,6 +10,7 @@
 
   <Grid x:Name="ContentGrid">
     <TabView x:Name="Tabs"
+             Opacity="0"
              IsAddTabButtonVisible="True"
              CanReorderTabs="True"
              CanDragTabs="True"
@@ -20,9 +21,24 @@
              SelectionChanged="OnTabSelectionChanged">
 
       <TabView.Resources>
-        <!-- Make the built-in inter-tab separator line visible -->
-        <SolidColorBrush x:Key="TabViewItemSeparatorBrush"
-                         Color="{ThemeResource DividerStrokeColorDefault}" />
+        <ResourceDictionary>
+          <ResourceDictionary.ThemeDictionaries>
+            <ResourceDictionary x:Key="Dark">
+              <SolidColorBrush x:Key="TabViewItemSeparatorBrush"     Color="{ThemeResource DividerStrokeColorDefault}" />
+              <SolidColorBrush x:Key="TabViewBackground"             Color="Transparent" />
+              <!-- White tint on dark Mica: selected tab + content area -->
+              <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#80303030" />
+              <SolidColorBrush x:Key="TabViewContentBackground"      Color="#80303030" />
+            </ResourceDictionary>
+            <ResourceDictionary x:Key="Light">
+              <SolidColorBrush x:Key="TabViewItemSeparatorBrush"     Color="{ThemeResource DividerStrokeColorDefault}" />
+              <SolidColorBrush x:Key="TabViewBackground"             Color="Transparent" />
+              <!-- Black tint on light Mica: selected tab + content area -->
+              <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#80303030" />
+              <SolidColorBrush x:Key="TabViewContentBackground"      Color="#80303030" />
+            </ResourceDictionary>
+          </ResourceDictionary.ThemeDictionaries>
+        </ResourceDictionary>
       </TabView.Resources>
 
       <!--
@@ -44,5 +60,21 @@
       </TabView.TabStripFooter>
 
     </TabView>
+
+    <!-- Loading overlay: visible until the first navigation completes -->
+    <Grid x:Name="LoadingOverlay"
+          VerticalAlignment="Stretch"
+          HorizontalAlignment="Stretch">
+      <StackPanel HorizontalAlignment="Center"
+                  VerticalAlignment="Center"
+                  Spacing="12">
+        <ProgressRing IsActive="True" Width="40" Height="40" />
+        <TextBlock Text="Loading…"
+                   HorizontalAlignment="Center"
+                   Style="{ThemeResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+      </StackPanel>
+    </Grid>
+
   </Grid>
 </UserControl>

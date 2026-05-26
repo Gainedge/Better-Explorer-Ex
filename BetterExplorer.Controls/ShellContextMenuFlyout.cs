@@ -93,13 +93,14 @@ internal static class ShellContextMenuFlyout {
       IntPtr                hwnd,
       Windows.Foundation.Point point,
       FrameworkElement      anchor,
-      ShellListView         shellListView) {
+      ShellListView         shellListView,
+      bool                  extendedVerbs = false) {
     if (paths.Count == 0)
       return;
 
     ShellContextMenuSession? session = null;
     try {
-      session = await ShellContextMenuService.QueryAsync(paths, hwnd);
+      session = await ShellContextMenuService.QueryAsync(paths, hwnd, extendedVerbs);
     } catch (Exception ex) {
       System.Diagnostics.Debug.WriteLine($"[ShellContextMenu] QueryAsync failed: {ex}");
     }
@@ -376,12 +377,13 @@ internal static class ShellContextMenuFlyout {
       IntPtr           hwnd,
       Windows.Foundation.Point point,
       FrameworkElement anchor,
-      ShellListView    shellListView) {
+      ShellListView    shellListView,
+      bool             extendedVerbs = false) {
 
     ShellContextMenuSession? session = null;
     try {
       // Use IShellFolder::CreateViewObject — the true SVGIO_BACKGROUND path.
-      session = await ShellContextMenuService.QueryBackgroundAsync(folderPath, hwnd);
+      session = await ShellContextMenuService.QueryBackgroundAsync(folderPath, hwnd, extendedVerbs);
     } catch (Exception ex) {
       System.Diagnostics.Debug.WriteLine($"[ShellContextMenu/BG] QueryBackgroundAsync failed: {ex}");
     }

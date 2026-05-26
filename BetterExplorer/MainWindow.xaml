@@ -10,7 +10,7 @@
     Title="BetterExplorer">
 
   <Window.SystemBackdrop>
-    <MicaBackdrop />
+    <MicaBackdrop Kind="BaseAlt" />
   </Window.SystemBackdrop>
 
   <!-- Tabbed file browser – tab strip lives in the title bar area. -->

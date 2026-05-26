@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 using Windows.Graphics;
+using Windows.Storage;
 
 namespace BetterExplorer;
 
@@ -17,6 +18,16 @@ public sealed partial class MainWindow : Window
     private const double TabStripDips = 40;
 
     private InputNonClientPointerSource? _nonClientSource;
+
+    // ── Settings keys ─────────────────────────────────────────────────────────
+    private const string SettingX         = "Window.X";
+    private const string SettingY         = "Window.Y";
+    private const string SettingWidth     = "Window.Width";
+    private const string SettingHeight    = "Window.Height";
+    private const string SettingPresenter = "Window.Presenter"; // "Normal" | "Maximized" | "Minimized"
+
+    // Last known restored (non-maximized, non-minimized) rect in screen pixels.
+    private RectInt32 _restoredRect;
 
     public MainWindow()
     {
@@ -32,9 +43,73 @@ public sealed partial class MainWindow : Window
 
         _nonClientSource = InputNonClientPointerSource.GetForWindowId(AppWindow.Id);
 
+        RestoreWindowPlacement();
+
         TabbedBrowser.Loaded   += OnTabbedBrowserLoaded;
         SizeChanged            += OnWindowSizeChanged;
+        Closed                 += OnWindowClosed;
     }
+
+    // ── Window placement persistence ─────────────────────────────────────────
+
+    private void RestoreWindowPlacement()
+    {
+        var settings = ApplicationData.Current.LocalSettings.Values;
+
+        // Restore size / position only when both were previously saved.
+        if (settings.TryGetValue(SettingX,      out var ox) &&
+            settings.TryGetValue(SettingY,      out var oy) &&
+            settings.TryGetValue(SettingWidth,  out var ow) &&
+            settings.TryGetValue(SettingHeight, out var oh))
+        {
+            var rect = new RectInt32(
+                (int)ox, (int)oy, (int)ow, (int)oh);
+            AppWindow.MoveAndResize(rect);
+            _restoredRect = rect;
+        }
+
+        // Restore presenter state (Maximized / Minimized / Normal).
+        var presenterStr = settings.TryGetValue(SettingPresenter, out var op) ? op as string : null;
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            switch (presenterStr)
+            {
+                case "Maximized": presenter.Maximize();  break;
+                case "Minimized": presenter.Minimize();  break;
+                // "Normal" or null: leave as-is (already restored size above).
+            }
+        }
+    }
+
+    private void SaveWindowPlacement()
+    {
+        var settings = ApplicationData.Current.LocalSettings.Values;
+
+        string presenterState = "Normal";
+        if (AppWindow.Presenter is OverlappedPresenter p)
+        {
+            presenterState = p.State switch
+            {
+                OverlappedPresenterState.Maximized => "Maximized",
+                OverlappedPresenterState.Minimized => "Minimized",
+                _                                  => "Normal",
+            };
+        }
+
+        // Always save the restored rect (tracked via _restoredRect in SizeChanged)
+        // so reopening from maximized still restores to the right size/position.
+        if (_restoredRect.Width > 0 && _restoredRect.Height > 0)
+        {
+            settings[SettingX]      = _restoredRect.X;
+            settings[SettingY]      = _restoredRect.Y;
+            settings[SettingWidth]  = _restoredRect.Width;
+            settings[SettingHeight] = _restoredRect.Height;
+        }
+
+        settings[SettingPresenter] = presenterState;
+    }
+
+    private void OnWindowClosed(object sender, WindowEventArgs e) => SaveWindowPlacement();
 
     // ── Setup ─────────────────────────────────────────────────────────────────
 
@@ -55,6 +130,16 @@ public sealed partial class MainWindow : Window
     {
         ApplyTitleBarInsets();
         UpdateNonClientRegions();
+
+        // Track the restored rect so SaveWindowPlacement can use it even when
+        // the window is closed while maximized.
+        if (AppWindow.Presenter is OverlappedPresenter op &&
+            op.State == OverlappedPresenterState.Restored)
+        {
+            _restoredRect = new RectInt32(
+                AppWindow.Position.X, AppWindow.Position.Y,
+                AppWindow.Size.Width, AppWindow.Size.Height);
+        }
     }
 
     // ── Non-client region management ──────────────────────────────────────────

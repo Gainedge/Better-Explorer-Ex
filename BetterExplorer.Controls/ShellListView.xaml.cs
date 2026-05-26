@@ -76,6 +76,17 @@ public sealed partial class ShellListView : UserControl {
   /// <summary>Raised whenever the current directory changes.</summary>
   public event EventHandler<string>? PathChanged;
 
+  /// <summary>Raised when a search starts (non-null query) or is cleared (null).</summary>
+  public event EventHandler<string?>? SearchQueryChanged;
+
+  /// <summary>
+  /// Raised with <c>true</c> when an async navigation or search starts,
+  /// and with <c>false</c> when it completes successfully.
+  /// Superseded (cancelled) navigations do NOT fire false — the replacement
+  /// already fired true, so the busy state remains correct.
+  /// </summary>
+  public event EventHandler<bool>? BusyChanged;
+
   /// <summary>Raised whenever the list-view selection changes.</summary>
   public event EventHandler? SelectionChanged;
 
@@ -133,6 +144,14 @@ public sealed partial class ShellListView : UserControl {
   // Separate CTS for in-flight LoadDirectory / NavigateToKnownFolder work so that
   // restarting the thumbnail worker does not cancel an ongoing navigation.
   private CancellationTokenSource _navCts = new();
+  // Tracks the path passed to Navigate/NavigateToKnownFolder before the control is
+  // loaded so that ShellListView_Loaded does not override it with the default C:\ path.
+  private string? _pendingNavigatePath;
+  // ── Search state ─────────────────────────────────────────────────────────
+  // CTS for in-flight search so typing a new character cancels the previous run.
+  private CancellationTokenSource _searchCts = new();
+  // True when the list is showing search results rather than a plain directory.
+  private bool _isSearchActive;
   private const int ThumbConcurrency = 8;
 
   // ── Filesystem watcher ───────────────────────────────────────────────────
@@ -145,6 +164,21 @@ public sealed partial class ShellListView : UserControl {
   // Suppresses the name-expansion popup while we are waiting for a new item's
   // container to be rendered before starting rename.
   private bool _suppressNameExpansion;
+
+  // Saved popup state from the last NotifyDeactivated() call, so it can be
+  // restored immediately on NotifyActivated() before the layout pass runs.
+  private record struct PopupSnapshot(
+      double Left, double Top, double Width,
+      double OverflowHeight,
+      ShellItem Item, ListViewItem Container);
+  private PopupSnapshot? _savedPopupState;
+  // Set to true during NotifyDeactivated so CollapseAllNameExpansions
+  // does not clear _savedPopupState while we are saving it.
+  private bool _savingDeactivationSnapshot;
+  // Set to true after NotifyDeactivated has saved a snapshot, and cleared
+  // after NotifyActivated consumes it.  Prevents any intermediate
+  // CollapseAllNameExpansions (focus-loss, etc.) from discarding the cache.
+  private bool _snapshotPendingRestore;
   // Debounce: shell notifications arrive in bursts (e.g. USB enumeration fires multiple
   // events); collapse them into a single Refresh() after a quiet period.
   private DispatcherTimer? _shellRefreshDebounce;
@@ -247,8 +281,17 @@ public sealed partial class ShellListView : UserControl {
   }
 
   private void ShellListView_Loaded(object sender, RoutedEventArgs e) {
-    if (string.IsNullOrEmpty(CurrentPath))
+    // Only fall back to C:\ if no navigation has been requested yet (neither completed
+    // nor pending). If Navigate/NavigateToKnownFolder was already called before the
+    // control finished loading, the async LoadDirectory is already in flight — don't
+    // cancel it by kicking off another one.
+    if (string.IsNullOrEmpty(CurrentPath) && _pendingNavigatePath is null)
       Navigate(@"C:\");
+
+    // Pre-load shell extension DLLs in the background so the first right-click is
+    // fast. This does a real (throw-away) QueryContextMenu on the Desktop folder
+    // and on notepad.exe, covering both folder-background and per-file handlers.
+    _ = ShellContextMenuService.WarmUpAsync();
 
     // Add the rename popup to the visual tree so it inherits theme resources.
     if (!DragSelectGrid.Children.Contains(_renamePopup))
@@ -540,6 +583,7 @@ public sealed partial class ShellListView : UserControl {
     if (string.Equals(path, CurrentPath, StringComparison.OrdinalIgnoreCase))
       return;
 
+    _pendingNavigatePath = path;
     if (!string.IsNullOrEmpty(CurrentPath))
       _backStack.Push(CurrentPath);
     _forwardStack.Clear();
@@ -609,14 +653,211 @@ public sealed partial class ShellListView : UserControl {
   }
 
   /// <summary>
+  /// Searches the currently-open folder using the Windows Search API (AQS).
+  /// Results are streamed into the ListView in batches as they are found.
+  /// Passing an empty or whitespace query clears the search and restores the folder.
+  /// </summary>
+  public async void SearchCurrentFolder(string query) {
+    if (string.IsNullOrWhiteSpace(query)) {
+      ClearSearch();
+      return;
+    }
+
+    var dispatcherQueue = DispatcherQueue;
+    if (dispatcherQueue == null) return;
+
+    _searchCts.Cancel();
+    _searchCts = new CancellationTokenSource();
+    var ct = _searchCts.Token;
+
+    var wasAlreadySearching = _isSearchActive;
+    _isSearchActive = true;
+    // Push the current folder onto the back stack the first time a search starts
+    // so that Back navigation exits the search and returns here.
+    if (!wasAlreadySearching && !string.IsNullOrEmpty(CurrentPath)) {
+      _backStack.Push(CurrentPath);
+      _forwardStack.Clear();
+      CanGoBack    = true;
+      CanGoForward = false;
+    }
+    SearchQueryChanged?.Invoke(this, query);
+    BusyChanged?.Invoke(this, true);
+    CollapseAllNameExpansions();
+
+    // Cancel any ongoing directory load and reset the list.
+    _navCts.Cancel();
+    _navCts = new CancellationTokenSource();
+    RestartThumbnailWorker();
+    Items.Clear();
+    if (ShellView.ItemsSource != Items)
+      ShellView.ItemsSource = Items;
+
+    var size = ThumbnailSizeForMode(ViewMode);
+    var currentPath = CurrentPath;
+    const int batchSize = 10;
+
+    var reader = NativeShell.SearchFolderStreamAsync(currentPath, query, ct);
+    var buffer = new List<ShellItem>(batchSize);
+
+    try {
+      await foreach (var item in reader.ReadAllAsync(ct)) {
+        buffer.Add(item);
+        if (buffer.Count >= batchSize) {
+          var batchToFlush = buffer.ToList();
+          buffer.Clear();
+          // ReadAllAsync uses ConfigureAwait(false) internally, so its continuations
+          // may run on a thread-pool thread. Marshal the flush back to the UI thread
+          // because WarmTypeIconCacheAsync creates WriteableBitmap objects and
+          // Items.Add fires WinRT CollectionChanged — both require the dispatcher thread.
+          var tcs = new TaskCompletionSource();
+          dispatcherQueue.TryEnqueue(async () => {
+            try { await FlushSearchBatchAsync(batchToFlush, size, ct); }
+            catch (Exception ex) { tcs.TrySetException(ex); return; }
+            tcs.TrySetResult();
+          });
+          await tcs.Task;
+        }
+      }
+
+      // Flush any remaining items after the stream completes.
+      if (buffer.Count > 0) {
+        var batchToFlush = buffer.ToList();
+        buffer.Clear();
+        var tcs = new TaskCompletionSource();
+        dispatcherQueue.TryEnqueue(async () => {
+          try { await FlushSearchBatchAsync(batchToFlush, size, ct); }
+          catch (Exception ex) { tcs.TrySetException(ex); return; }
+          tcs.TrySetResult();
+        });
+        await tcs.Task;
+      }
+    } catch (OperationCanceledException) {
+      return;
+    }
+
+    if (ct.IsCancellationRequested)
+      return;
+
+    // Sort the accumulated results and refresh grouping once, at the end.
+    var sorted = SortItems(Items.ToList());
+    Items.Clear();
+    Items.AddRange(sorted);
+    ApplyGrouping();
+    UpdateSortIndicators();
+    BusyChanged?.Invoke(this, false);
+  }
+
+  /// <summary>Clears any active search and reloads the current folder.</summary>
+  public void ClearSearch() {
+    if (!_isSearchActive)
+      return;
+    _isSearchActive = false;
+    _searchCts.Cancel();
+    SearchQueryChanged?.Invoke(this, null);
+    LoadDirectory(CurrentPath);
+  }
+
+  /// <summary>
+  /// Warms icons for <paramref name="batch"/>, stamps them, then appends every
+  /// item to <see cref="Items"/> so they appear in the ListView immediately.
+  /// </summary>
+  private async Task FlushSearchBatchAsync(List<ShellItem> batch, uint size, CancellationToken ct) {
+    try {
+      await WarmTypeIconCacheAsync(batch, size, ct);
+    } catch (OperationCanceledException) {
+      throw;
+    }
+    ct.ThrowIfCancellationRequested();
+    ApplyCachedIcons(batch, size);
+    foreach (var item in batch)
+      Items.Add(item);
+  }
+
+  /// <summary>
   /// Moves keyboard focus onto the inner ListView so selected items render in
   /// the <c>Selected</c> visual state (accent colour) rather than the dimmer
   /// <c>SelectedUnfocused</c> state.
   /// </summary>
   public void FocusListView() => ShellView.Focus(FocusState.Programmatic);
 
+  /// <summary>
+  /// Called when the tab hosting this list is being hidden (switched away from).
+  /// Saves the current popup geometry so it can be restored instantly on the next activation.
+  /// The snapshot is taken from the live expanded-item fields, which remain valid even
+  /// if the popup was already closed by a focus-loss event during the tab switch.
+  /// </summary>
+  public void NotifyDeactivated()
+  {
+    // Snapshot from the last known good popup state stored in UpdateNameExpansion.
+    // _savedPopupState is already written there; nothing more to do unless it was
+    // cleared by CollapseAllNameExpansions during the tab-switch event sequence.
+    // In that case, rebuild from the expanded-item fields if they are still set.
+    if (_savedPopupState is null && _expandedItem is not null && _expandedContainer is not null)
+    {
+      _savingDeactivationSnapshot = true;
+      try
+      {
+        _savedPopupState = new PopupSnapshot(
+            NameExpansionPopup.HorizontalOffset,
+            NameExpansionPopup.VerticalOffset,
+            NameExpansionCard.Width,
+            NameExpansionOverflowFill.Height,
+            _expandedItem,
+            _expandedContainer);
+      }
+      finally
+      {
+        _savingDeactivationSnapshot = false;
+      }
+    }
+
+    // Mark that a snapshot is pending so intermediate CollapseAllNameExpansions
+    // calls (focus-loss, etc.) do not discard it before NotifyActivated runs.
+    if (_savedPopupState is not null)
+      _snapshotPendingRestore = true;
+
+    // Hide the popup while the tab is not visible (without clearing the cache).
+    NameExpansionPopup.IsOpen = false;
+  }
+
+  /// <summary>
+  /// Called when the tab that hosts this list view becomes the active tab.
+  /// Restores the saved popup state at the saved position immediately.
+  /// The coordinates saved at deactivation are still valid because the
+  /// ShellListView layout does not change while the tab is hidden.
+  /// </summary>
+  public void NotifyActivated()
+  {
+    FocusListView();
+    _snapshotPendingRestore = false;   // snapshot is about to be consumed
+
+    if (_savedPopupState is { } snap &&
+        ShellView.SelectedItems.Count == 1 &&
+        ShellView.SelectedItems.Contains(snap.Item))
+    {
+      NameExpansionText.Text   = snap.Item.Name;
+      NameExpansionCard.Width  = snap.Width;
+      NameExpansionOverflowFill.Height  = snap.OverflowHeight;
+      NameExpansionOverflowFill2.Height = snap.OverflowHeight;
+      snap.Item.IsLabelHidden = true;
+      VisualStateManager.GoToState(snap.Container, "NameExpanded", false);
+      _expandedItem      = snap.Item;
+      _expandedContainer = snap.Container;
+      NameExpansionPopup.HorizontalOffset = snap.Left;
+      NameExpansionPopup.VerticalOffset   = snap.Top;
+      NameExpansionPopup.IsOpen = true;
+    }
+  }
+
   public async void NavigateToKnownFolder(Guid folderId) {
     var virtualPath = $"::{folderId:B}";
+    // Cancel any active search so its results don't bleed into the new folder.
+    if (_isSearchActive) {
+      _isSearchActive = false;
+      _searchCts.Cancel();
+      _searchCts = new CancellationTokenSource();
+      SearchQueryChanged?.Invoke(this, null);
+    }
     // Stop watching the outgoing folder immediately.
     StopFolderWatcher();
 
@@ -633,6 +874,7 @@ public sealed partial class ShellListView : UserControl {
     if (!string.IsNullOrEmpty(CurrentPath))
       _backStack.Push(CurrentPath);
     _forwardStack.Clear();
+    _pendingNavigatePath = virtualPath;
 
     // Cancel any pending popup-wait from the previous navigation.
     _popupWaitCts.Cancel();
@@ -642,6 +884,7 @@ public sealed partial class ShellListView : UserControl {
     _navCts.Cancel();
     _navCts = new CancellationTokenSource();
     var ct = _navCts.Token;
+    BusyChanged?.Invoke(this, true);
 
     var items = NativeShell.EnumerateKnownFolderChildren(folderId);
 
@@ -680,6 +923,8 @@ public sealed partial class ShellListView : UserControl {
     // Update CurrentPath and fire PathChanged regardless of whether items were found.
     ApplyGrouping();
     CurrentPath = virtualPath;
+    _pendingNavigatePath = null;
+    BusyChanged?.Invoke(this, false);
     PathChanged?.Invoke(this, CurrentPath);
     CanGoBack = _backStack.Count > 0;
     CanGoForward = _forwardStack.Count > 0;
@@ -691,6 +936,13 @@ public sealed partial class ShellListView : UserControl {
   // ── Directory loading ────────────────────────────────────────────────────
 
   private async void LoadDirectory(string path) {
+    // Cancel any active search so its results don't bleed into the new folder.
+    if (_isSearchActive) {
+      _isSearchActive = false;
+      _searchCts.Cancel();
+      _searchCts = new CancellationTokenSource();
+      SearchQueryChanged?.Invoke(this, null);
+    }
     // Stop watching the outgoing folder immediately so stale events from the
     // previous directory do not race with the new navigation.
     StopFolderWatcher();
@@ -719,17 +971,23 @@ public sealed partial class ShellListView : UserControl {
     _navCts.Cancel();
     _navCts = new CancellationTokenSource();
     var ct = _navCts.Token;
+    BusyChanged?.Invoke(this, true);
 
     RestartThumbnailWorker();
     Items.Clear();
 
     var size = ThumbnailSizeForMode(ViewMode);
 
-    // Known-folder paths written by NavigateToKnownFolder (::{FOLDERID}) must be
-    // re-enumerated via the shell API, not FindFirstFileEx.
-    if (path.StartsWith("::", StringComparison.Ordinal)
-        && Guid.TryParse(path.Trim(':', '{', '}'), out var folderId)) {
-      var kfItems = await Task.Run(() => NativeShell.EnumerateKnownFolderChildren(folderId), ct);
+    // Virtual shell paths (::) must be enumerated via the shell API, not FindFirstFileEx.
+    if (path.StartsWith("::", StringComparison.Ordinal)) {
+      List<ShellItem> kfItems;
+      // Bare known-folder GUIDs use SHGetKnownFolderItem for reliable resolution.
+      // Compound paths like ::{GUID}\foo.library-ms go through SHCreateItemFromParsingName.
+      var stripped = path.Trim(':', '{', '}');
+      if (Guid.TryParse(stripped, out var folderId))
+        kfItems = await Task.Run(() => NativeShell.EnumerateKnownFolderChildren(folderId), ct);
+      else
+        kfItems = await Task.Run(() => NativeShell.EnumerateShellItemChildrenByPath(path), ct);
       if (ct.IsCancellationRequested)
         return;
 
@@ -756,8 +1014,10 @@ public sealed partial class ShellListView : UserControl {
       Items.AddRange(kfItems);
       ApplyGrouping();
       CurrentPath = path;
+      _pendingNavigatePath = null;
       CanGoBack = _backStack.Count > 0;
       CanGoForward = _forwardStack.Count > 0;
+      BusyChanged?.Invoke(this, false);
       PathChanged?.Invoke(this, path);
       UpdateSortIndicators();
       ApplyPendingSelection();
@@ -814,8 +1074,10 @@ public sealed partial class ShellListView : UserControl {
     Items.AddRange(allItems);
     ApplyGrouping();
     CurrentPath = path;
+    _pendingNavigatePath = null;
     CanGoBack = _backStack.Count > 0;
     CanGoForward = _forwardStack.Count > 0;
+    BusyChanged?.Invoke(this, false);
     PathChanged?.Invoke(this, path);
     UpdateSortIndicators();
     ApplyPendingSelection();
@@ -907,11 +1169,25 @@ public sealed partial class ShellListView : UserControl {
   /// Synchronously stamps already-cached type icons onto items before they are
   /// added to the collection, so the first rendered frame shows icons.
   /// </summary>
+  // Every folder is considered per-item: shell icon overlays from Git/SVN/TortoiseSVN,
+  // desktop.ini custom icons, drive-type icons, virtual-path folders, etc. can all
+  // produce a different icon for each folder path.
+  private static bool IsPerItemFolder(ShellItem item) => item.IsFolder;
+
+  // Returns a type-cache key for an item.
+  // All folders get a unique per-path key so shell-extension overlays (Git, SVN, …)
+  // are never incorrectly shared between folders.
+  // Non-folder files share a key by extension (safe: type icon is the same for all .txt, etc.)
+  private static string TypeIconKey(ShellItem item) =>
+      item.IsFolder
+          ? ":folder:" + item.FullPath.TrimEnd('\\').ToLowerInvariant()
+          : Path.GetExtension(item.FullPath).ToLowerInvariant();
+
   private void ApplyCachedIcons(List<ShellItem> items, uint size) {
     foreach (var item in items) {
       if (item.HasRealThumbnail || item.Icon != null)
         continue;
-      var ext = item.IsFolder ? ":folder" : Path.GetExtension(item.FullPath).ToLowerInvariant();
+      var ext = TypeIconKey(item);
       if (_typeIconCache.TryGetValue((ext, size), out var icon))
         item.Icon = icon;
       else {
@@ -932,7 +1208,7 @@ public sealed partial class ShellListView : UserControl {
     // Collect unique extensions not yet cached (skip per-file-icon types like .exe).
     var exts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var item in allItems) {
-      var ext = item.IsFolder ? ":folder" : Path.GetExtension(item.FullPath).ToLowerInvariant();
+      var ext = TypeIconKey(item);
       if (_perFileIconExts.Contains(ext))
         continue;
       if (_typeIconCache.ContainsKey((ext, size)))
@@ -957,9 +1233,7 @@ public sealed partial class ShellListView : UserControl {
           // Derive the extension key exactly the same way it was added to `keys`
           // so that folder items map to ":folder" and never to a file extension.
           var item = allItems[i];
-          var extKey = item.IsFolder
-              ? ":folder"
-              : Path.GetExtension(path).ToLowerInvariant();
+          var extKey = TypeIconKey(item);
           var pixelsIndex = keys.IndexOf(extKey);
           // Negative means this extension was already cached or is a per-file-icon
           // type that was never added to `keys` — skip rather than clamping to 0.
@@ -1047,8 +1321,8 @@ public sealed partial class ShellListView : UserControl {
     foreach (var item in GetViewportVisibleItems()) {
       if (item.HasRealThumbnail)
         continue;
-      var ext = item.IsFolder ? ":folder" : Path.GetExtension(item.FullPath).ToLowerInvariant();
-      bool canUpgrade = !IsIconOnlyMode(ViewMode) &&
+      var ext = TypeIconKey(item);
+      bool canUpgrade = !IsIconOnlyMode(ViewMode) && !IsPerItemFolder(item) &&
                         (item.IsFolder || _thumbnailExts.Contains(ext));
       if (!canUpgrade && !_perFileIconExts.Contains(ext))
         continue;
@@ -1082,8 +1356,12 @@ public sealed partial class ShellListView : UserControl {
       var item = items[i];
       if (item.HasRealThumbnail)
         continue;
-      var ext = item.IsFolder ? ":folder" : Path.GetExtension(item.FullPath).ToLowerInvariant();
+      var ext = TypeIconKey(item);
       if (_perFileIconExts.Contains(ext))
+        continue;
+      // Per-item folders (drives, virtual-path) are handled by the thumbnail
+      // worker via IconOnly — exclude them from the ResizeToFit cache preload.
+      if (IsPerItemFolder(item))
         continue;
       if (!item.IsFolder && !_thumbnailExts.Contains(ext))
         continue;
@@ -1259,10 +1537,21 @@ public sealed partial class ShellListView : UserControl {
     NameExpansionPopup.HorizontalOffset = popupLeft;
     NameExpansionPopup.VerticalOffset = popupTop;
     NameExpansionPopup.IsOpen = true;
+
+    // Cache the final geometry so NotifyActivated() can restore instantly.
+    _savedPopupState = new PopupSnapshot(
+        popupLeft, popupTop, popupWidth,
+        NameExpansionOverflowFill.Height,
+        selected, container);
   }
 
   private void CollapseAllNameExpansions() {
     NameExpansionPopup.IsOpen = false;
+    // Only clear the snapshot on a genuine user-driven collapse — not while
+    // we are building the deactivation snapshot, and not while a saved snapshot
+    // is waiting to be restored on the next tab activation.
+    if (!_savingDeactivationSnapshot && !_snapshotPendingRestore)
+      _savedPopupState = null;
     if (_expandedContainer != null) {
       VisualStateManager.GoToState(_expandedContainer, "NameCollapsed", false);
       _expandedContainer = null;
@@ -1317,7 +1606,7 @@ public sealed partial class ShellListView : UserControl {
       return;
 
     var size = ThumbnailSizeForMode(ViewMode);
-    var ext = item.IsFolder ? ":folder" : Path.GetExtension(item.FullPath).ToLowerInvariant();
+    var ext = TypeIconKey(item);
     var ct = _thumbCts.Token;
 
     // Stamp a type-icon placeholder so the item is never blank while the
@@ -1340,7 +1629,10 @@ public sealed partial class ShellListView : UserControl {
     if (item.HasRealThumbnail)
       return;
 
-    bool canUpgrade = !IsIconOnlyMode(ViewMode) &&
+    // Per-item folders (drives, virtual-path folders) must NOT go through the
+    // ResizeToFit thumbnail path — they need IconOnly fetching.
+    bool isPerItemFolder = IsPerItemFolder(item);
+    bool canUpgrade = !IsIconOnlyMode(ViewMode) && !isPerItemFolder &&
                       (item.IsFolder || _thumbnailExts.Contains(ext));
     bool isPerFile = _perFileIconExts.Contains(ext);
 
@@ -1375,8 +1667,10 @@ public sealed partial class ShellListView : UserControl {
         if (item.HasRealThumbnail)
           continue;
 
-        var ext = item.IsFolder ? ":folder" : Path.GetExtension(item.FullPath).ToLowerInvariant();
-        bool canUpgrade = item.IsFolder || _thumbnailExts.Contains(ext);
+        var ext = TypeIconKey(item);
+        bool isPerItemFolder = IsPerItemFolder(item);
+        // Per-item folders (drives, virtual-path) must use IconOnly — never ResizeToFit.
+        bool canUpgrade = !isPerItemFolder && (item.IsFolder || _thumbnailExts.Contains(ext));
         bool isPerFile = _perFileIconExts.Contains(ext);
 
         try {
@@ -1384,7 +1678,7 @@ public sealed partial class ShellListView : UserControl {
             // ── Non-thumbnail items: just need a type/per-file icon ──────────
             byte[]? px = null;
             int w = 0, h = 0;
-            if (isPerFile || !_typeIconCache.ContainsKey((ext, size))) {
+            if (isPerFile || isPerItemFolder || !_typeIconCache.ContainsKey((ext, size))) {
               (px, w, h, _) = await NativeShell.GetShellImagePixelsAsync(
                   item.FullPath, size, NativeShell.SIIGBF.IconOnly, ct).ConfigureAwait(false);
             }
@@ -1402,6 +1696,8 @@ public sealed partial class ShellListView : UserControl {
                 var wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
                 if (wb == null)
                   return;
+                // isPerFile (.exe etc.) icons are never cached; per-item folders
+                // ARE cached but under their unique per-item key.
                 if (!isPerFile)
                   _typeIconCache[(capExt, capSize)] = wb;
                 if (!item.HasRealThumbnail)
@@ -1560,7 +1856,16 @@ public sealed partial class ShellListView : UserControl {
       return;
 
     if (item.IsFolder) {
-      Navigate(item.FullPath);
+      // Virtual-path items (Libraries children, This PC children, etc.) have parsing
+      // paths like ::{GUID} or ::{GUID}\foo.library-ms that Directory.Exists rejects.
+      if (item.FullPath.StartsWith("::", StringComparison.Ordinal)) {
+        if (!string.IsNullOrEmpty(CurrentPath))
+          _backStack.Push(CurrentPath);
+        _forwardStack.Clear();
+        LoadDirectory(item.FullPath);
+      } else {
+        Navigate(item.FullPath);
+      }
     } else {
       try {
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(item.FullPath) {
@@ -1581,6 +1886,11 @@ public sealed partial class ShellListView : UserControl {
     var hwnd  = GetOwnerHwnd();
     var point = e.GetPosition(DragSelectGrid);
 
+    // Mirror real Explorer: Shift+right-click shows extended verbs.
+    bool extendedVerbs = InputKeyboardSource
+        .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift)
+        .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+
     if (dep is ListViewItem { Content: ShellItem tappedItem }) {
       // ── Item context menu ─────────────────────────────────────────────
       if (!ShellView.SelectedItems.Contains(tappedItem)) {
@@ -1597,7 +1907,8 @@ public sealed partial class ShellListView : UserControl {
             hwnd,
             point,
             DragSelectGrid,
-            this);
+            this,
+            extendedVerbs);
       }
     } else {
       // ── Background (empty-space) context menu ─────────────────────────
@@ -1609,7 +1920,8 @@ public sealed partial class ShellListView : UserControl {
             hwnd,
             point,
             DragSelectGrid,
-            this);
+            this,
+            extendedVerbs);
       }
     }
 
@@ -2009,7 +2321,7 @@ public sealed partial class ShellListView : UserControl {
     var size = ThumbnailSizeForMode(mode);
     foreach (var item in Items) {
       item.HasRealThumbnail = false;
-      var ext = item.IsFolder ? ":folder" : Path.GetExtension(item.FullPath).ToLowerInvariant();
+      var ext = TypeIconKey(item);
       if (_typeIconCache.TryGetValue((ext, size), out var icon))
         item.Icon = icon;
       else

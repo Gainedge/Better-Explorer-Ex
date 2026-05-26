@@ -95,6 +95,8 @@ public sealed class ShellContextMenuSession : IDisposable {
   // The STA worker that owns (created) all the COM objects above.
   // All COM calls must be posted back here.
   private readonly StaWorker _sta;
+  // When false the STA is shared and must NOT be disposed by this session.
+  private readonly bool _ownsSta;
 
   internal const uint CmdFirst = 1;
   internal const uint CmdLast  = 0x7FFF;
@@ -104,12 +106,14 @@ public sealed class ShellContextMenuSession : IDisposable {
       NativeShell.IContextMenu2CM? cm2,
       NativeShell.IContextMenu3CM? cm3,
       IntPtr hMenuRoot,
-      StaWorker sta) {
+      StaWorker sta,
+      bool ownsSta = true) {
     _cm        = cm;
     _cm2       = cm2;
     _cm3       = cm3;
     _hMenuRoot = hMenuRoot;
     _sta       = sta;
+    _ownsSta   = ownsSta;
   }
 
   // ── Public surface ────────────────────────────────────────────────────────
@@ -131,15 +135,44 @@ public sealed class ShellContextMenuSession : IDisposable {
   // WM_INITMENUPOPUP — triggers lazy submenu population in IContextMenu2/3 handlers.
   private const uint WM_INITMENUPOPUP = 0x0117;
 
+  // Well-known shell menu labels → canonical verbs.
+  // Avoids a GetCommandString COM round-trip for the items that appear on every menu.
+  private static readonly Dictionary<string, string> _labelToVerb =
+      new(StringComparer.OrdinalIgnoreCase) {
+    ["Open"]               = "open",
+    ["Open with"]          = "openwith",
+    ["Open With"]          = "openwith",
+    ["Explore"]            = "explore",
+    ["Find"]               = "find",
+    ["Cut"]                = "cut",
+    ["Copy"]               = "copy",
+    ["Paste"]              = "paste",
+    ["Paste shortcut"]     = "pastelink",
+    ["Create shortcut"]    = "link",
+    ["Delete"]             = "delete",
+    ["Rename"]             = "rename",
+    ["Properties"]         = "properties",
+    ["Share"]              = "share",
+    ["Print"]              = "print",
+    ["Run as administrator"] = "runas",
+    ["Pin to Start"]       = "pin",
+    ["Unpin from Start"]   = "unpin",
+    ["Send to"]            = "sendto",
+    ["New"]                = "new",
+  };
+
   private IReadOnlyList<ShellContextMenuItem> BuildFromMenu(IntPtr hMenu) {
     var list  = new List<ShellContextMenuItem>();
     int count = NativeShell.GetMenuItemCount(hMenu);
-    const int BufChars = 512;
+    const int BufChars  = 512;
+    const int VerbChars = 128;
 
+    // Allocate both buffers once outside the loop to avoid N alloc/free pairs.
+    IntPtr labelBuf = Marshal.AllocHGlobal(BufChars  * 2);
+    IntPtr verbBuf  = Marshal.AllocHGlobal(VerbChars * 2);
+    try {
     for (int i = 0; i < count; i++) {
-      IntPtr labelBuf = Marshal.AllocHGlobal(BufChars * 2);
-      Marshal.WriteInt16(labelBuf, 0);
-      try {
+        Marshal.WriteInt16(labelBuf, 0);
         var mii = new NativeShell.MENUITEMINFOW {
           cbSize     = (uint)Marshal.SizeOf<NativeShell.MENUITEMINFOW>(),
           fMask      = NativeShell.MENUITEMINFOW.MIIM_ID
@@ -162,18 +195,22 @@ public sealed class ShellContextMenuSession : IDisposable {
                               : StripAccelerator(Marshal.PtrToStringUni(labelBuf) ?? string.Empty);
 
         // Canonical verb for leaf items.
+        // Fast path: derive from the well-known label map (no COM round-trip).
+        // Slow path: ask the shell via GetCommandString only for unknown labels.
         string verb = string.Empty;
-        if (!isSep && !hasSub && _cm is not null) {
-          try {
-            uint offset = mii.wID >= CmdFirst ? mii.wID - CmdFirst : 0;
-            IntPtr vbuf = Marshal.AllocHGlobal(256);
+        if (!isSep && !hasSub) {
+          if (!string.IsNullOrEmpty(label) && _labelToVerb.TryGetValue(label, out var knownVerb)) {
+            verb = knownVerb;
+          } else if (_cm is not null) {
             try {
+              uint offset = mii.wID >= CmdFirst ? mii.wID - CmdFirst : 0;
+              Marshal.WriteInt16(verbBuf, 0);
               int vhr = _cm.GetCommandString(
-                  (UIntPtr)offset, NativeShell.GCS_VERBW, IntPtr.Zero, vbuf, 128);
+                  (UIntPtr)offset, NativeShell.GCS_VERBW, IntPtr.Zero, verbBuf, VerbChars);
               if (vhr == 0)
-                verb = Marshal.PtrToStringUni(vbuf) ?? string.Empty;
-            } finally { Marshal.FreeHGlobal(vbuf); }
-          } catch { }
+                verb = Marshal.PtrToStringUni(verbBuf) ?? string.Empty;
+            } catch { }
+          }
         }
 
         // Extract HBITMAP icon pixels while still on the STA thread.
@@ -206,7 +243,7 @@ public sealed class ShellContextMenuSession : IDisposable {
           // ESET). Submenus that were populated synchronously skip the pump entirely,
           // eliminating the per-submenu delay for the common case.
           if (NativeShell.GetMenuItemCount(mii.hSubMenu) == 0)
-            NativeShell.PumpMessagesFor(150);
+            NativeShell.PumpMessagesFor(60);
 
           subItems = BuildFromMenu(mii.hSubMenu);
         }
@@ -214,9 +251,10 @@ public sealed class ShellContextMenuSession : IDisposable {
         list.Add(new ShellContextMenuItem(
             mii.wID, label, verb, isSep, disabled, hasSub, subItems,
             iconPx, iconW, iconH));
-      } finally {
-        Marshal.FreeHGlobal(labelBuf);
-      }
+    }
+    } finally {
+      Marshal.FreeHGlobal(labelBuf);
+      Marshal.FreeHGlobal(verbBuf);
     }
 
     // Remove consecutive separators and any trailing separator.
@@ -360,7 +398,8 @@ public sealed class ShellContextMenuSession : IDisposable {
       try { Marshal.ReleaseComObject(_cm); } catch { }
       _cm = null;
     }
-    _sta.Dispose();
+    if (_ownsSta)
+      _sta.Dispose();
   }
 }
 
@@ -383,6 +422,79 @@ public static class ShellContextMenuService {
   private const uint CMF_EXTENDEDVERBS = 0x00000100;
   private const uint CMF_NODEFAULT     = 0x00000020;
 
+  // ── Shared persistent STA thread ─────────────────────────────────────────
+  // A single long-lived STA thread is reused across all context-menu queries.
+  // This eliminates the thread-creation + COM STA initialisation overhead that
+  // made the first two right-clicks noticeably slow.
+  private static readonly StaWorker _sharedSta = new StaWorker();
+
+  /// <summary>
+  /// Pre-loads shell extension DLLs on the shared STA thread so the first real
+  /// right-click is fast. Call once early in the app lifecycle (e.g. from
+  /// <c>ShellListView.Loaded</c>) and discard the returned Task — it completes
+  /// in the background without blocking the UI.
+  ///
+  /// Two throw-away <c>QueryContextMenu</c> calls are made:
+  /// 1. Desktop folder background — loads <c>HKCR\Directory\Background</c>,
+  ///    <c>HKCR\Folder</c>, and <c>HKCR\AllFilesystemObjects</c> handlers.
+  /// 2. A guaranteed system file — loads <c>HKCR\*</c> handlers (applies to
+  ///    every file type, so antivirus / archive helpers etc. are pre-loaded).
+  /// </summary>
+  public static Task WarmUpAsync() =>
+      _sharedSta.Run(() => {
+        WarmUpDesktopBackground();
+        WarmUpFile(System.IO.Path.Combine(Environment.SystemDirectory, "notepad.exe"));
+      });
+
+  // Loads Folder / Directory\Background / AllFilesystemObjects shell handlers.
+  private static void WarmUpDesktopBackground() {
+    try {
+      int hr = NativeShell.SHGetDesktopFolder(out object desktopObj);
+      if (hr != 0 || desktopObj is not NativeShell.IShellFolderCM desktop) return;
+      try {
+        hr = desktop.CreateViewObject(IntPtr.Zero, IID_IContextMenu, out object cmObj);
+        if (hr != 0 || cmObj is not NativeShell.IContextMenuCM cm) return;
+        try {
+          IntPtr hMenu = NativeShell.CreatePopupMenu();
+          if (hMenu == IntPtr.Zero) return;
+          try   { cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL); }
+          finally { NativeShell.DestroyMenu(hMenu); }
+        } finally { try { Marshal.ReleaseComObject(cm); } catch { } }
+      } finally { try { Marshal.ReleaseComObject(desktop); } catch { } }
+    } catch { }
+  }
+
+  // Loads HKCR\* and per-extension handlers (applies to every file item).
+  private static void WarmUpFile(string filePath) {
+    if (!System.IO.File.Exists(filePath)) return;
+    IntPtr pidl = IntPtr.Zero;
+    NativeShell.IShellFolderCM? parent = null;
+    try {
+      pidl = NativeShell.ILCreateFromPathW(filePath);
+      if (pidl == IntPtr.Zero) return;
+
+      int hr = NativeShell.SHBindToParent(
+          pidl, IID_IShellFolder, out object folderObj, out IntPtr childPidl);
+      if (hr != 0 || folderObj is not NativeShell.IShellFolderCM folder) return;
+      parent = folder;
+
+      var children = new[] { childPidl };
+      hr = folder.GetUIObjectOf(IntPtr.Zero, 1, children,
+           IID_IContextMenu, IntPtr.Zero, out object cmObj);
+      if (hr != 0 || cmObj is not NativeShell.IContextMenuCM cm) return;
+      try {
+        IntPtr hMenu = NativeShell.CreatePopupMenu();
+        if (hMenu == IntPtr.Zero) return;
+        try   { cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL); }
+        finally { NativeShell.DestroyMenu(hMenu); }
+      } finally { try { Marshal.ReleaseComObject(cm); } catch { } }
+    } catch { }
+    finally {
+      if (pidl != IntPtr.Zero) NativeShell.ILFree(pidl);
+      if (parent is not null) try { Marshal.ReleaseComObject(parent); } catch { }
+    }
+  }
+
   public static Task<ShellContextMenuSession?> QueryAsync(
       IReadOnlyList<string> paths,
       IntPtr hwnd,
@@ -390,8 +502,7 @@ public static class ShellContextMenuService {
     var tcs = new TaskCompletionSource<ShellContextMenuSession?>(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
-    // Create the persistent STA worker that will own all COM objects for this session.
-    var sta = new StaWorker();
+    var sta = _sharedSta;
 
     sta.Run(() => {
       var allPidls    = new IntPtr[paths.Count];
@@ -401,13 +512,13 @@ public static class ShellContextMenuService {
       try {
         for (int i = 0; i < paths.Count; i++) {
           allPidls[i] = NativeShell.ILCreateFromPathW(paths[i]);
-          if (allPidls[i] == IntPtr.Zero) { sta.Dispose(); tcs.SetResult(null); return; }
+          if (allPidls[i] == IntPtr.Zero) { tcs.SetResult(null); return; }
         }
 
         int hr = NativeShell.SHBindToParent(
             allPidls[0], IID_IShellFolder, out object folderObj, out childPidls[0]);
         if (hr != 0 || folderObj is not NativeShell.IShellFolderCM folder) {
-          sta.Dispose(); tcs.SetResult(null); return;
+          tcs.SetResult(null); return;
         }
         parentFolder = folder;
 
@@ -415,7 +526,7 @@ public static class ShellContextMenuService {
           hr = NativeShell.SHBindToParent(
               allPidls[i], IID_IShellFolder, out _, out childPidls[i]);
           if (hr != 0 || childPidls[i] == IntPtr.Zero) {
-            sta.Dispose(); tcs.SetResult(null); return;
+            tcs.SetResult(null); return;
           }
         }
 
@@ -423,7 +534,7 @@ public static class ShellContextMenuService {
             hwnd, (uint)paths.Count, childPidls,
             IID_IContextMenu, IntPtr.Zero, out object cmObj);
         if (hr != 0 || cmObj is not NativeShell.IContextMenuCM cm) {
-          sta.Dispose(); tcs.SetResult(null); return;
+          tcs.SetResult(null); return;
         }
 
         NativeShell.IContextMenu3CM? cm3 = cmObj as NativeShell.IContextMenu3CM;
@@ -434,7 +545,7 @@ public static class ShellContextMenuService {
         IntPtr hMenu = NativeShell.CreatePopupMenu();
         if (hMenu == IntPtr.Zero) {
           try { Marshal.ReleaseComObject(cm); } catch { }
-          sta.Dispose(); tcs.SetResult(null); return;
+          tcs.SetResult(null); return;
         }
 
         uint flags = CMF_NORMAL;
@@ -445,11 +556,10 @@ public static class ShellContextMenuService {
             ShellContextMenuSession.CmdLast,
             flags);
 
-        var session = new ShellContextMenuSession(cm, cm2, cm3, hMenu, sta);
+        var session = new ShellContextMenuSession(cm, cm2, cm3, hMenu, sta, ownsSta: false);
         session.BuildItems();
         tcs.SetResult(session);
       } catch (Exception ex) {
-        sta.Dispose();
         tcs.SetException(ex);
       } finally {
         foreach (var p in allPidls)
@@ -463,7 +573,7 @@ public static class ShellContextMenuService {
   }
 
   /// <summary>
-  /// Queries the background (empty-space) context menu for a folder by calling
+  /// Queries the background
   /// <c>IShellFolder::CreateViewObject(IID_IContextMenu)</c> on the folder itself.
   /// This is the same COM path that the shell uses for <c>IShellView::GetItemObject(SVGIO_BACKGROUND)</c>.
   /// </summary>
@@ -474,7 +584,7 @@ public static class ShellContextMenuService {
     var tcs = new TaskCompletionSource<ShellContextMenuSession?>(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
-    var sta = new StaWorker();
+    var sta = _sharedSta;
 
     sta.Run(() => {
       IntPtr folderPidl = IntPtr.Zero;
@@ -482,11 +592,11 @@ public static class ShellContextMenuService {
 
       try {
         folderPidl = NativeShell.ILCreateFromPathW(folderPath);
-        if (folderPidl == IntPtr.Zero) { sta.Dispose(); tcs.SetResult(null); return; }
+        if (folderPidl == IntPtr.Zero) { tcs.SetResult(null); return; }
 
         int hr = NativeShell.SHGetDesktopFolder(out object desktopObj);
         if (hr != 0 || desktopObj is not NativeShell.IShellFolderCM desktop) {
-          sta.Dispose(); tcs.SetResult(null); return;
+          tcs.SetResult(null); return;
         }
 
         hr = desktop.BindToObject(folderPidl, IntPtr.Zero, IID_IShellFolder, out object folderObj);
@@ -494,13 +604,13 @@ public static class ShellContextMenuService {
 
         if (hr != 0 || folderObj is not NativeShell.IShellFolderCM targetFolder) {
           if (folderObj is NativeShell.IShellFolderCM fb) targetFolder = fb;
-          else { sta.Dispose(); tcs.SetResult(null); return; }
+          else { tcs.SetResult(null); return; }
         }
         folder = targetFolder;
 
         hr = folder.CreateViewObject(hwnd, IID_IContextMenu, out object cmObj);
         if (hr != 0 || cmObj is not NativeShell.IContextMenuCM cm) {
-          sta.Dispose(); tcs.SetResult(null); return;
+          tcs.SetResult(null); return;
         }
 
         NativeShell.IContextMenu3CM? cm3 = cmObj as NativeShell.IContextMenu3CM;
@@ -511,7 +621,7 @@ public static class ShellContextMenuService {
         IntPtr hMenu = NativeShell.CreatePopupMenu();
         if (hMenu == IntPtr.Zero) {
           try { Marshal.ReleaseComObject(cm); } catch { }
-          sta.Dispose(); tcs.SetResult(null); return;
+          tcs.SetResult(null); return;
         }
 
         uint flags = CMF_NORMAL;
@@ -522,11 +632,10 @@ public static class ShellContextMenuService {
             ShellContextMenuSession.CmdLast,
             flags);
 
-        var session = new ShellContextMenuSession(cm, cm2, cm3, hMenu, sta);
+        var session = new ShellContextMenuSession(cm, cm2, cm3, hMenu, sta, ownsSta: false);
         session.BuildItems();
         tcs.SetResult(session);
       } catch (Exception ex) {
-        sta.Dispose();
         tcs.SetException(ex);
       } finally {
         if (folderPidl != IntPtr.Zero) NativeShell.ILFree(folderPidl);

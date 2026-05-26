@@ -407,6 +407,70 @@ public sealed partial class ShellBreadcrumbBar : UserControl
         if (bmp != null) RootMenuIcon.Source = bmp;
     }
 
+    // ── Search mode chip ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Replaces all breadcrumb chips with a single non-navigable search indicator:
+    ///   🔍  Search results for "query" in [folder name]
+    /// Calling <see cref="SetPath"/> afterwards restores normal breadcrumb mode.
+    /// </summary>
+    public void SetSearchMode(string query)
+    {
+        ChipPanel.Children.Clear();
+
+        // Derive a short display name for the folder being searched.
+        string folderLabel = string.Empty;
+        if (!string.IsNullOrEmpty(_currentPath))
+        {
+            var segments = BuildSegments(_currentPath);
+            if (segments.Count > 0)
+                folderLabel = segments[segments.Count - 1].DisplayName;
+        }
+
+        var label = string.IsNullOrEmpty(folderLabel)
+            ? $"Search results for \"{query}\""
+            : $"Search results for \"{query}\" in {folderLabel}";
+
+        // Build the chip content: search icon + label text side-by-side.
+        var icon = new FontIcon
+        {
+            Glyph      = "\uE721",   // Search glyph
+            FontSize   = 11,
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var text = new TextBlock
+        {
+            Text              = label,
+            VerticalAlignment = VerticalAlignment.Center,
+            FontSize          = 12,
+            FontFamily        = new FontFamily("Segoe UI Variable Text"),
+            Foreground        = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"],
+        };
+
+        var content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing     = 6,
+            Children    = { icon, text },
+        };
+
+        // Use Button (correct TargetType for BreadcrumbSegmentStyle) but without
+        // a Click handler so it acts as a static display chip.
+        var chip = new Button
+        {
+            Style            = (Style)Resources["BreadcrumbSegmentStyle"],
+            Content          = content,
+            IsHitTestVisible = false,
+        };
+
+        ChipPanel.Children.Add(chip);
+
+        ChipScroller.UpdateLayout();
+        ChipScroller.ChangeView(0, null, null, true);   // scroll to start — chip fills the bar
+    }
+
     // ── Sub-folder enumeration ────────────────────────────────────────────────
 
     private static List<(string Name, string FullPath)> GetSubfolders(string parent)
