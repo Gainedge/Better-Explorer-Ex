@@ -33,6 +33,10 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
 
+        // Apply persisted theme immediately — before any layout pass so even
+        // the loading overlay renders with the correct theme from the first frame.
+        ApplyPersistedTheme();
+
         ExtendsContentIntoTitleBar = true;
 
         // Caption buttons blend into the Mica backdrop.
@@ -48,6 +52,8 @@ public sealed partial class MainWindow : Window
         TabbedBrowser.Loaded   += OnTabbedBrowserLoaded;
         SizeChanged            += OnWindowSizeChanged;
         Closed                 += OnWindowClosed;
+
+        BetterExplorer.Controls.SettingsPage.ThemeChangeRequested += OnThemeChangeRequested;
     }
 
     // ── Window placement persistence ─────────────────────────────────────────
@@ -109,7 +115,47 @@ public sealed partial class MainWindow : Window
         settings[SettingPresenter] = presenterState;
     }
 
-    private void OnWindowClosed(object sender, WindowEventArgs e) => SaveWindowPlacement();
+    private void OnWindowClosed(object sender, WindowEventArgs e)
+    {
+        BetterExplorer.Controls.SettingsPage.ThemeChangeRequested -= OnThemeChangeRequested;
+        SaveWindowPlacement();
+    }
+
+    private void OnThemeChangeRequested(Microsoft.UI.Xaml.ElementTheme theme)
+    {
+        if (Content is FrameworkElement root)
+            root.RequestedTheme = theme;
+        UpdateTitleBarButtonColors(theme);
+    }
+
+    private void UpdateTitleBarButtonColors(ElementTheme theme)
+    {
+        bool isDark = theme == ElementTheme.Dark ||
+                     (theme == ElementTheme.Default &&
+                      Application.Current.RequestedTheme == ApplicationTheme.Dark);
+        var fg = isDark ? Colors.White : Colors.Black;
+        var inactiveFg = isDark
+            ? Windows.UI.Color.FromArgb(0xFF, 0x80, 0x80, 0x80)
+            : Windows.UI.Color.FromArgb(0xFF, 0x7A, 0x7A, 0x7A);
+        AppWindow.TitleBar.ButtonForegroundColor         = fg;
+        AppWindow.TitleBar.ButtonHoverForegroundColor    = fg;
+        AppWindow.TitleBar.ButtonPressedForegroundColor  = fg;
+        AppWindow.TitleBar.ButtonInactiveForegroundColor = inactiveFg;
+    }
+
+    private void ApplyPersistedTheme()
+    {
+        var saved = Windows.Storage.ApplicationData.Current.LocalSettings.Values
+            .TryGetValue(BetterExplorer.Controls.SettingsPage.ThemeSettingKey, out var v) ? v as string : null;
+        var theme = saved switch {
+            "Light" => ElementTheme.Light,
+            "Dark"  => ElementTheme.Dark,
+            _       => ElementTheme.Default,
+        };
+        if (Content is FrameworkElement root)
+            root.RequestedTheme = theme;
+        UpdateTitleBarButtonColors(theme);
+    }
 
     // ── Setup ─────────────────────────────────────────────────────────────────
 

@@ -369,4 +369,19 @@ public sealed partial class ExplorerBrowser : UserControl
         ((UIElement)sender).ReleasePointerCapture(e.Pointer);
         e.Handled = true;
     }
+
+    private SettingsWindow? _settingsWindow;
+
+    private void OnSettingsButtonClick(object sender, RoutedEventArgs e)
+    {
+        if (_settingsWindow is not null)
+        {
+            _settingsWindow.Activate();
+            return;
+        }
+
+        _settingsWindow = new SettingsWindow();
+        _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+        _settingsWindow.Activate();
+    }
 }

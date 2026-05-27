@@ -34,8 +34,8 @@
               <SolidColorBrush x:Key="TabViewItemSeparatorBrush"     Color="{ThemeResource DividerStrokeColorDefault}" />
               <SolidColorBrush x:Key="TabViewBackground"             Color="Transparent" />
               <!-- Black tint on light Mica: selected tab + content area -->
-              <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#80303030" />
-              <SolidColorBrush x:Key="TabViewContentBackground"      Color="#80303030" />
+              <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#4FE8E7E7" />
+              <SolidColorBrush x:Key="TabViewContentBackground"      Color="#4FE8E7E7" />
             </ResourceDictionary>
           </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>

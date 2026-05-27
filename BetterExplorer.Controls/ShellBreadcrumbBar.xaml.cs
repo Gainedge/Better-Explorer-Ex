@@ -79,6 +79,9 @@ public sealed partial class ShellBreadcrumbBar : UserControl
         {
             if (e.Key == VirtualKey.F2) EnterEditMode();
         };
+
+        // Rebuild chips whenever the app theme changes so foreground colors update.
+        ActualThemeChanged += (_, _) => RebuildChips();
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -120,9 +123,9 @@ public sealed partial class ShellBreadcrumbBar : UserControl
                     VerticalAlignment = VerticalAlignment.Center,
                     FontSize          = 12,
                     FontFamily        = new FontFamily("Segoe UI Variable Text"),
-                    Foreground        = isLast
-                        ? (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]
-                        : (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+                    // Let foreground inherit from the visual tree (theme-aware).
+                    // Dim non-terminal segments with opacity to mimic secondary text color.
+                    Opacity           = isLast ? 1.0 : 0.65,
                 },
                 Tag = seg.FullPath,
             };
@@ -137,7 +140,8 @@ public sealed partial class ShellBreadcrumbBar : UserControl
                 {
                     Glyph    = "\uE76C",  // ChevronRight
                     FontSize = 8,
-                    Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+                    // Inherit foreground; dim to approximate tertiary text color.
+                    Opacity  = 0.45,
                 },
                 Tag = seg.FullPath,
             };

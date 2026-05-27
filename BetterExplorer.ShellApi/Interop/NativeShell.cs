@@ -1577,8 +1577,10 @@ public static class NativeShell {
       return path;
     try {
       SHCreateItemFromParsingNameShell(path, IntPtr.Zero, IID_IShellItem, out var item);
-      item.GetDisplayName(SIGDN_NORMALDISPLAY, out var name);
-      return string.IsNullOrEmpty(name) ? path : name;
+      try {
+        item.GetDisplayName(SIGDN_NORMALDISPLAY, out var name);
+        return string.IsNullOrEmpty(name) ? path : name;
+      } finally { Marshal.ReleaseComObject(item); }
     } catch { return path; }
   }
 
@@ -1591,8 +1593,10 @@ public static class NativeShell {
     if (string.IsNullOrEmpty(parsingPath)) return null;
     try {
       SHCreateItemFromParsingNameShell(parsingPath, IntPtr.Zero, IID_IShellItem, out var item);
-      item.GetDisplayName(SIGDN_FILESYSPATH, out var fsPath);
-      return string.IsNullOrEmpty(fsPath) ? null : fsPath;
+      try {
+        item.GetDisplayName(SIGDN_FILESYSPATH, out var fsPath);
+        return string.IsNullOrEmpty(fsPath) ? null : fsPath;
+      } finally { Marshal.ReleaseComObject(item); }
     } catch { return null; }
   }
 
@@ -1623,9 +1627,11 @@ public static class NativeShell {
           // For other known folders, ask the shell.
           try {
             SHGetKnownFolderItem(folderId, 0, IntPtr.Zero, IID_IShellItem, out var item);
-            item.GetDisplayName(SIGDN_NORMALDISPLAY, out var name);
-            if (!string.IsNullOrEmpty(name))
-              return name;
+            try {
+              item.GetDisplayName(SIGDN_NORMALDISPLAY, out var name);
+              if (!string.IsNullOrEmpty(name))
+                return name;
+            } finally { Marshal.ReleaseComObject(item); }
           } catch { }
         }
       } catch { }
@@ -1648,27 +1654,36 @@ public static class NativeShell {
     if (path.StartsWith("::", StringComparison.Ordinal)) {
       try {
         SHCreateItemFromParsingNameShell(path, IntPtr.Zero, IID_IShellItem, out var folderItem);
-        folderItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var folderObj);
-        var folder = (IShellFolder)folderObj;
-
-        if (folder.EnumObjects(IntPtr.Zero,
-                SHCONTF_FOLDERS | SHCONTF_FASTITEMS,
-                out var enumObj) == 0 && enumObj != null) {
-          while (enumObj.Next(1, out var childPidl, out _) == 0) {
-            try {
-              var strretParsing = default(STRRET);
-              var strretDisplay = default(STRRET);
-              folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strretParsing);
-              folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
-              string? parsingName = strretParsing.uType == 0
-                  ? Marshal.PtrToStringUni(strretParsing.pOleStr) : null;
-              string? displayName = strretDisplay.uType == 0
-                  ? Marshal.PtrToStringUni(strretDisplay.pOleStr) : null;
-              if (!string.IsNullOrEmpty(parsingName) && !string.IsNullOrEmpty(displayName))
-                result.Add((displayName, parsingName));
-            } catch { } finally { CoTaskMemFree(childPidl); }
-          }
-        }
+        try {
+          folderItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var folderObj);
+          var folder = (IShellFolder)folderObj;
+          try {
+            if (folder.EnumObjects(IntPtr.Zero,
+                    SHCONTF_FOLDERS | SHCONTF_FASTITEMS,
+                    out var enumObj) == 0 && enumObj != null) {
+              try {
+                while (enumObj.Next(1, out var childPidl, out _) == 0) {
+                  try {
+                    var strretParsing = default(STRRET);
+                    var strretDisplay = default(STRRET);
+                    folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strretParsing);
+                    folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
+                    string? parsingName = strretParsing.uType == 0
+                        ? Marshal.PtrToStringUni(strretParsing.pOleStr) : null;
+                    if (strretParsing.uType == 0 && strretParsing.pOleStr != IntPtr.Zero)
+                      CoTaskMemFree(strretParsing.pOleStr);
+                    string? displayName = strretDisplay.uType == 0
+                        ? Marshal.PtrToStringUni(strretDisplay.pOleStr) : null;
+                    if (strretDisplay.uType == 0 && strretDisplay.pOleStr != IntPtr.Zero)
+                      CoTaskMemFree(strretDisplay.pOleStr);
+                    if (!string.IsNullOrEmpty(parsingName) && !string.IsNullOrEmpty(displayName))
+                      result.Add((displayName, parsingName));
+                  } catch { } finally { CoTaskMemFree(childPidl); }
+                }
+              } finally { Marshal.ReleaseComObject(enumObj); }
+            }
+          } finally { Marshal.ReleaseComObject(folder); }
+        } finally { Marshal.ReleaseComObject(folderItem); }
       } catch { }
     } else {
       // Filesystem path.
@@ -1710,42 +1725,50 @@ public static class NativeShell {
       // handles both regular filesystem paths and virtual ::{GUID} parsing names.
       SHCreateItemFromParsingNameShell(currentPath, IntPtr.Zero,
           IID_IShellItem, out var item);
-
-      // Walk one level up in the shell namespace.
-      item.GetParent(out var parent);
-
-      // Always try the filesystem path first — regular folders like C:\Windows or
-      // C:\ have a real filesystem path even if they are also registered known folders
-      // (e.g. FOLDERID_Windows, FOLDERID_Profile).  Preferring the filesystem path
-      // keeps navigation inside LoadDirectory / Navigate rather than the slower
-      // known-folder enumeration path, and keeps breadcrumb / tree sync working.
       try {
-        parent.GetDisplayName(SIGDN_FILESYSPATH, out var fsPath);
-        if (!string.IsNullOrEmpty(fsPath))
-          return (fsPath, Guid.Empty);
-      } catch { }
+        // Walk one level up in the shell namespace.
+        item.GetParent(out var parent);
+        if (parent == null)
+          return (null, Guid.Empty);
+        try {
+          // Always try the filesystem path first — regular folders like C:\Windows or
+          // C:\ have a real filesystem path even if they are also registered known folders
+          // (e.g. FOLDERID_Windows, FOLDERID_Profile).  Preferring the filesystem path
+          // keeps navigation inside LoadDirectory / Navigate rather than the slower
+          // known-folder enumeration path, and keeps breadcrumb / tree sync working.
+          try {
+            parent.GetDisplayName(SIGDN_FILESYSPATH, out var fsPath);
+            if (!string.IsNullOrEmpty(fsPath))
+              return (fsPath, Guid.Empty);
+          } catch { }
 
-      // No filesystem path — parent is a purely virtual known folder (Desktop,
-      // This PC, Libraries, Network…).  Resolve via IKnownFolderManager so we
-      // get the canonical FOLDERID GUID rather than a raw CLSID.
-      try {
-        SHGetIDListFromObject(parent, out parentPidl);
+          // No filesystem path — parent is a purely virtual known folder (Desktop,
+          // This PC, Libraries, Network…).  Resolve via IKnownFolderManager so we
+          // get the canonical FOLDERID GUID rather than a raw CLSID.
+          try {
+            SHGetIDListFromObject(parent, out parentPidl);
 
-        int hr = CoCreateInstance(CLSID_KnownFolderManager, IntPtr.Zero, 1,
-            IID_IKnownFolderManager, out var kfmObj);
-        if (hr == 0) {
-          var kfm = (IKnownFolderManager)kfmObj;
-          kfm.FindFolderFromIDList(parentPidl, out var kf);
-          kf.GetId(out var folderGuid);
-          return (null, folderGuid);
-        }
-      } catch { } finally {
-        if (parentPidl != IntPtr.Zero)
-          CoTaskMemFree(parentPidl);
-        parentPidl = IntPtr.Zero;
-      }
+            int hr = CoCreateInstance(CLSID_KnownFolderManager, IntPtr.Zero, 1,
+                IID_IKnownFolderManager, out var kfmObj);
+            if (hr == 0) {
+              var kfm = (IKnownFolderManager)kfmObj;
+              try {
+                kfm.FindFolderFromIDList(parentPidl, out var kf);
+                try {
+                  kf.GetId(out var folderGuid);
+                  return (null, folderGuid);
+                } finally { Marshal.ReleaseComObject(kf); }
+              } finally { Marshal.ReleaseComObject(kfm); }
+            }
+          } catch { } finally {
+            if (parentPidl != IntPtr.Zero)
+              CoTaskMemFree(parentPidl);
+            parentPidl = IntPtr.Zero;
+          }
 
-      return (null, Guid.Empty);
+          return (null, Guid.Empty);
+        } finally { Marshal.ReleaseComObject(parent); }
+      } finally { Marshal.ReleaseComObject(item); }
     } catch {
       // GetParent() fails (e.g. E_FAIL) when the item has no parent.
       return (null, Guid.Empty);
@@ -1771,47 +1794,55 @@ public static class NativeShell {
           return result; // Can't get the path, give up.
         SHCreateItemFromParsingNameShell(knownPath, IntPtr.Zero, IID_IShellItem, out folderItem);
       }
-      folderItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var folderObj);
-      var folder = (IShellFolder)folderObj;
-
-      if (folder.EnumObjects(IntPtr.Zero,
-              SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_FASTITEMS,
-              out var enumIdList) != 0 || enumIdList == null)
-        return result;
-
-      while (enumIdList.Next(1, out var childPidl, out _) == 0) {
+      try {
+        folderItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var folderObj);
+        var folder = (IShellFolder)folderObj;
         try {
-          var strret = default(STRRET);
-          folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
-          string? parsePath = strret.uType == 0
-              ? Marshal.PtrToStringUni(strret.pOleStr) : null;
-          if (parsePath == null)
-            continue;
+          if (folder.EnumObjects(IntPtr.Zero,
+                  SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_FASTITEMS,
+                  out var enumIdList) == 0 && enumIdList != null) {
+            try {
+              while (enumIdList.Next(1, out var childPidl, out _) == 0) {
+                try {
+                  var strret = default(STRRET);
+                  folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
+                  string? parsePath = strret.uType == 0
+                      ? Marshal.PtrToStringUni(strret.pOleStr) : null;
+                  if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
+                    CoTaskMemFree(strret.pOleStr);
+                  if (parsePath == null)
+                    continue;
 
-          var strretDisplay = default(STRRET);
-          folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
-          string? displayName = strretDisplay.uType == 0
-              ? Marshal.PtrToStringUni(strretDisplay.pOleStr)
-              : Path.GetFileName(parsePath);
+                  var strretDisplay = default(STRRET);
+                  folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
+                  string? displayName = strretDisplay.uType == 0
+                      ? Marshal.PtrToStringUni(strretDisplay.pOleStr)
+                      : Path.GetFileName(parsePath);
+                  if (strretDisplay.uType == 0 && strretDisplay.pOleStr != IntPtr.Zero)
+                    CoTaskMemFree(strretDisplay.pOleStr);
 
-          uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
-          folder.GetAttributesOf(1, [childPidl], ref attrs);
-          bool isFolder = (attrs & SFGAO_FOLDER) != 0;
-          bool isFs = (attrs & SFGAO_FILESYSTEM) != 0;
+                  uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
+                  folder.GetAttributesOf(1, [childPidl], ref attrs);
+                  bool isFolder = (attrs & SFGAO_FOLDER) != 0;
+                  bool isFs = (attrs & SFGAO_FILESYSTEM) != 0;
 
-          // For virtual folders (like This PC), items might not have SFGAO_FILESYSTEM set.
-          // Accept items that are folders OR have a valid filesystem path.
-          // Skip only if it's neither a folder nor a valid path.
-          if (!isFolder && !isFs && !Directory.Exists(parsePath))
-            continue;
+                  // For virtual folders (like This PC), items might not have SFGAO_FILESYSTEM set.
+                  // Accept items that are folders OR have a valid filesystem path.
+                  // Skip only if it's neither a folder nor a valid path.
+                  if (!isFolder && !isFs && !Directory.Exists(parsePath))
+                    continue;
 
-          result.Add(new ShellItem {
-            Name = displayName ?? Path.GetFileName(parsePath),
-            FullPath = parsePath,
-            IsFolder = isFolder,
-          });
-        } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
-      }
+                  result.Add(new ShellItem {
+                    Name = displayName ?? Path.GetFileName(parsePath),
+                    FullPath = parsePath,
+                    IsFolder = isFolder,
+                  });
+                } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
+              }
+            } finally { Marshal.ReleaseComObject(enumIdList); }
+          }
+        } finally { Marshal.ReleaseComObject(folder); }
+      } finally { Marshal.ReleaseComObject(folderItem); }
     } catch { }
     return result;
   }
@@ -1825,44 +1856,52 @@ public static class NativeShell {
     var result = new List<ShellItem>();
     try {
       SHCreateItemFromParsingNameShell(parsingPath, IntPtr.Zero, IID_IShellItem, out var folderItem);
-      folderItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var folderObj);
-      var folder = (IShellFolder)folderObj;
-
-      if (folder.EnumObjects(IntPtr.Zero,
-              SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_FASTITEMS,
-              out var enumIdList) != 0 || enumIdList == null)
-        return result;
-
-      while (enumIdList.Next(1, out var childPidl, out _) == 0) {
+      try {
+        folderItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var folderObj);
+        var folder = (IShellFolder)folderObj;
         try {
-          var strret = default(STRRET);
-          folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
-          string? parsePath = strret.uType == 0
-              ? Marshal.PtrToStringUni(strret.pOleStr) : null;
-          if (parsePath == null)
-            continue;
+          if (folder.EnumObjects(IntPtr.Zero,
+                  SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_FASTITEMS,
+                  out var enumIdList) == 0 && enumIdList != null) {
+            try {
+              while (enumIdList.Next(1, out var childPidl, out _) == 0) {
+                try {
+                  var strret = default(STRRET);
+                  folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
+                  string? parsePath = strret.uType == 0
+                      ? Marshal.PtrToStringUni(strret.pOleStr) : null;
+                  if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
+                    CoTaskMemFree(strret.pOleStr);
+                  if (parsePath == null)
+                    continue;
 
-          var strretDisplay = default(STRRET);
-          folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
-          string? displayName = strretDisplay.uType == 0
-              ? Marshal.PtrToStringUni(strretDisplay.pOleStr)
-              : Path.GetFileName(parsePath);
+                  var strretDisplay = default(STRRET);
+                  folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
+                  string? displayName = strretDisplay.uType == 0
+                      ? Marshal.PtrToStringUni(strretDisplay.pOleStr)
+                      : Path.GetFileName(parsePath);
+                  if (strretDisplay.uType == 0 && strretDisplay.pOleStr != IntPtr.Zero)
+                    CoTaskMemFree(strretDisplay.pOleStr);
 
-          uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
-          folder.GetAttributesOf(1, [childPidl], ref attrs);
-          bool isFolder = (attrs & SFGAO_FOLDER) != 0;
-          bool isFs = (attrs & SFGAO_FILESYSTEM) != 0;
+                  uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
+                  folder.GetAttributesOf(1, [childPidl], ref attrs);
+                  bool isFolder = (attrs & SFGAO_FOLDER) != 0;
+                  bool isFs = (attrs & SFGAO_FILESYSTEM) != 0;
 
-          if (!isFolder && !isFs && !Directory.Exists(parsePath))
-            continue;
+                  if (!isFolder && !isFs && !Directory.Exists(parsePath))
+                    continue;
 
-          result.Add(new ShellItem {
-            Name = displayName ?? Path.GetFileName(parsePath),
-            FullPath = parsePath,
-            IsFolder = isFolder,
-          });
-        } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
-      }
+                  result.Add(new ShellItem {
+                    Name = displayName ?? Path.GetFileName(parsePath),
+                    FullPath = parsePath,
+                    IsFolder = isFolder,
+                  });
+                } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
+              }
+            } finally { Marshal.ReleaseComObject(enumIdList); }
+          }
+        } finally { Marshal.ReleaseComObject(folder); }
+      } finally { Marshal.ReleaseComObject(folderItem); }
     } catch { }
     return result;
   }
@@ -2124,40 +2163,46 @@ public static class NativeShell {
     if (hr != 0 || searchItemObj is not IShellItem searchItem)
       return results;
 
-    searchItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var sfObj);
-    if (sfObj is not IShellFolder sf)
-      return results;
-
-    hr = sf.EnumObjects(IntPtr.Zero,
-        (uint)(SHCONTF.FOLDERS | SHCONTF.INCLUDEHIDDEN | SHCONTF.INCLUDESUPERHIDDEN |
-          SHCONTF.NONFOLDERS | SHCONTF.FASTITEMS),
-        out var enumIDList);
-    if (hr != 0 || enumIDList is null)
-      return results;
-
-    while (true) {
-      ct.ThrowIfCancellationRequested();
-      hr = enumIDList.Next(1, out var childPidl, out var fetched);
-      if (hr != 0 || fetched == 0) break;
+    try {
+      searchItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var sfObj);
+      if (sfObj is not IShellFolder sf)
+        return results;
 
       try {
-        var strret = default(STRRET);
-        sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
-        string? fullPath = strret.uType == 0
-            ? Marshal.PtrToStringUni(strret.pOleStr) : null;
-        if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
-          Marshal.FreeCoTaskMem(strret.pOleStr);
+        hr = sf.EnumObjects(IntPtr.Zero,
+            (uint)(SHCONTF.FOLDERS | SHCONTF.INCLUDEHIDDEN | SHCONTF.INCLUDESUPERHIDDEN |
+              SHCONTF.NONFOLDERS | SHCONTF.FASTITEMS),
+            out var enumIDList);
+        if (hr != 0 || enumIDList is null)
+          return results;
 
-        if (string.IsNullOrEmpty(fullPath)) continue;
-        string name = Path.GetFileName(fullPath);
-        if (string.IsNullOrEmpty(name)) continue;
+        try {
+          while (true) {
+            ct.ThrowIfCancellationRequested();
+            hr = enumIDList.Next(1, out var childPidl, out var fetched);
+            if (hr != 0 || fetched == 0) break;
 
-        var item = GetSingleItemMetadata(fullPath);
-        if (item is not null) results.Add(item);
-      } finally {
-        Marshal.FreeCoTaskMem(childPidl);
-      }
-    }
+            try {
+              var strret = default(STRRET);
+              sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
+              string? fullPath = strret.uType == 0
+                  ? Marshal.PtrToStringUni(strret.pOleStr) : null;
+              if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
+                Marshal.FreeCoTaskMem(strret.pOleStr);
+
+              if (string.IsNullOrEmpty(fullPath)) continue;
+              string name = Path.GetFileName(fullPath);
+              if (string.IsNullOrEmpty(name)) continue;
+
+              var item = GetSingleItemMetadata(fullPath);
+              if (item is not null) results.Add(item);
+            } finally {
+              Marshal.FreeCoTaskMem(childPidl);
+            }
+          }
+        } finally { Marshal.ReleaseComObject(enumIDList); }
+      } finally { Marshal.ReleaseComObject(sf); }
+    } finally { Marshal.ReleaseComObject(searchItem); }
 
     return results;
   }
@@ -2183,41 +2228,47 @@ public static class NativeShell {
     if (hr != 0 || searchItemObj is not IShellItem searchItem)
       return;
 
-    searchItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var sfObj);
-    if (sfObj is not IShellFolder sf)
-      return;
-
-    hr = sf.EnumObjects(IntPtr.Zero,
-        (uint)(SHCONTF.FOLDERS | SHCONTF.INCLUDEHIDDEN | SHCONTF.INCLUDESUPERHIDDEN |
-               SHCONTF.NONFOLDERS | SHCONTF.FASTITEMS),
-        out var enumIDList);
-    if (hr != 0 || enumIDList is null)
-      return;
-
-    while (true) {
-      ct.ThrowIfCancellationRequested();
-      hr = enumIDList.Next(1, out var childPidl, out var fetched);
-      if (hr != 0 || fetched == 0) break;
+    try {
+      searchItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var sfObj);
+      if (sfObj is not IShellFolder sf)
+        return;
 
       try {
-        var strret = default(STRRET);
-        sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
-        string? fullPath = strret.uType == 0
-            ? Marshal.PtrToStringUni(strret.pOleStr) : null;
-        if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
-          Marshal.FreeCoTaskMem(strret.pOleStr);
+        hr = sf.EnumObjects(IntPtr.Zero,
+            (uint)(SHCONTF.FOLDERS | SHCONTF.INCLUDEHIDDEN | SHCONTF.INCLUDESUPERHIDDEN |
+                   SHCONTF.NONFOLDERS | SHCONTF.FASTITEMS),
+            out var enumIDList);
+        if (hr != 0 || enumIDList is null)
+          return;
 
-        if (string.IsNullOrEmpty(fullPath)) continue;
-        string name = Path.GetFileName(fullPath);
-        if (string.IsNullOrEmpty(name)) continue;
+        try {
+          while (true) {
+            ct.ThrowIfCancellationRequested();
+            hr = enumIDList.Next(1, out var childPidl, out var fetched);
+            if (hr != 0 || fetched == 0) break;
 
-        var item = GetSingleItemMetadata(fullPath);
-        if (item is not null)
-          writer.TryWrite(item);
-      } finally {
-        Marshal.FreeCoTaskMem(childPidl);
-      }
-    }
+            try {
+              var strret = default(STRRET);
+              sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
+              string? fullPath = strret.uType == 0
+                  ? Marshal.PtrToStringUni(strret.pOleStr) : null;
+              if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
+                Marshal.FreeCoTaskMem(strret.pOleStr);
+
+              if (string.IsNullOrEmpty(fullPath)) continue;
+              string name = Path.GetFileName(fullPath);
+              if (string.IsNullOrEmpty(name)) continue;
+
+              var item = GetSingleItemMetadata(fullPath);
+              if (item is not null)
+                writer.TryWrite(item);
+            } finally {
+              Marshal.FreeCoTaskMem(childPidl);
+            }
+          }
+        } finally { Marshal.ReleaseComObject(enumIDList); }
+      } finally { Marshal.ReleaseComObject(sf); }
+    } finally { Marshal.ReleaseComObject(searchItem); }
   }
 
     // ── Library XML parser ────────────────────────────────────────────────────
@@ -2258,13 +2309,15 @@ public static class NativeShell {
           IID_IShellLinkW, out var obj);
       if (hr != 0)
         return null;
-      var link = (IShellLinkW)obj;
-      var pf = (IPersistFile)obj;
-      pf.Load(lnkPath, 0);
-      link.Resolve(IntPtr.Zero, 0x1);
-      var sb = new System.Text.StringBuilder(260);
-      link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
-      return sb.Length > 0 ? sb.ToString() : null;
+      try {
+        var link = (IShellLinkW)obj;
+        var pf = (IPersistFile)obj;
+        pf.Load(lnkPath, 0);
+        link.Resolve(IntPtr.Zero, 0x1);
+        var sb = new System.Text.StringBuilder(260);
+        link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
+        return sb.Length > 0 ? sb.ToString() : null;
+      } finally { Marshal.ReleaseComObject(obj); }
     } catch { return null; }
   }
 

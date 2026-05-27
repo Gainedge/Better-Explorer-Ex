@@ -424,6 +424,8 @@
         <!-- Address bar -->
         <ColumnDefinition Width="220"  />
         <!-- Search box -->
+        <ColumnDefinition Width="Auto" />
+        <!-- Settings button -->
       </Grid.ColumnDefinitions>
 
       <Button x:Name="BackButton"
@@ -793,6 +795,16 @@
           </Style>
         </AutoSuggestBox.TextBoxStyle>
       </AutoSuggestBox>
+
+      <Button x:Name="SettingsButton"
+              Grid.Column="6"
+              VerticalAlignment="Center"
+              Margin="2,0,4,0"
+              ToolTipService.ToolTip="Settings"
+              Style="{StaticResource NavButtonStyle}"
+              Click="OnSettingsButtonClick">
+        <FontIcon Glyph="&#xE713;" FontSize="14" />
+      </Button>
     </Grid>
 
     <!-- ── View toolbar row ───────────────────────────────────────────── -->

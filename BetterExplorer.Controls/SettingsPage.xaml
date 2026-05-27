@@ -1,0 +1,114 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="BetterExplorer.Controls.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="700"
+    MinHeight="560">
+
+  <NavigationView x:Name="SettingsNav"
+                  PaneDisplayMode="Left"
+                  OpenPaneLength="200"
+                  IsSettingsVisible="False"
+                  IsBackButtonVisible="Collapsed"
+                  IsPaneToggleButtonVisible="False"
+                  SelectionChanged="OnNavSelectionChanged">
+
+    <NavigationView.MenuItems>
+      <NavigationViewItem x:Name="NavGeneral"    Content="General"    Tag="General"    IsSelected="True" />
+      <NavigationViewItem x:Name="NavAppearance" Content="Appearance" Tag="Appearance" />
+      <NavigationViewItem x:Name="NavAbout"      Content="About"      Tag="About" />
+    </NavigationView.MenuItems>
+
+    <!-- Content host -->
+    <ScrollViewer Padding="24,8,24,24">
+      <StackPanel Spacing="20">
+
+        <!-- General -->
+        <StackPanel x:Name="GeneralSection" Spacing="12">
+          <StackPanel.Transitions>
+            <TransitionCollection>
+              <EntranceThemeTransition FromVerticalOffset="16" />
+            </TransitionCollection>
+          </StackPanel.Transitions>
+          <TextBlock Text="General" Style="{ThemeResource SubtitleTextBlockStyle}" />
+
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="16,12">
+            <ToggleSwitch x:Name="ShowHiddenFilesToggle"
+                          Header="Show hidden files" IsOn="False"
+                          Toggled="OnShowHiddenFilesToggled" Margin="0" />
+          </Border>
+
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="16,12">
+            <ToggleSwitch x:Name="ShowExtensionsToggle"
+                          Header="Show file extensions" IsOn="True"
+                          Toggled="OnShowExtensionsToggled" Margin="0" />
+          </Border>
+        </StackPanel>
+
+        <!-- Appearance -->
+        <StackPanel x:Name="AppearanceSection" Spacing="12" Visibility="Collapsed">
+          <StackPanel.Transitions>
+            <TransitionCollection>
+              <EntranceThemeTransition FromVerticalOffset="16" />
+            </TransitionCollection>
+          </StackPanel.Transitions>
+          <TextBlock Text="Appearance" Style="{ThemeResource SubtitleTextBlockStyle}" />
+
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="16,12">
+            <StackPanel Spacing="8">
+              <TextBlock Text="Theme" FontWeight="SemiBold" />
+              <RadioButtons x:Name="ThemeRadioButtons"
+                            SelectionChanged="OnThemeSelectionChanged">
+                <RadioButton Content="System default" Tag="Default" IsChecked="True" />
+                <RadioButton Content="Light"          Tag="Light" />
+                <RadioButton Content="Dark"           Tag="Dark" />
+              </RadioButtons>
+            </StackPanel>
+          </Border>
+
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="16,12">
+            <ToggleSwitch x:Name="CompactModeToggle"
+                          Header="Compact list spacing" IsOn="False" Margin="0" />
+          </Border>
+        </StackPanel>
+
+        <!-- About -->
+        <StackPanel x:Name="AboutSection" Spacing="16" Visibility="Collapsed">
+          <StackPanel.Transitions>
+            <TransitionCollection>
+              <EntranceThemeTransition FromVerticalOffset="16" />
+            </TransitionCollection>
+          </StackPanel.Transitions>
+          <TextBlock Text="About" Style="{ThemeResource SubtitleTextBlockStyle}" />
+
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="20,16">
+            <StackPanel Spacing="6">
+              <TextBlock Text="Better Explorer Ex"
+                         Style="{ThemeResource TitleTextBlockStyle}" />
+              <TextBlock x:Name="VersionText"
+                         Style="{ThemeResource CaptionTextBlockStyle}"
+                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+          </Border>
+        </StackPanel>
+
+      </StackPanel>
+    </ScrollViewer>
+
+  </NavigationView>
+
+</UserControl>
