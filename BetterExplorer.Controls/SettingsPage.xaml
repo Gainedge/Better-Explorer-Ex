@@ -56,6 +56,34 @@
                   BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                   BorderThickness="1" CornerRadius="8" Padding="16,12">
             <StackPanel Spacing="8">
+              <TextBlock Text="Search engine" FontWeight="SemiBold" />
+              <TextBlock Text="Choose which engine is used when you type in the search box."
+                         Style="{ThemeResource CaptionTextBlockStyle}"
+                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                         TextWrapping="Wrap" />
+              <RadioButtons x:Name="SearchEngineRadioButtons"
+                            SelectionChanged="OnSearchEngineSelectionChanged">
+                <RadioButton x:Name="SearchEngineWindowsSearch"
+                             Content="Windows Search  (built-in)"
+                             Tag="WindowsSearch"
+                             IsChecked="True" />
+                <RadioButton x:Name="SearchEngineEverything"
+                             Content="Everything  (voidtools)"
+                             Tag="Everything"
+                             IsEnabled="False" />
+              </RadioButtons>
+              <TextBlock x:Name="EverythingNotFoundText"
+                         Text="Everything was not detected on this machine."
+                         Style="{ThemeResource CaptionTextBlockStyle}"
+                         Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                         Visibility="Collapsed" />
+            </StackPanel>
+          </Border>
+
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="16,12">
+            <StackPanel Spacing="8">
               <TextBlock Text="File operation handler" FontWeight="SemiBold" />
               <TextBlock Text="Choose which program performs copy, move, and paste operations."
                          Style="{ThemeResource CaptionTextBlockStyle}"

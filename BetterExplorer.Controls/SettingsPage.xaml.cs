@@ -1,4 +1,5 @@
 using System;
+using BetterExplorer.ShellApi.Interop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Storage;
@@ -22,8 +23,9 @@ public sealed partial class SettingsPage : UserControl
 
     // ── Setting keys ─────────────────────────────────────────────────────────
 
-    public const string ThemeSettingKey  = "App.Theme";
-    public const string FileOpHandlerKey = "App.FileOpHandler";
+    public const string ThemeSettingKey   = "App.Theme";
+    public const string FileOpHandlerKey  = "App.FileOpHandler";
+    public const string SearchEngineKey   = "App.SearchEngine";
 
     /// <summary>Returns the currently persisted file-operation handler: "System" or "TeraCopy".</summary>
     public static string FileOpHandler
@@ -37,8 +39,23 @@ public sealed partial class SettingsPage : UserControl
         }
     }
 
+    /// <summary>Returns the currently persisted search engine: "WindowsSearch" or "Everything".</summary>
+    public static string SearchEngine
+    {
+        get
+        {
+            try {
+                return ApplicationData.Current.LocalSettings.Values
+                    .TryGetValue(SearchEngineKey, out var v) ? v as string ?? "WindowsSearch" : "WindowsSearch";
+            } catch { return "WindowsSearch"; }
+        }
+    }
+
     /// <summary>Raised when the user changes the file-operation handler setting.</summary>
     public static event Action<string>? FileOpHandlerChanged;
+
+    /// <summary>Raised when the user changes the search engine setting.</summary>
+    public static event Action<string>? SearchEngineChanged;
 
     // ── Loaded ────────────────────────────────────────────────────────────────
 
@@ -57,6 +74,27 @@ public sealed partial class SettingsPage : UserControl
         bool teraCopyAvailable = TeraCopyHelper.IsAvailable();
         FileOpTeraCopy.IsEnabled             = teraCopyAvailable;
         TeraCopyNotFoundText.Visibility      = teraCopyAvailable ? Visibility.Collapsed : Visibility.Visible;
+
+        // Re-scan for Everything each time the settings page is shown.
+        EverythingSearch.InvalidateCache();
+        bool everythingAvailable = EverythingSearch.IsAvailable();
+        SearchEngineEverything.IsEnabled = everythingAvailable;
+        EverythingNotFoundText.Visibility = everythingAvailable ? Visibility.Collapsed : Visibility.Visible;
+
+        // Restore persisted search engine selection without triggering a save.
+        var savedEngine = ApplicationData.Current.LocalSettings.Values
+            .TryGetValue(SearchEngineKey, out var ev) ? ev as string : null;
+        if (savedEngine != null)
+        {
+            foreach (var item in SearchEngineRadioButtons.Items)
+            {
+                if (item is RadioButton rb && rb.Tag as string == savedEngine && rb.IsEnabled)
+                {
+                    SearchEngineRadioButtons.SelectedItem = rb;
+                    break;
+                }
+            }
+        }
 
         // Restore persisted theme selection without triggering a save.
         var savedTheme = ApplicationData.Current.LocalSettings.Values
@@ -107,6 +145,17 @@ public sealed partial class SettingsPage : UserControl
     private void OnShowHiddenFilesToggled(object sender, RoutedEventArgs e) { }
 
     private void OnShowExtensionsToggled(object sender, RoutedEventArgs e) { }
+
+    // ── Search engine ─────────────────────────────────────────────────────────
+
+    private void OnSearchEngineSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_initialized) return;
+        if (sender is not RadioButtons rb || rb.SelectedItem is not RadioButton selected) return;
+        var tag = selected.Tag as string ?? "WindowsSearch";
+        ApplicationData.Current.LocalSettings.Values[SearchEngineKey] = tag;
+        SearchEngineChanged?.Invoke(tag);
+    }
 
     // ── File-operation handler ────────────────────────────────────────────────
 

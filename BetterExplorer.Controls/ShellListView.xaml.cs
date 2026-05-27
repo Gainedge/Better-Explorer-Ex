@@ -861,6 +861,11 @@ public sealed partial class ShellListView : UserControl {
       CanGoBack    = true;
       CanGoForward = false;
     }
+    // Always show search results in Details view with no grouping.
+    // Do this before populating so the list renders correctly from the start.
+    _groupColumn = string.Empty;
+    ViewMode = ShellViewMode.Details;
+
     SearchQueryChanged?.Invoke(this, query);
     BusyChanged?.Invoke(this, true);
     CollapseAllNameExpansions();
@@ -877,7 +882,13 @@ public sealed partial class ShellListView : UserControl {
     var currentPath = CurrentPath;
     const int batchSize = 10;
 
-    var reader = NativeShell.SearchFolderStreamAsync(currentPath, query, ct);
+    // Choose search backend based on the user's persisted preference.
+    bool useEverything = SettingsPage.SearchEngine == "Everything"
+                         && EverythingSearch.IsAvailable();
+
+    var reader = useEverything
+        ? EverythingSearch.SearchFolderStreamAsync(currentPath, query, ct)
+        : NativeShell.SearchFolderStreamAsync(currentPath, query, ct);
     var buffer = new List<ShellItem>(batchSize);
 
     try {
@@ -3096,7 +3107,7 @@ public sealed partial class ShellListView : UserControl {
   /// No-ops when <see cref="CurrentPath"/> is empty.
   /// </summary>
   private void SaveCurrentFolderSettings() {
-    if (string.IsNullOrEmpty(CurrentPath) || _applyingFolderSettings)
+    if (string.IsNullOrEmpty(CurrentPath) || _applyingFolderSettings || _isSearchActive)
       return;
 
     var columnRecords = DetailsColumns.Columns
