@@ -421,6 +421,7 @@ public static class NativeShell {
   private static readonly Guid IID_IShellItemImageFactory = new("BCC18B79-BA16-442F-80C4-8A59C30C463B");
   private static readonly Guid IID_IShellFolder = new("000214E6-0000-0000-C000-000000000046");
   private static readonly Guid IID_IShellItem = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
+  private static readonly Guid IID_IShellItem2 = new("7E9FB0D3-919F-4307-AB2E-9B1860310C93");
   private static readonly Guid IID_IKnownFolderManager = new("8BE2D872-86AA-4D47-B776-32CCA40C7018");
   private static readonly Guid CLSID_KnownFolderManager = new("4DF0C730-DF9D-4AE3-9153-AA6B82E9795A");
   private static readonly Guid CLSID_ShellLink = new("00021401-0000-0000-C000-000000000046");
@@ -445,6 +446,7 @@ public static class NativeShell {
 
   // IFileOperation flags
   private const uint FOF_NOCONFIRMMKDIR   = 0x0200;
+  private const uint FOF_NOCONFIRMATION   = 0x0010;  // suppress "are you sure?" prompts
   private const uint FOF_RENAMEONCOLLISION = 0x0008;
   private const uint FOF_SILENT           = 0x0004;  // suppress progress dialog
   private const uint FOF_NO_UI            = 0x0614;  // FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR
@@ -499,6 +501,20 @@ public static class NativeShell {
   private const uint LARGE_FETCH = 2;
   private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
+  // ── Shell property keys (PKEY) ────────────────────────────────────────────
+  // PKEY_Size         = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 12
+  // PKEY_DateModified = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 14
+  // PKEY_ItemTypeText = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 4  ("File folder", "PNG File", …)
+  // PKEY_FileAttributes = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 13
+  // IShellItem2 methods take BExplorer.Shell.Interop.PROPERTYKEY (int pid).
+  private static readonly Guid _pkeyStorageFmtId = new("B725F130-47EF-101A-A5F1-02608C9EEBAC");
+  // The outer public PROPERTYKEY (int pid) is used here; qualified to avoid
+  // shadowing by the private inner struct (uint pid).
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_Size         => new() { fmtid = _pkeyStorageFmtId, pid = 12 };
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_DateModified => new() { fmtid = _pkeyStorageFmtId, pid = 14 };
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_ItemTypeText => new() { fmtid = _pkeyStorageFmtId, pid =  4 };
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_FileAttribs  => new() { fmtid = _pkeyStorageFmtId, pid = 13 };
+
   // ── P/Invoke declarations ─────────────────────────────────────────────────
 
   [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
@@ -539,6 +555,14 @@ public static class NativeShell {
       string pszPath, IntPtr pbc,
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
       [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
+
+  // Returns IShellItem2 — used for property-store queries (size, dates, type text).
+  [DllImport("shell32.dll", EntryPoint = "SHCreateItemFromParsingName",
+             CharSet = CharSet.Unicode, PreserveSig = false)]
+  private static extern void SHCreateItemFromParsingNameItem2(
+      string pszPath, IntPtr pbc,
+      [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out IShellItem2 ppv);
 
   // Converts any COM shell object to its absolute PIDL (needed for FindFolderFromIDList).
   [DllImport("shell32.dll", PreserveSig = false)]
@@ -1912,6 +1936,7 @@ public static class NativeShell {
   private static readonly Dictionary<string, string> _extTypeStringCache =
       new(StringComparer.OrdinalIgnoreCase);
 
+  public static string GetItemTypeStringPublic(string ext) => GetItemTypeString(ext);
   private static string GetItemTypeString(string ext) {
     if (ext.Length <= 1)
       return "File";
@@ -1983,46 +2008,62 @@ public static class NativeShell {
   /// </summary>
   public static ShellItem? GetSingleItemMetadata(string fullPath) {
     try {
-      var dir = Path.GetDirectoryName(fullPath);
-      if (dir is null)
-        return null;
+      // Use FindFirstFileEx for attrs / size / date: reads directly from the
+      // filesystem buffer so it reflects in-progress copy sizes immediately,
+      // and works even when the file handle is open (no sharing violation).
       var hFind = FindFirstFileEx(fullPath,
           FINDEX_INFO_BASIC, out var data, FINDEX_SEARCH_NAME, IntPtr.Zero, LARGE_FETCH);
       if (hFind == INVALID_HANDLE_VALUE)
         return null;
       FindClose(hFind);
 
-      var name = data.cFileName;
+      var name  = data.cFileName;
       var attrs = data.dwFileAttributes;
       if ((attrs & FILE_ATTRIBUTE_REPARSE) != 0)
         return null;
-      bool isDir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-      bool isHidden = (attrs & FILE_ATTRIBUTE_HIDDEN) != 0;
-      var modified = DateTime.FromFileTimeUtc(data.ftLastWriteTime).ToLocalTime();
+
+      bool isDir    = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      bool isHidden = (attrs & FILE_ATTRIBUTE_HIDDEN)    != 0;
+      var  modified = DateTime.FromFileTimeUtc(data.ftLastWriteTime).ToLocalTime();
 
       if (isDir) {
         return new ShellItem {
-          Name = name,
-          FullPath = fullPath,
-          ItemType = "File folder",
-          IsFolder = true,
-          IsHidden = isHidden,
-          DateModified = modified
-        };
-      } else {
-        long size = ((long)data.nFileSizeHigh << 32) | data.nFileSizeLow;
-        var ext = Path.GetExtension(name);
-        return new ShellItem {
-          Name = name,
-          FullPath = fullPath,
-          ItemType = GetItemTypeString(ext),
-          IsFolder = false,
-          IsHidden = isHidden,
-          Size = FormatSize(size),
-          SizeBytes = size,
+          Name         = name,
+          FullPath     = fullPath,
+          ItemType     = "File folder",
+          IsFolder     = true,
+          IsHidden     = isHidden,
           DateModified = modified
         };
       }
+
+      long size = ((long)data.nFileSizeHigh << 32) | (uint)data.nFileSizeLow;
+
+      // IShellItem2.GetString(PKEY_ItemTypeText) gives the shell's own friendly
+      // type string ("PNG File", "Text Document", etc.) — better than a raw
+      // extension lookup.  Fall back to extension lookup if the COM call fails.
+      string? typeText = null;
+      try {
+        SHCreateItemFromParsingNameItem2(fullPath, IntPtr.Zero, IID_IShellItem2, out var si2);
+        if (si2 is not null) {
+          var pk = PKEY_ItemTypeText;
+          si2.GetString(ref pk, out typeText);
+        }
+      } catch { /* COM unavailable / locked — fall through */ }
+
+      if (string.IsNullOrEmpty(typeText))
+        typeText = GetItemTypeString(Path.GetExtension(name));
+
+      return new ShellItem {
+        Name         = name,
+        FullPath     = fullPath,
+        ItemType     = typeText,
+        IsFolder     = false,
+        IsHidden     = isHidden,
+        Size         = FormatSize(size),
+        SizeBytes    = size,
+        DateModified = modified
+      };
     } catch { return null; }
   }
 
@@ -2685,7 +2726,7 @@ public static class NativeShell {
           fileOp.SetOwnerWindow(hwndOwner);
 
         fileOp.SetOperationFlags(permanent
-            ? 0u
+            ? FOF_NOCONFIRMATION
             : FOF_ALLOWUNDO | FOFX_ADDUNDORECORD);
         fileOp.Advise(sink, out cookie);
 

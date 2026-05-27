@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <UserControl
     x:Class="BetterExplorer.Controls.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -50,6 +50,34 @@
             <ToggleSwitch x:Name="ShowExtensionsToggle"
                           Header="Show file extensions" IsOn="True"
                           Toggled="OnShowExtensionsToggled" Margin="0" />
+          </Border>
+
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="16,12">
+            <StackPanel Spacing="8">
+              <TextBlock Text="File operation handler" FontWeight="SemiBold" />
+              <TextBlock Text="Choose which program performs copy, move, and paste operations."
+                         Style="{ThemeResource CaptionTextBlockStyle}"
+                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                         TextWrapping="Wrap" />
+              <RadioButtons x:Name="FileOpHandlerRadioButtons"
+                            SelectionChanged="OnFileOpHandlerSelectionChanged">
+                <RadioButton x:Name="FileOpSystem"
+                             Content="System  (Windows built-in)"
+                             Tag="System"
+                             IsChecked="True" />
+                <RadioButton x:Name="FileOpTeraCopy"
+                             Content="TeraCopy"
+                             Tag="TeraCopy"
+                             IsEnabled="False" />
+              </RadioButtons>
+              <TextBlock x:Name="TeraCopyNotFoundText"
+                         Text="TeraCopy was not detected on this machine."
+                         Style="{ThemeResource CaptionTextBlockStyle}"
+                         Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                         Visibility="Collapsed" />
+            </StackPanel>
           </Border>
         </StackPanel>
 

@@ -5,11 +5,14 @@ using System.Threading;
 namespace BetterExplorer.ShellApi.Interop;
 
 /// <summary>
-/// Receives shell change notifications for a virtual folder path (e.g. <c>::{GUID}</c>)
+/// Receives shell change notifications for a folder path — both real filesystem paths
+/// (e.g. <c>C:\Users\Foo</c>) and virtual shell-namespace paths (e.g. <c>::{GUID}</c>) —
 /// by registering with <c>SHChangeNotifyRegister</c> on a dedicated hidden HWND.
 /// <para>
-/// Real filesystem paths should use <see cref="System.IO.FileSystemWatcher"/> instead —
-/// this class is specifically for shell-namespace paths that have no backing directory.
+/// Uses <c>SHCNRF_SHELLLEVEL</c> for all paths so that notifications are always delivered
+/// via the shell notification service and decoded with <c>SHChangeNotification_Lock</c>.
+/// (<c>SHCNRF_INTERRUPTLEVEL</c> is intentionally avoided because it delivers the WM via
+/// SendMessage with raw PIDLs instead of an hChange handle, which breaks the lock/unlock flow.)
 /// </para>
 /// <para>
 /// Usage: create, subscribe to <see cref="Changed"/>, call <see cref="Start"/>, call
@@ -38,18 +41,24 @@ public sealed class ShellChangeWatcher : IDisposable {
   private const uint SHCNE_DISKEVENTS      = 0x0002381F;
 
   // SHChangeNotifyRegister flags
-  private const uint SHCNRF_SHELLLEVEL      = 0x0002;
+  // SHCNRF_INTERRUPTLEVEL — watches the FS driver layer; REQUIRED for real paths.
+  // Without it only shell-broker broadcasts are received, missing most raw FS events.
+  private const uint SHCNRF_INTERRUPTLEVEL     = 0x0001;
+  private const uint SHCNRF_SHELLLEVEL         = 0x0002;
   private const uint SHCNRF_RECURSIVEINTERRUPT = 0x1000;
-
-  // Notification form sent to the HWND
-  private const uint SHCNF_IDLIST  = 0x0000;
-  private const uint SHCNF_FLUSH   = 0x1000;
+  // SHCNRF_NEWDELIVERY converts ALL delivery (interrupt + shell level) to the
+  // lock-based format: wParam = hChange, lParam = dwProcessId.
+  // It is safe to combine with SHCNRF_INTERRUPTLEVEL — the earlier concern about
+  // raw-PIDL delivery only applies when NEWDELIVERY is absent.
+  private const uint SHCNRF_NEWDELIVERY        = 0x8000;
 
   private const int WM_USER = 0x0400;
-  // We use WM_USER+1 as our shell-change message
-  private const int WM_SHELLCHANGE = WM_USER + 1;
+  // Primary shell-change notification message we register for.
+  private const int WM_SHELLCHANGE          = WM_USER + 1;
+  // Shell also posts wMsg+1 as a "delivery complete" signal; we absorb it.
+  private const int WM_SHELLCHANGE_DELIVERY = WM_USER + 2;
   private const int WM_DESTROY = 0x0002;
-  private const int WM_CLOSE = 0x0010;
+  private const int WM_CLOSE   = 0x0010;
 
   private static readonly IntPtr HWND_MESSAGE = new(-3);
   private const int CS_NOCLOSE = 0x0200;
@@ -167,7 +176,8 @@ public sealed class ShellChangeWatcher : IDisposable {
   private static extern void CoTaskMemFree(IntPtr pv);
 
   private const int GWLP_USERDATA = -21;
-  private const uint SIGDN_FILESYSPATH = 0x80058000;
+  private const uint SIGDN_FILESYSPATH              = 0x80058000;
+  private const uint SIGDN_DESKTOPABSOLUTEPARSING   = 0x80028000; // fallback for non-FS items
 
   // ── Window-class registration (once per process) ─────────────────────────
 
@@ -197,7 +207,8 @@ public sealed class ShellChangeWatcher : IDisposable {
 
   // ── Instance state ────────────────────────────────────────────────────────
 
-  private readonly string _virtualPath;   // e.g. ::{20D04FE0-...}
+  private readonly string _path;           // real FS path or ::{GUID}
+  private readonly bool   _isVirtual;      // true when _path is a shell-namespace path
   private Thread?   _thread;
   private IntPtr    _hwnd;
   private uint      _notifyId;
@@ -207,8 +218,9 @@ public sealed class ShellChangeWatcher : IDisposable {
   // Raised on the background thread — caller must marshal to UI.
   public event EventHandler<ShellChangeEventArgs>? Changed;
 
-  public ShellChangeWatcher(string virtualPath) {
-    _virtualPath = virtualPath;
+  public ShellChangeWatcher(string path) {
+    _path      = path;
+    _isVirtual = path.StartsWith("::", StringComparison.Ordinal);
   }
 
   /// <summary>Starts the message pump and registers for shell notifications.
@@ -245,10 +257,12 @@ public sealed class ShellChangeWatcher : IDisposable {
 
   private IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam) {
     if (msg == WM_SHELLCHANGE) {
-      // wParam = hChange, lParam = dwProcId  (per SHChangeNotifyRegister doc)
-      IntPtr hChange = wParam;
-      uint   procId  = (uint)(long)lParam;
-      ProcessShellChange(hChange, procId);
+      // wParam = hChange, lParam = dwProcId  (SHCNRF_NEWDELIVERY format)
+      ProcessShellChange(wParam, (uint)(long)lParam);
+      return IntPtr.Zero;
+    }
+    if (msg == WM_SHELLCHANGE_DELIVERY) {
+      // Shell posts wMsg+1 as a delivery-complete signal; absorb it.
       return IntPtr.Zero;
     }
     if (msg == WM_DESTROY) {
@@ -277,16 +291,30 @@ public sealed class ShellChangeWatcher : IDisposable {
         try {
           var pidl1 = Marshal.ReadIntPtr(ppidl, 0);
           if (pidl1 != IntPtr.Zero)
-            SHGetNameFromIDList(pidl1, SIGDN_FILESYSPATH, out path1);
+            path1 = PidlToPath(pidl1);
           var pidl2 = Marshal.ReadIntPtr(ppidl, IntPtr.Size);
           if (pidl2 != IntPtr.Zero)
-            SHGetNameFromIDList(pidl2, SIGDN_FILESYSPATH, out path2);
+            path2 = PidlToPath(pidl2);
         } catch { }
       }
       Changed?.Invoke(this, new ShellChangeEventArgs((ShellChangeType)plEvent, path1, path2));
     } finally {
       SHChangeNotification_Unlock(hLock);
     }
+  }
+
+  // Try SIGDN_FILESYSPATH first; fall back to SIGDN_DESKTOPABSOLUTEPARSING
+  // for virtual shell items that have no FS path.
+  private static string? PidlToPath(IntPtr pidl) {
+    try {
+      SHGetNameFromIDList(pidl, SIGDN_FILESYSPATH, out var name);
+      if (!string.IsNullOrEmpty(name)) return name;
+    } catch { }
+    try {
+      SHGetNameFromIDList(pidl, SIGDN_DESKTOPABSOLUTEPARSING, out var name);
+      return string.IsNullOrEmpty(name) ? null : name;
+    } catch { }
+    return null;
   }
 
   private void RunMessagePump() {
@@ -327,25 +355,24 @@ public sealed class ShellChangeWatcher : IDisposable {
   }
 
   private void RegisterNotify() {
-    // Resolve the virtual path to a PIDL.
     IntPtr pidl = IntPtr.Zero;
     bool freePidl = true;
     try {
-      // Try parsing as a shell path first (::{GUID} format).
+      // Strip trailing backslash — SHParseDisplayName rejects "C:\Foo\" but accepts "C:\Foo".
+      var parsePath = _path.TrimEnd('\\', '/');
       try {
-        SHParseDisplayName(_virtualPath, IntPtr.Zero, out pidl, 0, out _);
+        SHParseDisplayName(parsePath, IntPtr.Zero, out pidl, 0, out _);
       } catch {
         pidl = IntPtr.Zero;
       }
 
-      if (pidl == IntPtr.Zero) {
-        // Fallback: try as a known-folder GUID.
-        if (_virtualPath.StartsWith("::{", StringComparison.OrdinalIgnoreCase) &&
-            _virtualPath.Length >= 39) {
-          var guidStr = _virtualPath[2..];   // strip leading ::
-          if (Guid.TryParse(guidStr, out var guid)) {
+      if (pidl == IntPtr.Zero && _isVirtual) {
+        // Fallback for ::{GUID} paths — try SHGetKnownFolderIDList.
+        if (_path.StartsWith("::{", StringComparison.OrdinalIgnoreCase) &&
+            _path.Length >= 39) {
+          var guidStr = _path[2..];   // strip leading ::
+          if (Guid.TryParse(guidStr, out var guid))
             SHGetKnownFolderIDList(guid, 0, IntPtr.Zero, out pidl);
-          }
         }
       }
 
@@ -365,9 +392,19 @@ public sealed class ShellChangeWatcher : IDisposable {
           SHCNE_UPDATEDIR     | SHCNE_UPDATEITEM      |
           SHCNE_ASSOCCHANGED;
 
+      // Real FS paths need SHCNRF_INTERRUPTLEVEL to receive filesystem-driver events
+      // (create, delete, write).  Without it only shell-broker broadcasts arrive,
+      // which are sporadic and miss most plain file operations.
+      // SHCNRF_NEWDELIVERY converts ALL sources (interrupt + shell) to the
+      // hChange/procId format required by SHChangeNotification_Lock — it is safe
+      // to combine with SHCNRF_INTERRUPTLEVEL.
+      uint sources = _isVirtual
+          ? SHCNRF_SHELLLEVEL | SHCNRF_RECURSIVEINTERRUPT | SHCNRF_NEWDELIVERY
+          : SHCNRF_INTERRUPTLEVEL | SHCNRF_SHELLLEVEL | SHCNRF_NEWDELIVERY;
+
       _notifyId = SHChangeNotifyRegister(
           _hwnd,
-          SHCNRF_SHELLLEVEL | SHCNRF_RECURSIVEINTERRUPT,
+          sources,
           events,
           WM_SHELLCHANGE,
           1,

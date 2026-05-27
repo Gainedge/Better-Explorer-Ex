@@ -155,8 +155,10 @@ public sealed partial class ShellListView : UserControl {
   private const int ThumbConcurrency = 8;
 
   // ── Filesystem watcher ───────────────────────────────────────────────────
+  // Real FS paths use FileSystemWatcher (proven reliable) + ShellChangeWatcher
+  // (for SHCNE_CREATE/DELETE/RENAME_ITEM so new/removed items are caught too).
+  // Virtual shell-namespace paths (::{GUID}) use ShellChangeWatcher only.
   private FileSystemWatcher? _fsWatcher;
-  // Shell-namespace watcher for virtual folders (::{GUID}) — e.g. "This PC", "Network".
   private ShellChangeWatcher? _shellWatcher;
   // When set, we are waiting for a newly created item in this folder to appear so we can auto-rename it.
   private string? _renameOnNewItemFolder;
@@ -182,9 +184,10 @@ public sealed partial class ShellListView : UserControl {
   // Debounce: shell notifications arrive in bursts (e.g. USB enumeration fires multiple
   // events); collapse them into a single Refresh() after a quiet period.
   private DispatcherTimer? _shellRefreshDebounce;
-  // Per-path debounce: rapid Changed events (e.g. file copy in progress) are
-  // coalesced into one update after a 350 ms quiet period.
-  private readonly Dictionary<string, DispatcherTimer> _changeDebounce = new(StringComparer.OrdinalIgnoreCase);
+  // Per-path debounce: rapid Changed events are coalesced into one update after
+  // Sliding-window debounce: each new event cancels the previous Task.Delay and starts
+  // a fresh one. ApplyChangedMetadata is called only after the quiet period expires.
+  private readonly Dictionary<string, CancellationTokenSource> _changeDebounce = new(StringComparer.OrdinalIgnoreCase);
   private const int CloudThumbRetryMax = 16;   // ~40 s total with progressive back-off
   private const int CloudThumbRetryBaseMs = 500;  // delay = min(retry * 500, 4000)
   private const int CloudThumbRetryMaxMs = 4000;
@@ -380,7 +383,7 @@ public sealed partial class ShellListView : UserControl {
     StopFolderWatcher();
 
     // Virtual shell-namespace paths (::{GUID}) have no backing directory;
-    // use SHChangeNotifyRegister instead of FileSystemWatcher.
+    // use ShellChangeWatcher only.
     if (path.StartsWith("::", StringComparison.Ordinal)) {
       _shellWatcher = new ShellChangeWatcher(path);
       _shellWatcher.Changed += OnShellWatcher_Changed;
@@ -388,8 +391,11 @@ public sealed partial class ShellListView : UserControl {
       return;
     }
 
+    // Real FS paths: FileSystemWatcher gives reliable per-file events;
+    // ShellChangeWatcher on top picks up anything the OS-level buffer misses.
     if (!Directory.Exists(path))
       return;
+
     try {
       _fsWatcher = new FileSystemWatcher(path) {
         NotifyFilter = NotifyFilters.FileName
@@ -397,18 +403,21 @@ public sealed partial class ShellListView : UserControl {
                      | NotifyFilters.LastWrite
                      | NotifyFilters.Size,
         IncludeSubdirectories = false,
-        EnableRaisingEvents = true
+        EnableRaisingEvents   = true,
       };
       _fsWatcher.Created += OnWatcher_Created;
       _fsWatcher.Deleted += OnWatcher_Deleted;
       _fsWatcher.Renamed += OnWatcher_Renamed;
       _fsWatcher.Changed += OnWatcher_Changed;
       _fsWatcher.Error   += OnWatcher_Error;
-    } catch { /* network share or permission denied — watch silently fails */ }
+    } catch { /* network share or permission denied */ }
+
+    _shellWatcher = new ShellChangeWatcher(path);
+    _shellWatcher.Changed += OnShellWatcher_Changed;
+    _shellWatcher.Start();
   }
 
   private void StopFolderWatcher() {
-    // Stop FileSystemWatcher (real FS paths).
     if (_fsWatcher is not null) {
       _fsWatcher.EnableRaisingEvents = false;
       _fsWatcher.Created -= OnWatcher_Created;
@@ -420,34 +429,32 @@ public sealed partial class ShellListView : UserControl {
       _fsWatcher = null;
     }
 
-    // Stop ShellChangeWatcher (virtual paths).
     if (_shellWatcher is not null) {
       _shellWatcher.Changed -= OnShellWatcher_Changed;
       _shellWatcher.Dispose();
       _shellWatcher = null;
     }
 
-    // Cancel the shell-notification debounce timer.
     if (_shellRefreshDebounce is not null) {
       _shellRefreshDebounce.Stop();
       _shellRefreshDebounce = null;
     }
 
-    // Cancel all FS-path debounce timers.
-    foreach (var t in _changeDebounce.Values)
-      t.Stop();
+    foreach (var cts in _changeDebounce.Values)
+      cts.Cancel();
     _changeDebounce.Clear();
   }
 
-  // Each watcher event is raised on a thread-pool thread; marshal everything
-  // back to the UI DispatcherQueue before touching Items.
+  // Each watcher event is raised on its source thread; marshal back to the UI DispatcherQueue.
 
-  // ── Shell-namespace (virtual folder) change handler ──────────────────────
+  // ── Shell-change handler ──────────────────────────────────────────────────
+  // Handles ALL paths.  When _fsWatcher is active (real FS paths) the per-item
+  // create/delete/rename/update work is skipped — FileSystemWatcher already handles it.
+  // For virtual paths only, the full per-item logic runs here.
 
   private void OnShellWatcher_Changed(object? sender, ShellChangeEventArgs e) {
-    // This is called on the STA message-pump thread; dispatch to the UI thread.
     DispatcherQueue.TryEnqueue(() => {
-      // Raise targeted tree-sync events for drive add/remove.
+      // ── Tree-sync (always) ────────────────────────────────────────────────
       switch (e.EventType) {
         case ShellChangeType.DriveAdd when e.Path is not null:
           TreeDriveAdded?.Invoke(this, e.Path);
@@ -465,8 +472,98 @@ public sealed partial class ShellListView : UserControl {
           TreeFolderRenamed?.Invoke(this, (e.Path, e.Path2));
           break;
       }
-      // Debounce: USB enumeration and similar events come in rapid bursts.
-      // Collapse them into a single Refresh() after 500 ms of quiet.
+
+      // For real FS paths FileSystemWatcher handles per-item updates.
+      if (_fsWatcher is not null)
+        return;
+
+      // ── Per-item updates (virtual paths only) ─────────────────────────────
+
+      // Created
+      if ((e.EventType is ShellChangeType.Create or ShellChangeType.MkDir) &&
+          e.Path is not null &&
+          string.Equals(Path.GetDirectoryName(e.Path), CurrentPath, StringComparison.OrdinalIgnoreCase)) {
+        if (!Items.Any(i => string.Equals(i.FullPath, e.Path, StringComparison.OrdinalIgnoreCase))) {
+          var newItem = NativeShell.GetSingleItemMetadata(e.Path);
+          if (newItem is not null) {
+            var merged = Items.ToList();
+            merged.Add(newItem);
+            merged = SortItems(merged);
+            Items.Insert(merged.IndexOf(newItem), newItem);
+            ApplyGrouping();
+            UpdateStatusBar();
+          }
+        }
+        return;
+      }
+
+      // Deleted
+      if ((e.EventType is ShellChangeType.Delete or ShellChangeType.RmDir) &&
+          e.Path is not null &&
+          string.Equals(Path.GetDirectoryName(e.Path), CurrentPath, StringComparison.OrdinalIgnoreCase)) {
+        var dead = Items.FirstOrDefault(i =>
+            string.Equals(i.FullPath, e.Path, StringComparison.OrdinalIgnoreCase));
+        if (dead is not null) {
+          Items.Remove(dead);
+          ApplyGrouping();
+          UpdateStatusBar();
+        }
+        return;
+      }
+
+      // Renamed
+      if ((e.EventType is ShellChangeType.RenameItem or ShellChangeType.RenameFolder) &&
+          e.Path is not null && e.Path2 is not null) {
+        var target = Items.FirstOrDefault(i =>
+            string.Equals(i.FullPath, e.Path, StringComparison.OrdinalIgnoreCase));
+        if (target is not null &&
+            string.Equals(Path.GetDirectoryName(e.Path2), CurrentPath, StringComparison.OrdinalIgnoreCase)) {
+          if (_changeDebounce.TryGetValue(e.Path, out var oldCts)) {
+            oldCts.Cancel();
+            oldCts.Dispose();
+            _changeDebounce.Remove(e.Path);
+          }
+          target.Name     = Path.GetFileName(e.Path2);
+          target.FullPath = e.Path2;
+          ApplyChangedMetadata(e.Path2, refreshThumbnail: true);
+          var sorted = SortItems(Items.ToList());
+          int oldIdx = Items.IndexOf(target);
+          int newIdx = sorted.IndexOf(target);
+          if (oldIdx != newIdx) {
+            Items.Remove(target);
+            Items.Insert(Math.Min(newIdx, Items.Count), target);
+          }
+          ApplyGrouping();
+        } else if (target is not null) {
+          Items.Remove(target);
+          ApplyGrouping();
+          UpdateStatusBar();
+        }
+        return;
+      }
+
+      // Updated
+      if ((e.EventType is ShellChangeType.UpdateItem or ShellChangeType.UpdateDir) &&
+          e.Path is not null &&
+          string.Equals(Path.GetDirectoryName(e.Path), CurrentPath, StringComparison.OrdinalIgnoreCase)) {
+        if (_changeDebounce.TryGetValue(e.Path, out var oldDebCts)) {
+          oldDebCts.Cancel();
+          oldDebCts.Dispose();
+        }
+        var debCts = new CancellationTokenSource();
+        _changeDebounce[e.Path] = debCts;
+        var capturedPath = e.Path;
+        var debToken = debCts.Token;
+        _ = Task.Delay(400, debToken).ContinueWith(_ => {
+          DispatcherQueue.TryEnqueue(() => {
+            _changeDebounce.Remove(capturedPath);
+            ApplyChangedMetadata(capturedPath, refreshThumbnail: false);
+          });
+        }, TaskContinuationOptions.OnlyOnRanToCompletion);
+        return;
+      }
+
+      // Fallback: debounce a full Refresh() for unhandled / no-path events.
       if (_shellRefreshDebounce is null) {
         _shellRefreshDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _shellRefreshDebounce.Tick += (_, _) => {
@@ -480,39 +577,40 @@ public sealed partial class ShellListView : UserControl {
     });
   }
 
+  // ── FileSystemWatcher handlers (real FS paths only) ───────────────────────
 
   private void OnWatcher_Created(object sender, FileSystemEventArgs e) {
     DispatcherQueue.TryEnqueue(() => {
-      // Skip if we navigated away since the event was raised.
       if (!string.Equals(Path.GetDirectoryName(e.FullPath), CurrentPath,
               StringComparison.OrdinalIgnoreCase))
         return;
-      // Item may already exist (rapid create+rename pairs can fire twice).
       if (Items.Any(i => string.Equals(i.FullPath, e.FullPath, StringComparison.OrdinalIgnoreCase)))
         return;
       var item = NativeShell.GetSingleItemMetadata(e.FullPath);
       if (item is null)
         return;
-      // Insert in sorted position relative to current sort.
       var merged = Items.ToList();
       merged.Add(item);
       merged = SortItems(merged);
-      int idx = merged.IndexOf(item);
-      Items.Insert(idx, item);
-      // Icon will be loaded the next time the container becomes visible; queue
-      // a thumbnail for it now so it isn't blank longer than necessary.
-      // Capture ViewMode on the UI thread before jumping to the thread pool,
-      // since DependencyProperty access requires STA/UI-thread affinity.
-      var viewMode = ViewMode;
-      var physSize = PhysicalSize(ThumbnailSizeForMode(viewMode));
-      _ = Task.Run(() => {
-        NativeShell.TryGetShellHBitmap(item.FullPath, physSize, NativeShell.SIIGBF.ResizeToFit);
-      });
+      Items.Insert(merged.IndexOf(item), item);
       ApplyGrouping();
       UpdateStatusBar();
-      // Notify tree if this is a folder.
       if (item.IsFolder)
         TreeFolderCreated?.Invoke(this, e.FullPath);
+
+      // A newly created file may be the destination of an in-progress copy.
+      // FileSystemWatcher.Changed is not raised for intermediate size changes —
+      // it only fires when the file handle is closed. Start the lock-poll now so
+      // the thumbnail and metadata are refreshed the moment the copy finishes.
+      if (!item.IsFolder) {
+        if (_changeDebounce.TryGetValue(e.FullPath, out var oldCts)) {
+          oldCts.Cancel();
+          oldCts.Dispose();
+        }
+        var cts = new CancellationTokenSource();
+        _changeDebounce[e.FullPath] = cts;
+        _ = WaitForFileCompletionAsync(e.FullPath, cts.Token);
+      }
     });
   }
 
@@ -520,12 +618,8 @@ public sealed partial class ShellListView : UserControl {
     DispatcherQueue.TryEnqueue(() => {
       var item = Items.FirstOrDefault(i =>
           string.Equals(i.FullPath, e.FullPath, StringComparison.OrdinalIgnoreCase));
-      if (item is null) {
-        // Not in the list (e.g. navigated away), but still notify tree.
-        if (Directory.Exists(e.FullPath) == false && !Path.HasExtension(e.FullPath))
-          TreeFolderDeleted?.Invoke(this, e.FullPath);
+      if (item is null)
         return;
-      }
       bool wasFolder = item.IsFolder;
       Items.Remove(item);
       ApplyGrouping();
@@ -540,20 +634,24 @@ public sealed partial class ShellListView : UserControl {
       var item = Items.FirstOrDefault(i =>
           string.Equals(i.FullPath, e.OldFullPath, StringComparison.OrdinalIgnoreCase));
       if (item is null) {
-        // Might have been created outside the watched window — treat as Create.
         OnWatcher_Created(sender, e);
         return;
       }
       bool wasFolder = item.IsFolder;
-      item.Name = e.Name ?? Path.GetFileName(e.FullPath);
+      item.Name     = e.Name ?? Path.GetFileName(e.FullPath);
       item.FullPath = e.FullPath;
-      // Re-sort: the item may have moved to a different position in the list.
+      if (_changeDebounce.TryGetValue(e.OldFullPath, out var oldCts)) {
+        oldCts.Cancel();
+        oldCts.Dispose();
+        _changeDebounce.Remove(e.OldFullPath);
+      }
+      ApplyChangedMetadata(e.FullPath, refreshThumbnail: true);
       var sorted = SortItems(Items.ToList());
       int oldIdx = Items.IndexOf(item);
       int newIdx = sorted.IndexOf(item);
       if (oldIdx != newIdx) {
         Items.Remove(item);
-        Items.Insert(newIdx > Items.Count ? Items.Count : newIdx, item);
+        Items.Insert(Math.Min(newIdx, Items.Count), item);
       }
       ApplyGrouping();
       if (wasFolder)
@@ -562,41 +660,93 @@ public sealed partial class ShellListView : UserControl {
   }
 
   private void OnWatcher_Changed(object sender, FileSystemEventArgs e) {
+    var path = e.FullPath;
     DispatcherQueue.TryEnqueue(() => {
-      // Debounce: reset a per-path timer so that bursts (e.g. large file copy)
-      // only issue one metadata read after the last event settles.
-      if (!_changeDebounce.TryGetValue(e.FullPath, out var timer)) {
-        timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
-        var captured = e.FullPath;
-        timer.Tick += (_, _) => {
-          _changeDebounce.Remove(captured);
-          timer.Stop();
-          ApplyChangedMetadata(captured);
-        };
-        _changeDebounce[e.FullPath] = timer;
+      if (_changeDebounce.TryGetValue(path, out var oldCts)) {
+        oldCts.Cancel();
+        oldCts.Dispose();
       }
-      // Restart the timer on each new event.
-      timer.Stop();
-      timer.Start();
+      var cts = new CancellationTokenSource();
+      _changeDebounce[path] = cts;
+      _ = WaitForFileCompletionAsync(path, cts.Token);
     });
   }
 
-  private void ApplyChangedMetadata(string fullPath) {
-    var item = Items.FirstOrDefault(i =>
-        string.Equals(i.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
-    if (item is null)
+  // Polls until the file is no longer held open by a writer (i.e. copy/move finished).
+  // While locked: updates size/date every 2 s so Details view stays current.
+  // After unlocked: does a final metadata refresh including thumbnail.
+  private async Task WaitForFileCompletionAsync(string path, CancellationToken token) {
+    const int MetaPollMs = 2_000;
+    const int MaxWait    = 60_000;
+    int elapsed = 0;
+    try {
+      if (Directory.Exists(path) && !File.Exists(path)) {
+        // Directories cannot be locked; wait for a brief quiet period then refresh.
+        await Task.Delay(1000, token).ConfigureAwait(false);
+      } else {
+        while (elapsed < MaxWait) {
+          await Task.Delay(MetaPollMs, token).ConfigureAwait(false);
+          elapsed += MetaPollMs;
+          if (!IsFileLocked(path))
+            break;
+          // File is still open by a writer — update size/date so Details view
+          // reflects progress, but do not touch the thumbnail yet.
+          DispatcherQueue.TryEnqueue(() => ApplyChangedMetadata(path, refreshThumbnail: false));
+        }
+      }
+    } catch (OperationCanceledException) {
       return;
-    var fresh = NativeShell.GetSingleItemMetadata(fullPath);
-    if (fresh is null)
-      return;
-    item.DateModified = fresh.DateModified;
-    item.Size = fresh.Size;
-    item.SizeBytes = fresh.SizeBytes;
+    }
+    if (token.IsCancellationRequested) return;
+    // Writing is complete: final refresh including thumbnail.
+    DispatcherQueue.TryEnqueue(() => {
+      _changeDebounce.Remove(path);
+      ApplyChangedMetadata(path, refreshThumbnail: true);
+    });
   }
 
-  private void OnWatcher_Error(object sender, ErrorEventArgs e) {
-    // Buffer overflow or network disconnect — fall back to a full reload.
-    DispatcherQueue.TryEnqueue(Refresh);
+  // Returns true while another process holds the file open (e.g. an active copy).
+  private static bool IsFileLocked(string path) {
+    try {
+      using var _ = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.None);
+      return false;
+    } catch (IOException) {
+      return true;
+    } catch {
+      return false; // file gone or access denied — treat as not locked
+    }
+  }
+          // refreshThumbnail: false — a size/write change doesn’t alter the
+
+          private void OnWatcher_Error(object sender, ErrorEventArgs e) {
+            DispatcherQueue.TryEnqueue(Refresh);
+          }
+
+          private void ApplyChangedMetadata(string fullPath, bool refreshThumbnail = false) {
+            var item = Items.FirstOrDefault(i =>
+                string.Equals(i.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
+            if (item is null)
+              return;
+
+            var fresh = NativeShell.GetSingleItemMetadata(fullPath);
+    if (fresh is null)
+      return;
+
+    item.DateModified = fresh.DateModified;
+    item.Size         = fresh.Size;
+    item.SizeBytes    = fresh.SizeBytes;
+    item.ItemType     = fresh.ItemType;
+    item.IsHidden     = fresh.IsHidden;
+
+    if (!refreshThumbnail)
+      return;
+    if (item.IsFolder || IsIconOnlyMode(ViewMode))
+      return;
+
+    item.HasRealThumbnail = false;
+    item.Icon = null;
+    var size = PhysicalSize(ThumbnailSizeForMode(ViewMode));
+    EnqueueThumbnailsForItems([item], size);
   }
 
   // ── Navigation API ───────────────────────────────────────────────────────
@@ -3636,12 +3786,17 @@ public sealed partial class ShellListView : UserControl {
         return;
 
       var sourcePaths = storageItems.Select(i => i.Path).ToList();
-      var hwnd = GetOwnerHwnd();
-      var (removedPaths, addedPaths) =
-          await NativeShell.ShellFileOperationAsync(sourcePaths, destPath, move, hwnd, IsDarkMode());
 
-      _internalDropHandled = true;
-      ApplyDropChanges(removedPaths, addedPaths, destPath);
+      if (SettingsPage.FileOpHandler == "TeraCopy") {
+        TeraCopyHelper.Invoke(sourcePaths, destPath, move);
+        _internalDropHandled = true;
+      } else {
+        var hwnd = GetOwnerHwnd();
+        var (removedPaths, addedPaths) =
+            await NativeShell.ShellFileOperationAsync(sourcePaths, destPath, move, hwnd, IsDarkMode());
+        _internalDropHandled = true;
+        ApplyDropChanges(removedPaths, addedPaths, destPath);
+      }
     } finally {
       ClearDragTarget();
       deferral.Complete();
@@ -3785,16 +3940,26 @@ public sealed partial class ShellListView : UserControl {
       move = view.RequestedOperation == DataPackageOperation.Move;
     }
 
-    var hwnd = GetOwnerHwnd();
-    var (removedPaths, addedPaths) =
-        await NativeShell.ShellFileOperationAsync(sourcePaths, CurrentPath, move, hwnd, IsDarkMode());
+    if (SettingsPage.FileOpHandler == "TeraCopy") {
+      TeraCopyHelper.Invoke(sourcePaths, CurrentPath, move);
+      // TeraCopy owns the operation; clear our clipboard state so the ghost
+      // visuals are removed and the paste button disables as expected.
+      if (move) {
+        try { Windows.ApplicationModel.DataTransfer.Clipboard.Clear(); } catch { }
+        ClearClipboardState();
+      }
+    } else {
+      var hwnd = GetOwnerHwnd();
+      var (removedPaths, addedPaths) =
+          await NativeShell.ShellFileOperationAsync(sourcePaths, CurrentPath, move, hwnd, IsDarkMode());
 
-    ApplyDropChanges(removedPaths, addedPaths, CurrentPath);
+      ApplyDropChanges(removedPaths, addedPaths, CurrentPath);
 
-    // After a cut-paste clear everything (clipboard + ghosts), matching Explorer.
-    if (move) {
-      try { Windows.ApplicationModel.DataTransfer.Clipboard.Clear(); } catch { }
-      ClearClipboardState();
+      // After a cut-paste clear everything (clipboard + ghosts), matching Explorer.
+      if (move) {
+        try { Windows.ApplicationModel.DataTransfer.Clipboard.Clear(); } catch { }
+        ClearClipboardState();
+      }
     }
   }
 
@@ -3877,11 +4042,34 @@ public sealed partial class ShellListView : UserControl {
     if (selected.Count == 0)
       return;
 
+    if (permanent) {
+      // Show our own confirmation dialog so we fully own the dialog lifecycle.
+      // Passing FOF_NOCONFIRMATION to IFileOperation suppresses the shell's
+      // built-in "Are you sure?" prompt which can get stuck in WinUI 3.
+      int count = selected.Count;
+      string body = count == 1
+          ? $"\u2018{selected[0].Name}\u2019 will be permanently deleted and cannot be recovered."
+          : $"{count} items will be permanently deleted and cannot be recovered.";
+
+      var dlg = new ContentDialog {
+        Title           = "Permanently delete?",
+        Content         = body,
+        PrimaryButtonText   = "Delete",
+        CloseButtonText     = "Cancel",
+        DefaultButton   = ContentDialogButton.Close,
+        XamlRoot        = XamlRoot,
+      };
+
+      var result = await dlg.ShowAsync();
+      if (result != ContentDialogResult.Primary)
+        return;
+    }
+
     var paths = selected.Select(i => i.FullPath).ToList();
     var hwnd  = GetOwnerHwnd();
     await NativeShell.ShellDeleteAsync(paths, hwnd, IsDarkMode(), permanent);
 
-    // Remove items from view that were actually deleted.
+    // Remove items from the view that were actually deleted.
     foreach (var path in paths) {
       if (!System.IO.File.Exists(path) && !System.IO.Directory.Exists(path)) {
         var item = Items.FirstOrDefault(i =>

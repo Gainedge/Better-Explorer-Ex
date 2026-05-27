@@ -316,15 +316,15 @@
                                TextTrimming="CharacterEllipsis" MaxLines="1" />
         </StackPanel>
         <TextBlock Grid.Column="{Binding DateOrder, Source={StaticResource DetailsColumns}, Mode=OneWay}"
-                           Text="{x:Bind DateModifiedString}" VerticalAlignment="Center"
+                           Text="{x:Bind DateModifiedString, Mode=OneWay}" VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis" MaxLines="1"
                            Width="{Binding DateWidth, Source={StaticResource DetailsColumns}, Mode=OneWay}" />
         <TextBlock Grid.Column="{Binding TypeOrder, Source={StaticResource DetailsColumns}, Mode=OneWay}"
-                           Text="{x:Bind ItemType}" VerticalAlignment="Center"
+                           Text="{x:Bind ItemType, Mode=OneWay}" VerticalAlignment="Center"
                            TextTrimming="CharacterEllipsis" MaxLines="1"
                            Width="{Binding TypeWidth, Source={StaticResource DetailsColumns}, Mode=OneWay}" />
         <TextBlock Grid.Column="{Binding SizeOrder, Source={StaticResource DetailsColumns}, Mode=OneWay}"
-                           Text="{x:Bind Size}" VerticalAlignment="Center"
+                           Text="{x:Bind Size, Mode=OneWay}" VerticalAlignment="Center"
                            HorizontalAlignment="Right" TextTrimming="CharacterEllipsis" MaxLines="1"
                            Width="{Binding SizeWidth, Source={StaticResource DetailsColumns}, Mode=OneWay}" />
       </Grid>
@@ -354,10 +354,10 @@
           <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontWeight="SemiBold"
                                Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" Width="190" />
-          <TextBlock Text="{x:Bind ItemType}" Style="{StaticResource CaptionTextBlockStyle}"
+          <TextBlock Text="{x:Bind ItemType, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" Width="190" />
-          <TextBlock Text="{x:Bind Size}" Style="{StaticResource CaptionTextBlockStyle}"
+          <TextBlock Text="{x:Bind Size, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" Width="190" />
         </StackPanel>
@@ -515,10 +515,10 @@
           <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontWeight="SemiBold"
                                Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" />
-          <TextBlock Text="{x:Bind DateModifiedString}"
+          <TextBlock Text="{x:Bind DateModifiedString, Mode=OneWay}"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-          <TextBlock Text="{x:Bind Size}"
+          <TextBlock Text="{x:Bind Size, Mode=OneWay}"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>
