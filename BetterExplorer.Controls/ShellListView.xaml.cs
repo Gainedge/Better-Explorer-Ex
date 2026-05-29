@@ -107,6 +107,30 @@ public sealed partial class ShellListView : UserControl {
       ShellView.SelectedItems.Count == 1 &&
       ShellView.SelectedItems[0] is ShellItem { IsFolder: true };
 
+  /// <summary>Returns the full path of the selected folder, or <see langword="null"/> if the selection is not a single folder.</summary>
+  public string? SelectedFolderPath =>
+      SelectionIsSingleFolder ? (ShellView.SelectedItems[0] as ShellItem)?.FullPath : null;
+
+  // Common raster/vector image extensions recognised by the Picture Tools section.
+  private static readonly HashSet<string> s_pictureExts =
+      new(StringComparer.OrdinalIgnoreCase)
+      { ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif", ".webp", ".heic", ".heif", ".ico", ".jfif" };
+
+  private static bool IsPictureFile(ShellItem item) =>
+      !item.IsFolder &&
+      item.FullPath is { } p &&
+      s_pictureExts.Contains(Path.GetExtension(p));
+
+  /// <summary>True when at least one picture file is in the current selection.</summary>
+  public bool SelectionHasPicture =>
+      ShellView.SelectedItems.OfType<ShellItem>().Any(IsPictureFile);
+
+  /// <summary>Returns the full path of the selected item when exactly one picture file is selected; otherwise <see langword="null"/>.</summary>
+  public string? SelectedPicturePath =>
+      ShellView.SelectedItems.Count == 1 &&
+      ShellView.SelectedItems[0] is ShellItem item && IsPictureFile(item)
+          ? item.FullPath : null;
+
   /// <summary>Raised whenever sort column or direction changes (column-header tap or toolbar).</summary>
   public event EventHandler? SortChanged;
 
@@ -557,7 +581,14 @@ public sealed partial class ShellListView : UserControl {
         _ = Task.Delay(400, debToken).ContinueWith(_ => {
           DispatcherQueue.TryEnqueue(() => {
             _changeDebounce.Remove(capturedPath);
-            ApplyChangedMetadata(capturedPath, refreshThumbnail: false);
+            // For folders use RefreshItem so the icon is reloaded with IconOnly
+            // (desktop.ini changes are not picked up by ApplyChangedMetadata).
+            var target = Items.FirstOrDefault(i =>
+                string.Equals(i.FullPath, capturedPath, StringComparison.OrdinalIgnoreCase));
+            if (target?.IsFolder == true)
+              RefreshItem(capturedPath);
+            else
+              ApplyChangedMetadata(capturedPath, refreshThumbnail: false);
           });
         }, TaskContinuationOptions.OnlyOnRanToCompletion);
         return;
@@ -834,6 +865,104 @@ public sealed partial class ShellListView : UserControl {
   }
 
   /// <summary>
+  /// Refreshes the icon for a single folder item without reloading the whole list.
+  /// Fetches a fresh icon from the shell using <c>IconOnly</c> — which respects
+  /// desktop.ini customisations — bypassing the thumbnail worker's <c>ResizeToFit</c>
+  /// path that would return a content-preview thumbnail instead.
+  /// </summary>
+  public async void RefreshItem(string fullPath)
+  {
+      await RefreshItemCoreAsync(fullPath, resetThumbnail: false);
+  }
+
+  /// <summary>
+  /// Like <see cref="RefreshItem"/> but also forces the shell to drop its
+  /// thumbnail-cache entry for the item before re-fetching the icon.
+  /// Call this after clearing a custom folder icon so the default folder
+  /// thumbnail is shown immediately without a full list refresh.
+  /// </summary>
+  public async void RefreshItemAfterIconClear(string fullPath)
+  {
+      await RefreshItemCoreAsync(fullPath, resetThumbnail: true);
+  }
+
+  private async Task RefreshItemCoreAsync(string fullPath, bool resetThumbnail)
+  {
+      var item = Items.FirstOrDefault(i =>
+          string.Equals(i.FullPath, fullPath, StringComparison.OrdinalIgnoreCase));
+      if (item is null) return;
+
+      // Evict every in-process cache entry for this folder so nothing restamps
+      // the old icon while the async fetch is in flight.
+      var folderKey = TypeIconKey(item);
+      var size = PhysicalSize(ThumbnailSizeForMode(ViewMode));
+
+      lock (_typeIconCache)
+      {
+          var keysToRemove = _typeIconCache.Keys.Where(k => k.Ext == folderKey).ToList();
+          foreach (var k in keysToRemove) _typeIconCache.Remove(k);
+      }
+      _thumbCache.TryRemove((fullPath, size), out _);
+
+      item.HasRealThumbnail = false;
+
+      // When restoring the default icon we must give the shell time to process
+      // the SHCNE notifications and rebuild its image-list entry before we query.
+      // Then we push the item through the normal thumbnail worker (ResizeToFit)
+      // so the shell renders a fresh default folder icon rather than returning
+      // the still-cached custom icon from the system image list.
+      if (resetThumbnail)
+      {
+          var parent = System.IO.Path.GetDirectoryName(fullPath);
+          NativeShell.NotifyShellUpdateDir(!string.IsNullOrEmpty(parent) ? parent : fullPath);
+
+          // Small wait so the shell processes the change notifications.
+          await Task.Delay(250).ConfigureAwait(true);
+
+          // Confirm item is still in the list after the delay.
+          if (Items.FirstOrDefault(i =>
+                  string.Equals(i.FullPath, fullPath, StringComparison.OrdinalIgnoreCase)) != item)
+              return;
+
+          // Push through the worker queue with priority so the thumbnail
+          // is re-fetched via ResizeToFit (fresh read, not image-list cache).
+          _thumbChannel.Writer.TryWrite((item, size, 0));
+          return;
+      }
+
+      // Ask the shell for the icon with IconOnly
+      // returns the correct custom icon (or the default folder icon after restore).
+      // We bypass the thumbnail worker entirely because the worker would use
+      // ResizeToFit for regular folders, which returns a content-preview thumbnail.
+      var (px, w, h, _) = await NativeShell.GetShellImagePixelsAsync(
+          fullPath, size, NativeShell.SIIGBF.IconOnly, CancellationToken.None)
+          .ConfigureAwait(true);
+
+      // Confirm item is still in the list (user may have navigated away).
+      if (Items.FirstOrDefault(i =>
+              string.Equals(i.FullPath, fullPath, StringComparison.OrdinalIgnoreCase)) != item)
+          return;
+
+      if (px is not null)
+      {
+          var wb = NativeShell.PixelsToBitmapSync(px, w, h);
+          if (wb is not null)
+          {
+              item.Icon = wb;
+              // Also populate the type-icon cache so subsequent ContainerContentChanging
+              // calls see the new icon rather than restamping a stale placeholder.
+              lock (_typeIconCache)
+                  _typeIconCache[(folderKey, size)] = wb;
+              return;
+          }
+      }
+
+      // Fallback: if the shell returned nothing (e.g. icon extraction failed),
+      // push the item onto the normal worker queue.
+      _thumbChannel.Writer.TryWrite((item, size, 0));
+  }
+
+  /// <summary>
   /// Searches the currently-open folder using the Windows Search API (AQS).
   /// Results are streamed into the ListView in batches as they are found.
   /// Passing an empty or whitespace query clears the search and restores the folder.
@@ -1106,11 +1235,8 @@ public sealed partial class ShellListView : UserControl {
 
       ApplyCachedIcons(items, size);
 
-      // Show items immediately — thumbnails will be stamped in-place below.
-      Items.AddRange(items);
-
-      // Preload viewport thumbnails after items are already visible so the list
-      // appears instantly and thumbnails pop in without blocking the first render.
+      // Preload viewport thumbnails from shell cache BEFORE adding items to the
+      // list so they arrive already stamped — eliminates the placeholder→thumbnail flash.
       int viewportCount = Math.Min(items.Count, EstimateViewportItemCount(ViewMode));
       if (viewportCount > 0) {
         var viewportSlice = viewportCount == items.Count
@@ -1118,6 +1244,10 @@ public sealed partial class ShellListView : UserControl {
             : items.GetRange(0, viewportCount);
         _ = PreloadCachedThumbnailsAsync(viewportSlice, size, ct);
       }
+      if (ct.IsCancellationRequested)
+        return;
+
+      Items.AddRange(items);
     }
 
     // Update CurrentPath and fire PathChanged regardless of whether items were found.
@@ -1200,6 +1330,16 @@ public sealed partial class ShellListView : UserControl {
         return;
       ApplyCachedIcons(kfItems, kfSize);
 
+      // Preload viewport thumbnails from shell cache BEFORE showing items.
+      int kfViewport = Math.Min(kfItems.Count, EstimateViewportItemCount(ViewMode));
+      if (kfViewport > 0) {
+        var slice = kfViewport == kfItems.Count ? kfItems : kfItems.GetRange(0, kfViewport);
+        try { await PreloadCachedThumbnailsAsync(slice, kfSize, ct); }
+        catch (OperationCanceledException) { return; }
+      }
+      if (ct.IsCancellationRequested)
+        return;
+
       Items.AddRange(kfItems);
       ApplyGrouping();
       CurrentPath = path;
@@ -1210,13 +1350,6 @@ public sealed partial class ShellListView : UserControl {
       PathChanged?.Invoke(this, path);
       UpdateSortIndicators();
       ApplyPendingSelection();
-
-      // Fire-and-forget viewport thumbnail preload — items are already visible.
-      int kfViewport = Math.Min(kfItems.Count, EstimateViewportItemCount(ViewMode));
-      if (kfViewport > 0) {
-        var slice = kfViewport == kfItems.Count ? kfItems : kfItems.GetRange(0, kfViewport);
-        _ = PreloadCachedThumbnailsAsync(slice, kfSize, ct);
-      }
 
       StartFolderWatcher(path);
       return;
@@ -1255,6 +1388,20 @@ public sealed partial class ShellListView : UserControl {
 
     ApplyCachedIcons(allItems, size);
 
+    // ── Preload viewport thumbnails from shell cache BEFORE showing items ─────
+    // Items arrive already stamped with real thumbnails when cached, eliminating
+    // the placeholder→thumbnail flash visible in non-Details icon views.
+    int viewportCount = Math.Min(allItems.Count, EstimateViewportItemCount(ViewMode));
+    if (viewportCount > 0) {
+      var viewportSlice = viewportCount == allItems.Count
+          ? allItems
+          : allItems.GetRange(0, viewportCount);
+      try { await PreloadCachedThumbnailsAsync(viewportSlice, size, ct); }
+      catch (OperationCanceledException) { return; }
+    }
+    if (ct.IsCancellationRequested)
+      return;
+
     // ── Show ALL items at once ────────────────────────────────────────────────
     Items.AddRange(allItems);
     ApplyGrouping();
@@ -1267,15 +1414,6 @@ public sealed partial class ShellListView : UserControl {
     UpdateSortIndicators();
     ApplyPendingSelection();
     UpdateStatusBar();
-
-    // Fire-and-forget: preload viewport thumbnails after items are visible.
-    int viewportCount = Math.Min(allItems.Count, EstimateViewportItemCount(ViewMode));
-    if (viewportCount > 0) {
-      var viewportSlice = viewportCount == allItems.Count
-          ? allItems
-          : allItems.GetRange(0, viewportCount);
-      _ = PreloadCachedThumbnailsAsync(viewportSlice, size, ct);
-    }
 
     // Watch the folder for live filesystem changes now that it is fully loaded.
     StartFolderWatcher(path);
@@ -1317,8 +1455,12 @@ public sealed partial class ShellListView : UserControl {
       _suppressSelectionChanged = false;
     }
 
-    if (first is not null)
+    if (first is not null) {
+      // Fire SelectionChanged now that suppression is lifted so subscribers
+      // (e.g. ExplorerBrowser toolbar) re-evaluate their state.
+      SelectionChanged?.Invoke(this, EventArgs.Empty);
       WaitForContainerThenUpdatePopupAsync(first, _popupWaitCts.Token);
+    }
   }
 
   /// <summary>

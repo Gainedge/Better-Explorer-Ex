@@ -286,48 +286,13 @@
                          Details
         ════════════════════════════════════════════════ -->
     <DataTemplate x:Key="DetailsTemplate" x:DataType="shellapi:ShellItem">
-      <Grid Opacity="{x:Bind IconOpacity, Mode=OneWay}" Margin="12,0,0,0">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto" />
-          <ColumnDefinition Width="Auto" />
-          <ColumnDefinition Width="Auto" />
-          <ColumnDefinition Width="Auto" />
-        </Grid.ColumnDefinitions>
-        <StackPanel Grid.Column="{Binding NameOrder, Source={StaticResource DetailsColumns}, Mode=OneWay}"
-                            Orientation="Horizontal" Spacing="6"
-                            Width="{Binding NameWidth, Source={StaticResource DetailsColumns}, Mode=OneWay}">
-          <Viewbox Width="16" Height="16" VerticalAlignment="Center"
-                             Stretch="Uniform" StretchDirection="DownOnly">
-            <Grid Width="16" Height="16">
-              <FontIcon Glyph="{x:Bind IconGlyph, Mode=OneWay, FallbackValue=&#xE8A5;}"
-                                      FontSize="12"
-                                      Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
-                                      HorizontalAlignment="Center" VerticalAlignment="Center" />
-              <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
-              <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
-                     Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
-                     Width="24" Height="24"
-                     HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                     Stretch="Uniform" IsHitTestVisible="False" />
-            </Grid>
-          </Viewbox>
-          <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center"
-                               Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
-                               TextTrimming="CharacterEllipsis" MaxLines="1" />
-        </StackPanel>
-        <TextBlock Grid.Column="{Binding DateOrder, Source={StaticResource DetailsColumns}, Mode=OneWay}"
-                           Text="{x:Bind DateModifiedString, Mode=OneWay}" VerticalAlignment="Center"
-                           TextTrimming="CharacterEllipsis" MaxLines="1"
-                           Width="{Binding DateWidth, Source={StaticResource DetailsColumns}, Mode=OneWay}" />
-        <TextBlock Grid.Column="{Binding TypeOrder, Source={StaticResource DetailsColumns}, Mode=OneWay}"
-                           Text="{x:Bind ItemType, Mode=OneWay}" VerticalAlignment="Center"
-                           TextTrimming="CharacterEllipsis" MaxLines="1"
-                           Width="{Binding TypeWidth, Source={StaticResource DetailsColumns}, Mode=OneWay}" />
-        <TextBlock Grid.Column="{Binding SizeOrder, Source={StaticResource DetailsColumns}, Mode=OneWay}"
-                           Text="{x:Bind Size, Mode=OneWay}" VerticalAlignment="Center"
-                           HorizontalAlignment="Right" TextTrimming="CharacterEllipsis" MaxLines="1"
-                           Width="{Binding SizeWidth, Source={StaticResource DetailsColumns}, Mode=OneWay}" />
-      </Grid>
+      <!--
+        DetailsRowControl builds its cells in code-behind from DetailsColumnSettings.Columns,
+        so adding/removing columns at runtime automatically updates every visible row.
+      -->
+      <local:DetailsRowControl Item="{x:Bind}"
+                               Columns="{StaticResource DetailsColumns}"
+                               Margin="12,0,0,0" />
     </DataTemplate>
 
     <!-- ═══════════════════════════════════════════════
@@ -538,7 +503,7 @@
     <Grid x:Name="DetailsHeader" Grid.Row="0"
               Height="{StaticResource DetailsHeaderHeight}"
               BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
-              BorderThickness="0,0,0,1" Padding="12,0">
+              BorderThickness="0,0,0,1" Padding="20,0,8,0">
       <ItemsRepeater x:Name="DetailsHeaderRepeater"
                      VerticalAlignment="Stretch"
                      ItemsSource="{Binding Columns, Source={StaticResource DetailsColumns}}"
@@ -548,16 +513,34 @@
         </ItemsRepeater.Layout>
         <ItemsRepeater.ItemTemplate>
           <DataTemplate x:DataType="shellapi:DetailsColumn">
+            <!--
+              Outer Grid is the full-width column cell.
+              Child 0: inner content Grid (header text + sort indicator, clipped + padded).
+              Child 1: the gripper Border — OnDetailsHeaderElementPrepared wires it by index.
+            -->
             <Grid Width="{x:Bind Width, Mode=OneWay}"
                   Height="{StaticResource DetailsHeaderHeight}"
                   VerticalAlignment="Stretch"
                   Background="Transparent"
                   Tag="{x:Bind Key}"
                   Tapped="OnColumnHeaderTapped">
-              <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="6,0,16,0">
-                <TextBlock Text="{x:Bind Header}" FontWeight="Normal" FontSize="12" VerticalAlignment="Center" />
-                <TextBlock Text="{x:Bind SortIndicator, Mode=OneWay}" FontWeight="Normal" FontSize="12" VerticalAlignment="Center" />
-              </StackPanel>
+              <!-- Child 0: header label area with ellipsis -->
+              <Grid VerticalAlignment="Center" Margin="6,0,16,0">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0"
+                           Text="{x:Bind Header}"
+                           FontWeight="Normal" FontSize="12"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" MaxLines="1" />
+                <TextBlock Grid.Column="1"
+                           Text="{x:Bind SortIndicator, Mode=OneWay}"
+                           FontWeight="Normal" FontSize="12"
+                           VerticalAlignment="Center" />
+              </Grid>
+              <!-- Child 1: gripper — wired by OnDetailsHeaderElementPrepared via child index -->
               <Border Tag="{x:Bind Key}" Width="8" HorizontalAlignment="Right"
                       VerticalAlignment="Stretch"
                       Background="Transparent" BorderThickness="0,0,1,0"

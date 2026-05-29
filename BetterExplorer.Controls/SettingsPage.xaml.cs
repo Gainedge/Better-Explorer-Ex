@@ -1,5 +1,4 @@
 using System;
-using BetterExplorer.ShellApi.Interop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Storage;
@@ -8,26 +7,58 @@ namespace BetterExplorer.Controls;
 
 public sealed partial class SettingsPage : UserControl
 {
-    // True once OnLoaded has finished restoring persisted selections.
-    // Prevents InitializeComponent's default selection from overwriting saved settings.
-    private bool _initialized;
+    // ── Setting keys (used by sub-pages) ────────────────────────────────────
+    public const string ThemeSettingKey  = "App.Theme";
+    public const string FileOpHandlerKey = "App.FileOpHandler";
+    public const string SearchEngineKey  = "App.SearchEngine";
+
+    // ── Events consumed by MainWindow ────────────────────────────────────────
+    public static event Action<ElementTheme>? ThemeChangeRequested;
+    public static event Action<string>?       FileOpHandlerChanged;
+    public static event Action<string>?       SearchEngineChanged;
+
+    // Internal helpers called by sub-pages
+    internal static void RaiseThemeChangeRequested(ElementTheme theme)
+        => ThemeChangeRequested?.Invoke(theme);
+    internal static void RaiseFileOpHandlerChanged(string handler)
+        => FileOpHandlerChanged?.Invoke(handler);
+    internal static void RaiseSearchEngineChanged(string engine)
+        => SearchEngineChanged?.Invoke(engine);
+
+    /// <summary>Raised when the user clicks the footer Close button.</summary>
+    public event EventHandler? CloseRequested;
 
     public SettingsPage()
     {
         InitializeComponent();
-        // Always rescan for TeraCopy on every page construction so a freshly
-        // installed copy is detected immediately without restarting the app.
-        TeraCopyHelper.InvalidateCache();
         Loaded += OnLoaded;
     }
 
-    // ── Setting keys ─────────────────────────────────────────────────────────
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        // Navigate to General on first load.
+        ContentFrame.Navigate(typeof(Settings.GeneralSettingsPage));
+    }
 
-    public const string ThemeSettingKey   = "App.Theme";
-    public const string FileOpHandlerKey  = "App.FileOpHandler";
-    public const string SearchEngineKey   = "App.SearchEngine";
+    private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    {
+        var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string;
+        var pageType = tag switch {
+            "General"    => typeof(Settings.GeneralSettingsPage),
+            "Appearance" => typeof(Settings.AppearanceSettingsPage),
+            "About"      => typeof(Settings.AboutSettingsPage),
+            _            => typeof(Settings.GeneralSettingsPage),
+        };
+        if (ContentFrame.CurrentSourcePageType != pageType)
+            ContentFrame.Navigate(pageType);
+    }
 
-    /// <summary>Returns the currently persisted file-operation handler: "System" or "TeraCopy".</summary>
+    private void OnFooterCloseClick(object sender, RoutedEventArgs e)
+        => CloseRequested?.Invoke(this, EventArgs.Empty);
+
+    // ── Legacy helpers kept for callers that use the static properties ───────
+
+    /// <summary>Returns the currently persisted file-operation handler.</summary>
     public static string FileOpHandler
     {
         get
@@ -39,7 +70,7 @@ public sealed partial class SettingsPage : UserControl
         }
     }
 
-    /// <summary>Returns the currently persisted search engine: "WindowsSearch" or "Everything".</summary>
+    /// <summary>Returns the currently persisted search engine.</summary>
     public static string SearchEngine
     {
         get
@@ -49,141 +80,5 @@ public sealed partial class SettingsPage : UserControl
                     .TryGetValue(SearchEngineKey, out var v) ? v as string ?? "WindowsSearch" : "WindowsSearch";
             } catch { return "WindowsSearch"; }
         }
-    }
-
-    /// <summary>Raised when the user changes the file-operation handler setting.</summary>
-    public static event Action<string>? FileOpHandlerChanged;
-
-    /// <summary>Raised when the user changes the search engine setting.</summary>
-    public static event Action<string>? SearchEngineChanged;
-
-    // ── Loaded ────────────────────────────────────────────────────────────────
-
-    private void OnLoaded(object sender, RoutedEventArgs e)
-    {
-        try {
-            var ver = Windows.ApplicationModel.Package.Current.Id.Version;
-            VersionText.Text = $"Version {ver.Major}.{ver.Minor}.{ver.Build}.{ver.Revision}";
-        } catch {
-            VersionText.Text = "Version 1.0.0.0";
-        }
-
-        // Re-scan for TeraCopy each time the page is shown so the option becomes
-        // enabled if TeraCopy was installed since the app started.
-        TeraCopyHelper.InvalidateCache();
-        bool teraCopyAvailable = TeraCopyHelper.IsAvailable();
-        FileOpTeraCopy.IsEnabled             = teraCopyAvailable;
-        TeraCopyNotFoundText.Visibility      = teraCopyAvailable ? Visibility.Collapsed : Visibility.Visible;
-
-        // Re-scan for Everything each time the settings page is shown.
-        EverythingSearch.InvalidateCache();
-        bool everythingAvailable = EverythingSearch.IsAvailable();
-        SearchEngineEverything.IsEnabled = everythingAvailable;
-        EverythingNotFoundText.Visibility = everythingAvailable ? Visibility.Collapsed : Visibility.Visible;
-
-        // Restore persisted search engine selection without triggering a save.
-        var savedEngine = ApplicationData.Current.LocalSettings.Values
-            .TryGetValue(SearchEngineKey, out var ev) ? ev as string : null;
-        if (savedEngine != null)
-        {
-            foreach (var item in SearchEngineRadioButtons.Items)
-            {
-                if (item is RadioButton rb && rb.Tag as string == savedEngine && rb.IsEnabled)
-                {
-                    SearchEngineRadioButtons.SelectedItem = rb;
-                    break;
-                }
-            }
-        }
-
-        // Restore persisted theme selection without triggering a save.
-        var savedTheme = ApplicationData.Current.LocalSettings.Values
-            .TryGetValue(ThemeSettingKey, out var tv) ? tv as string : null;
-        if (savedTheme != null)
-        {
-            foreach (var item in ThemeRadioButtons.Items)
-            {
-                if (item is RadioButton rb && rb.Tag as string == savedTheme)
-                {
-                    ThemeRadioButtons.SelectedItem = rb;
-                    break;
-                }
-            }
-        }
-
-        // Restore persisted file-op handler selection without triggering a save.
-        var savedHandler = ApplicationData.Current.LocalSettings.Values
-            .TryGetValue(FileOpHandlerKey, out var hv) ? hv as string : null;
-        if (savedHandler != null)
-        {
-            foreach (var item in FileOpHandlerRadioButtons.Items)
-            {
-                if (item is RadioButton rb && rb.Tag as string == savedHandler && rb.IsEnabled)
-                {
-                    FileOpHandlerRadioButtons.SelectedItem = rb;
-                    break;
-                }
-            }
-        }
-
-        _initialized = true;
-    }
-
-    // ── Navigation ────────────────────────────────────────────────────────────
-
-    private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
-    {
-        if (GeneralSection is null) return;
-        var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string;
-        GeneralSection.Visibility    = tag == "General"    ? Visibility.Visible : Visibility.Collapsed;
-        AppearanceSection.Visibility = tag == "Appearance" ? Visibility.Visible : Visibility.Collapsed;
-        AboutSection.Visibility      = tag == "About"      ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    // ── General toggles ───────────────────────────────────────────────────────
-
-    private void OnShowHiddenFilesToggled(object sender, RoutedEventArgs e) { }
-
-    private void OnShowExtensionsToggled(object sender, RoutedEventArgs e) { }
-
-    // ── Search engine ─────────────────────────────────────────────────────────
-
-    private void OnSearchEngineSelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_initialized) return;
-        if (sender is not RadioButtons rb || rb.SelectedItem is not RadioButton selected) return;
-        var tag = selected.Tag as string ?? "WindowsSearch";
-        ApplicationData.Current.LocalSettings.Values[SearchEngineKey] = tag;
-        SearchEngineChanged?.Invoke(tag);
-    }
-
-    // ── File-operation handler ────────────────────────────────────────────────
-
-    private void OnFileOpHandlerSelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_initialized) return;
-        if (sender is not RadioButtons rb || rb.SelectedItem is not RadioButton selected) return;
-        var tag = selected.Tag as string ?? "System";
-        ApplicationData.Current.LocalSettings.Values[FileOpHandlerKey] = tag;
-        FileOpHandlerChanged?.Invoke(tag);
-    }
-
-    // ── Theme ─────────────────────────────────────────────────────────────────
-
-    /// <summary>Raised whenever the user picks a theme; subscribers should apply it to their window root.</summary>
-    public static event Action<ElementTheme>? ThemeChangeRequested;
-
-    private void OnThemeSelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_initialized) return;   // suppress premature save during InitializeComponent / restore
-        if (ThemeRadioButtons.SelectedItem is not RadioButton rb) return;
-        var tag = rb.Tag as string;
-        var theme = tag switch {
-            "Light" => ElementTheme.Light,
-            "Dark"  => ElementTheme.Dark,
-            _       => ElementTheme.Default,
-        };
-        ApplicationData.Current.LocalSettings.Values[ThemeSettingKey] = tag ?? "Default";
-        ThemeChangeRequested?.Invoke(theme);
     }
 }

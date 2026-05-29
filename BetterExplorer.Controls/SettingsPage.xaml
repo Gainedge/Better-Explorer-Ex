@@ -6,165 +6,47 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    MinWidth="700"
-    MinHeight="560">
+    Width="960">
 
-  <NavigationView x:Name="SettingsNav"
-                  PaneDisplayMode="Left"
-                  OpenPaneLength="200"
-                  IsSettingsVisible="False"
-                  IsBackButtonVisible="Collapsed"
-                  IsPaneToggleButtonVisible="False"
-                  SelectionChanged="OnNavSelectionChanged">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
 
-    <NavigationView.MenuItems>
-      <NavigationViewItem x:Name="NavGeneral"    Content="General"    Tag="General"    IsSelected="True" />
-      <NavigationViewItem x:Name="NavAppearance" Content="Appearance" Tag="Appearance" />
-      <NavigationViewItem x:Name="NavAbout"      Content="About"      Tag="About" />
-    </NavigationView.MenuItems>
+    <NavigationView x:Name="SettingsNav"
+                    Grid.Row="0"
+                    Height="524"
+                    PaneDisplayMode="Left"
+                    OpenPaneLength="200"
+                    IsSettingsVisible="False"
+                    IsBackButtonVisible="Collapsed"
+                    IsPaneToggleButtonVisible="False"
+                    SelectionChanged="OnNavSelectionChanged">
 
-    <!-- Content host -->
-    <ScrollViewer Padding="24,8,24,24">
-      <StackPanel Spacing="20">
+      <NavigationView.MenuItems>
+        <NavigationViewItem Content="General"    Tag="General"    IsSelected="True" />
+        <NavigationViewItem Content="Appearance" Tag="Appearance" />
+        <NavigationViewItem Content="About"      Tag="About" />
+      </NavigationView.MenuItems>
 
-        <!-- General -->
-        <StackPanel x:Name="GeneralSection" Spacing="12">
-          <StackPanel.Transitions>
-            <TransitionCollection>
-              <EntranceThemeTransition FromVerticalOffset="16" />
-            </TransitionCollection>
-          </StackPanel.Transitions>
-          <TextBlock Text="General" Style="{ThemeResource SubtitleTextBlockStyle}" />
+      <!-- Frame is the content area; pages navigate into it -->
+      <Frame x:Name="ContentFrame" />
 
-          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                  BorderThickness="1" CornerRadius="8" Padding="16,12">
-            <ToggleSwitch x:Name="ShowHiddenFilesToggle"
-                          Header="Show hidden files" IsOn="False"
-                          Toggled="OnShowHiddenFilesToggled" Margin="0" />
-          </Border>
+    </NavigationView>
 
-          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                  BorderThickness="1" CornerRadius="8" Padding="16,12">
-            <ToggleSwitch x:Name="ShowExtensionsToggle"
-                          Header="Show file extensions" IsOn="True"
-                          Toggled="OnShowExtensionsToggled" Margin="0" />
-          </Border>
+    <!-- Footer: 120 px wide, right-aligned Close button -->
+    <Border Grid.Row="1" Margin="0,24,0,-4">
+      <Button x:Name="FooterCloseButton"
+              Width="120"
+              MinWidth="120"
+              MaxWidth="120"
+              HorizontalAlignment="Right"
+              Content="Close"
+              Style="{StaticResource AccentButtonStyle}"
+              Click="OnFooterCloseClick" />
+    </Border>
 
-          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                  BorderThickness="1" CornerRadius="8" Padding="16,12">
-            <StackPanel Spacing="8">
-              <TextBlock Text="Search engine" FontWeight="SemiBold" />
-              <TextBlock Text="Choose which engine is used when you type in the search box."
-                         Style="{ThemeResource CaptionTextBlockStyle}"
-                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                         TextWrapping="Wrap" />
-              <RadioButtons x:Name="SearchEngineRadioButtons"
-                            SelectionChanged="OnSearchEngineSelectionChanged">
-                <RadioButton x:Name="SearchEngineWindowsSearch"
-                             Content="Windows Search  (built-in)"
-                             Tag="WindowsSearch"
-                             IsChecked="True" />
-                <RadioButton x:Name="SearchEngineEverything"
-                             Content="Everything  (voidtools)"
-                             Tag="Everything"
-                             IsEnabled="False" />
-              </RadioButtons>
-              <TextBlock x:Name="EverythingNotFoundText"
-                         Text="Everything was not detected on this machine."
-                         Style="{ThemeResource CaptionTextBlockStyle}"
-                         Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                         Visibility="Collapsed" />
-            </StackPanel>
-          </Border>
-
-          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                  BorderThickness="1" CornerRadius="8" Padding="16,12">
-            <StackPanel Spacing="8">
-              <TextBlock Text="File operation handler" FontWeight="SemiBold" />
-              <TextBlock Text="Choose which program performs copy, move, and paste operations."
-                         Style="{ThemeResource CaptionTextBlockStyle}"
-                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                         TextWrapping="Wrap" />
-              <RadioButtons x:Name="FileOpHandlerRadioButtons"
-                            SelectionChanged="OnFileOpHandlerSelectionChanged">
-                <RadioButton x:Name="FileOpSystem"
-                             Content="System  (Windows built-in)"
-                             Tag="System"
-                             IsChecked="True" />
-                <RadioButton x:Name="FileOpTeraCopy"
-                             Content="TeraCopy"
-                             Tag="TeraCopy"
-                             IsEnabled="False" />
-              </RadioButtons>
-              <TextBlock x:Name="TeraCopyNotFoundText"
-                         Text="TeraCopy was not detected on this machine."
-                         Style="{ThemeResource CaptionTextBlockStyle}"
-                         Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                         Visibility="Collapsed" />
-            </StackPanel>
-          </Border>
-        </StackPanel>
-
-        <!-- Appearance -->
-        <StackPanel x:Name="AppearanceSection" Spacing="12" Visibility="Collapsed">
-          <StackPanel.Transitions>
-            <TransitionCollection>
-              <EntranceThemeTransition FromVerticalOffset="16" />
-            </TransitionCollection>
-          </StackPanel.Transitions>
-          <TextBlock Text="Appearance" Style="{ThemeResource SubtitleTextBlockStyle}" />
-
-          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                  BorderThickness="1" CornerRadius="8" Padding="16,12">
-            <StackPanel Spacing="8">
-              <TextBlock Text="Theme" FontWeight="SemiBold" />
-              <RadioButtons x:Name="ThemeRadioButtons"
-                            SelectionChanged="OnThemeSelectionChanged">
-                <RadioButton Content="System default" Tag="Default" IsChecked="True" />
-                <RadioButton Content="Light"          Tag="Light" />
-                <RadioButton Content="Dark"           Tag="Dark" />
-              </RadioButtons>
-            </StackPanel>
-          </Border>
-
-          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                  BorderThickness="1" CornerRadius="8" Padding="16,12">
-            <ToggleSwitch x:Name="CompactModeToggle"
-                          Header="Compact list spacing" IsOn="False" Margin="0" />
-          </Border>
-        </StackPanel>
-
-        <!-- About -->
-        <StackPanel x:Name="AboutSection" Spacing="16" Visibility="Collapsed">
-          <StackPanel.Transitions>
-            <TransitionCollection>
-              <EntranceThemeTransition FromVerticalOffset="16" />
-            </TransitionCollection>
-          </StackPanel.Transitions>
-          <TextBlock Text="About" Style="{ThemeResource SubtitleTextBlockStyle}" />
-
-          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                  BorderThickness="1" CornerRadius="8" Padding="20,16">
-            <StackPanel Spacing="6">
-              <TextBlock Text="Better Explorer Ex"
-                         Style="{ThemeResource TitleTextBlockStyle}" />
-              <TextBlock x:Name="VersionText"
-                         Style="{ThemeResource CaptionTextBlockStyle}"
-                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            </StackPanel>
-          </Border>
-        </StackPanel>
-
-      </StackPanel>
-    </ScrollViewer>
-
-  </NavigationView>
+  </Grid>
 
 </UserControl>

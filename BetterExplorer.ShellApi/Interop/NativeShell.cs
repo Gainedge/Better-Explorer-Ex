@@ -2833,6 +2833,381 @@ public static class NativeShell {
     };
     ShellExecuteExW(ref sei);
   }
+
+  // ── Folder icon helpers ───────────────────────────────────────────────────
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool WritePrivateProfileStringW(
+      string lpAppName, string? lpKeyName, string? lpString, string lpFileName);
+
+  // Overload used to flush the INI cache: all three string args are null.
+  [DllImport("kernel32.dll", EntryPoint = "WritePrivateProfileStringW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool WritePrivateProfileStringFlushW(
+      string? lpAppName, string? lpKeyName, string? lpString, string? lpFileName);
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern uint GetPrivateProfileStringW(
+      string lpAppName, string lpKeyName, string lpDefault,
+      System.Text.StringBuilder lpReturnedString, uint nSize, string lpFileName);
+
+  [DllImport("shell32.dll")]
+  private static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+
+  // Read-capable variant of SHFOLDERCUSTOMSETTINGS: pszIconFile is an IntPtr
+  // so the caller allocates the buffer and the shell fills it in.  The write
+  // struct in Shell32.cs uses `string` which the marshaller can only pass IN,
+  // not receive back — hence this separate private definition.
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct SHFCS_READ {
+    public uint   dwSize;
+    public uint   dwMask;
+    public IntPtr pvid;
+    public IntPtr pszWebViewTemplate;
+    public uint   cchWebViewTemplate;
+    public IntPtr pszWebViewTemplateVersion;
+    public IntPtr pszInfoTip;
+    public uint   cchInfoTip;
+    public IntPtr pclsid;
+    public uint   dwFlags;
+    public IntPtr pszIconFile;   // caller-allocated output buffer
+    public uint   cchIconFile;   // size of that buffer in WCHARs
+    public int    iIconIndex;
+    public IntPtr pszLogo;
+    public uint   cchLogo;
+  }
+
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHGetSetFolderCustomSettings")]
+  private static extern HResult SHGetSetFolderCustomSettingsRead(
+      ref SHFCS_READ pfcs, string pszPath, uint dwReadWrite);
+
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  private static extern int SHFormatDrive(IntPtr hwnd, uint drive, uint fmtID, uint options);
+
+  private const uint FILE_ATTRIBUTE_READONLY  = 0x01;
+  private const uint FILE_ATTRIBUTE_SYSTEM    = 0x04;
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool SetFileAttributesW(string lpFileName, uint dwFileAttributes);
+
+  /// <summary>
+  /// Sets a custom icon for <paramref name="folderPath"/> using
+  /// <c>SHGetSetFolderCustomSettings</c> — the same API used by Explorer itself.
+  /// <paramref name="iconFile"/> can be a .ico, .exe, or .dll path.
+  /// <paramref name="iconIndex"/> is the 0-based resource index.
+  /// </summary>
+  public static void SetFolderIcon(string folderPath, string iconFile, int iconIndex) {
+    if (!Directory.Exists(folderPath)) return;
+
+    var fcs = new Shell32.LPSHFOLDERCUSTOMSETTINGS {
+      dwMask      = Shell32.FCSM_ICONFILE,
+      pszIconFile = iconFile.Replace(@"\\", @"\"),
+      cchIconFile = 0,
+      iIconIndex  = iconIndex,
+    };
+    fcs.dwSize = (uint)Marshal.SizeOf(fcs);
+
+    var hr = Shell32.SHGetSetFolderCustomSettings(ref fcs,
+        folderPath.Replace(@"\\", @"\"), Shell32.FCS_FORCEWRITE);
+
+    if (hr == HResult.S_OK)
+      UpdateIconCacheForFolder(folderPath.Replace(@"\\", @"\"));
+  }
+
+  /// <summary>Removes the custom icon from <paramref name="folderPath"/> (restores default shell icon).</summary>
+  public static void RestoreFolderIcon(string folderPath) {
+    if (!Directory.Exists(folderPath)) return;
+
+    // Mirrors Better Explorer's ClearFolderIcon exactly:
+    // pszIconFile = null + iIconIndex = 0 + FCS_FORCEWRITE tells the shell
+    // to remove the IconFile entry entirely rather than writing a blank value.
+    var fcs = new Shell32.LPSHFOLDERCUSTOMSETTINGS {
+      dwMask      = Shell32.FCSM_ICONFILE,
+      pszIconFile = null,
+      cchIconFile = 0,
+      iIconIndex  = 0,
+    };
+    fcs.dwSize = (uint)Marshal.SizeOf(fcs);
+
+    var hr = Shell32.SHGetSetFolderCustomSettings(ref fcs,
+        folderPath.Replace(@"\\", @"\"), Shell32.FCS_FORCEWRITE);
+
+    if (hr == HResult.S_OK)
+      UpdateIconCacheForFolder(folderPath.Replace(@"\\", @"\"));
+  }
+
+  /// <summary>
+  /// Flushes the shell icon cache for <paramref name="folderPath"/> so the new
+  /// icon is reflected immediately — mirrors Better Explorer's implementation.
+  /// </summary>
+  private static void UpdateIconCacheForFolder(string folderPath) {
+    // Read back the image-list index the shell assigned to this folder's icon.
+    var fcsRead = new Shell32.LPSHFOLDERCUSTOMSETTINGS {
+      dwMask      = Shell32.FCSM_ICONFILE,
+      pszIconFile = string.Empty,
+      cchIconFile = 0,
+      iIconIndex  = 0,
+    };
+    fcsRead.dwSize = (uint)Marshal.SizeOf(fcsRead);
+
+    Shell32.SHGetSetFolderCustomSettings(ref fcsRead, folderPath, Shell32.FCS_READ);
+
+    // Invalidate that system-image-list slot so every window redraws with the new icon.
+    Shell32.SHUpdateImage(fcsRead.pszIconFile ?? string.Empty, fcsRead.iIconIndex, 0, -1);
+
+    // Send only a targeted SHCNE_UPDATEITEM for the specific folder.
+    // Do NOT send SHCNE_ASSOCCHANGED — it has no path and causes every shell
+    // change listener to trigger a full directory reload, which clears the
+    // current selection and collapses the contextual toolbar.
+    var pszFolder = Marshal.StringToHGlobalUni(folderPath);
+    try {
+      SHChangeNotify(0x00002000 /* SHCNE_UPDATEITEM */,
+          0x0005 /* SHCNF_PATHW | SHCNF_FLUSH */, pszFolder, IntPtr.Zero);
+    } finally {
+      Marshal.FreeHGlobal(pszFolder);
+    }
+  }
+
+  /// <summary>
+  /// Sends <c>SHCNE_UPDATEDIR</c> for <paramref name="dirPath"/> so the shell
+  /// invalidates its thumbnail-cache entries for all items inside that directory.
+  /// Safe to call for a single-folder restore — does not trigger a full list reload.
+  /// </summary>
+  public static void NotifyShellUpdateDir(string dirPath) {
+    var ptr = Marshal.StringToHGlobalUni(dirPath);
+    try {
+      SHChangeNotify(0x00001000 /* SHCNE_UPDATEDIR */,
+          0x0005 /* SHCNF_PATHW | SHCNF_FLUSH */, ptr, IntPtr.Zero);
+    } finally {
+      Marshal.FreeHGlobal(ptr);
+    }
+  }
+
+  /// <summary>
+  /// Returns <see langword="true"/> if <paramref name="folderPath"/> has a custom icon
+  /// set via <c>SHGetSetFolderCustomSettings</c>.
+  /// </summary>
+  /// <summary>
+  /// Returns <see langword="true"/> if <paramref name="folderPath"/> has a
+  /// custom icon recorded in its desktop.ini — handles both the
+  /// <c>IconFile=</c> key written by <c>SHGetSetFolderCustomSettings</c> and
+  /// the <c>IconResource=</c> key written by Explorer's Customize tab.
+  /// </summary>
+  // ── desktop.ini helpers ──────────────────────────────────────────────────
+
+  /// <summary>
+  /// Reads a single key from a .ini-style file, handling both UTF-16 LE (shell-
+  /// written) and ANSI/UTF-8 encodings.  Returns <see langword="null"/> if the
+  /// section or key is not found, or on any I/O error.
+  /// </summary>
+  private static string? ReadIniValue(string iniPath, string section, string key) {
+    try {
+      var lines = File.ReadAllLines(iniPath);
+      var sectionHeader = $"[{section}]";
+      var keyPrefix     = $"{key}=";
+      bool inSection    = false;
+      foreach (var raw in lines) {
+        var line = raw.Trim();
+        if (line.StartsWith("[", StringComparison.Ordinal)) {
+          inSection = line.Equals(sectionHeader, StringComparison.OrdinalIgnoreCase);
+          continue;
+        }
+        if (inSection && line.StartsWith(keyPrefix, StringComparison.OrdinalIgnoreCase))
+          return line[keyPrefix.Length..].Trim();
+      }
+    } catch { }
+    return null;
+  }
+
+  // Buffer size (in WCHARs) used when asking SHGetSetFolderCustomSettings to
+  // fill in pszIconFile.  MAX_PATH is sufficient; the shell will truncate to fit.
+  private const uint IconFileBufLen = 260;
+
+  /// <summary>
+  /// Returns <see langword="true"/> if <paramref name="folderPath"/> has a custom
+  /// folder icon set via <c>SHGetSetFolderCustomSettings</c>.
+  /// </summary>
+  public static bool HasCustomFolderIcon(string folderPath) {
+    if (!Directory.Exists(folderPath)) return false;
+    // Allocate an unmanaged WCHAR buffer for the shell to write into.
+    var buf = Marshal.AllocHGlobal((int)(IconFileBufLen * 2));
+    try {
+      Marshal.WriteInt16(buf, 0); // zero-terminate so empty == no icon
+      var fcs = new SHFCS_READ {
+        dwMask      = Shell32.FCSM_ICONFILE,
+        pszIconFile = buf,
+        cchIconFile = IconFileBufLen,
+      };
+      fcs.dwSize = (uint)Marshal.SizeOf(fcs);
+      var hr = SHGetSetFolderCustomSettingsRead(ref fcs, folderPath, Shell32.FCS_READ);
+      if (hr != HResult.S_OK) return false;
+      var result = Marshal.PtrToStringUni(buf);
+      return !string.IsNullOrWhiteSpace(result);
+    } finally {
+      Marshal.FreeHGlobal(buf);
+    }
+  }
+
+  public static string? GetFolderIconResource(string folderPath) {
+    if (!Directory.Exists(folderPath)) return null;
+    var buf = Marshal.AllocHGlobal((int)(IconFileBufLen * 2));
+    try {
+      Marshal.WriteInt16(buf, 0);
+      var fcs = new SHFCS_READ {
+        dwMask      = Shell32.FCSM_ICONFILE,
+        pszIconFile = buf,
+        cchIconFile = IconFileBufLen,
+      };
+      fcs.dwSize = (uint)Marshal.SizeOf(fcs);
+      var hr = SHGetSetFolderCustomSettingsRead(ref fcs, folderPath, Shell32.FCS_READ);
+      if (hr != HResult.S_OK) return null;
+      var iconFile = Marshal.PtrToStringUni(buf);
+      if (!string.IsNullOrWhiteSpace(iconFile))
+        return $"{iconFile},{fcs.iIconIndex}";
+      // Fallback: Explorer "Customize" tab writes IconResource= to desktop.ini
+      var iniPath = Path.Combine(folderPath, "desktop.ini");
+      var res = ReadIniValue(iniPath, ".ShellClassInfo", "IconResource");
+      return string.IsNullOrWhiteSpace(res) ? null : res;
+    } finally {
+      Marshal.FreeHGlobal(buf);
+    }
+  }
+
+  /// <summary>Returns <see langword="true"/> if <paramref name="path"/> is a drive root (e.g. "C:\").</summary>
+  public static bool IsDriveRoot(string path) {
+    if (string.IsNullOrEmpty(path)) return false;
+    // Normalise: strip trailing backslash for Path.GetPathRoot comparison
+    var root = Path.GetPathRoot(path);
+    return !string.IsNullOrEmpty(root) &&
+           string.Equals(Path.TrimEndingDirectorySeparator(path),
+                         Path.TrimEndingDirectorySeparator(root),
+                         StringComparison.OrdinalIgnoreCase);
+  }
+
+  /// <summary>Invokes the Windows Format dialog for the given drive letter.</summary>
+  public static void FormatDrive(char driveLetter, IntPtr hwnd = default) {
+    uint driveIndex = (uint)(char.ToUpperInvariant(driveLetter) - 'A');
+    SHFormatDrive(hwnd, driveIndex, 0xFFFF /* SHFMT_ID_DEFAULT */, 0);
+  }
+
+  /// <summary>Launches Disk Cleanup (cleanmgr.exe) for the given drive letter.</summary>
+  public static void OpenDiskCleanup(char driveLetter) {
+    var letter = char.ToUpperInvariant(driveLetter);
+    var psi = new System.Diagnostics.ProcessStartInfo("cleanmgr.exe",
+        $"/d {letter}:")
+    {
+        UseShellExecute = true,
+    };
+    System.Diagnostics.Process.Start(psi);
+  }
+
+  // ── Icon extraction (for FolderIconPickerDialog) ──────────────────────────
+
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  private static extern int ExtractIconExW(
+      string lpszFile, int nIconIndex,
+      [Out] IntPtr[]? phiconLarge, [Out] IntPtr[]? phiconSmall, uint nIcons);
+
+  /// <summary>Returns the number of icon resources in <paramref name="filePath"/>.</summary>
+  public static int ExtractIconCount(string filePath) {
+    try { return ExtractIconExW(filePath, -1, null, null, 0); }
+    catch { return 0; }
+  }
+
+  /// <summary>
+  /// Renders the icon at <paramref name="index"/> in <paramref name="filePath"/> to a
+  /// 32-bit HBITMAP of the given <paramref name="size"/>. Returns <see cref="IntPtr.Zero"/>
+  /// on failure. Caller must call <see cref="DeleteObject"/> when done.
+  /// </summary>
+  public static IntPtr ExtractIconHBitmap(string filePath, int index, int size) {
+    var large = new IntPtr[1];
+    var small = new IntPtr[1];
+    try {
+      int n = ExtractIconExW(filePath, index, large, small, 1);
+      if (n <= 0) return IntPtr.Zero;
+      var hIcon = size > 16 ? large[0] : small[0];
+      if (hIcon == IntPtr.Zero) return IntPtr.Zero;
+
+      var bmi = new BITMAPINFOHEADER {
+        biSize        = Marshal.SizeOf<BITMAPINFOHEADER>(),
+        biWidth       = size,
+        biHeight      = -size,
+        biPlanes      = 1,
+        biBitCount    = 32,
+        biCompression = 0,
+      };
+      var hdc = CreateCompatibleDC(IntPtr.Zero);
+      var hbm = CreateDIBSection(hdc, ref bmi, 0, out _, IntPtr.Zero, 0);
+      var hOld = SelectObject(hdc, hbm);
+      DrawIconEx(hdc, 0, 0, hIcon, size, size, 0, IntPtr.Zero, DI_NORMAL);
+      SelectObject(hdc, hOld);
+      DeleteDC(hdc);
+      return hbm;
+    } finally {
+      if (large[0] != IntPtr.Zero) DestroyIcon(large[0]);
+      if (small[0] != IntPtr.Zero) DestroyIcon(small[0]);
+    }
+  }
+  // ── Picture helpers ───────────────────────────────────────────────────────
+
+  private const uint SPI_SETDESKWALLPAPER = 0x0014;
+  private const uint SPIF_UPDATEINIFILE   = 0x0001;
+  private const uint SPIF_SENDCHANGE      = 0x0002;
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern bool SystemParametersInfoW(uint uiAction, uint uiParam,
+      string pvParam, uint fWinIni);
+
+  /// <summary>Sets the desktop wallpaper to the given image file.</summary>
+  public static void SetWallpaper(string imagePath) =>
+      SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, imagePath,
+          SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+
+  /// <summary>
+  /// Rotates the image file at <paramref name="imagePath"/> in-place by
+  /// <paramref name="rotation"/> and re-encodes it in the same format.
+  /// </summary>
+  public static async Task RotateImageAsync(string imagePath, BitmapRotation rotation) {
+    var file = await StorageFile.GetFileFromPathAsync(imagePath);
+
+    Guid    codecId;
+    byte[]  pixels;
+    uint    rotatedWidth, rotatedHeight;
+
+    using (var inStream = await file.OpenReadAsync()) {
+      var decoder = await BitmapDecoder.CreateAsync(inStream);
+      codecId = decoder.DecoderInformation.CodecId;
+
+      bool swap = rotation == BitmapRotation.Clockwise90Degrees ||
+                  rotation == BitmapRotation.Clockwise270Degrees;
+      rotatedWidth  = swap ? decoder.PixelHeight : decoder.PixelWidth;
+      rotatedHeight = swap ? decoder.PixelWidth  : decoder.PixelHeight;
+
+      var pd = await decoder.GetPixelDataAsync(
+          BitmapPixelFormat.Bgra8,
+          BitmapAlphaMode.Premultiplied,
+          new BitmapTransform { Rotation = rotation },
+          ExifOrientationMode.IgnoreExifOrientation,
+          ColorManagementMode.DoNotColorManage);
+      pixels = pd.DetachPixelData();
+    }
+
+    using var outStream = await file.OpenAsync(FileAccessMode.ReadWrite);
+    outStream.Seek(0);
+    outStream.Size = 0;
+
+    Guid encoderId = codecId == BitmapDecoder.JpegDecoderId  ? BitmapEncoder.JpegEncoderId
+                   : codecId == BitmapDecoder.PngDecoderId   ? BitmapEncoder.PngEncoderId
+                   : codecId == BitmapDecoder.BmpDecoderId   ? BitmapEncoder.BmpEncoderId
+                   : codecId == BitmapDecoder.GifDecoderId   ? BitmapEncoder.GifEncoderId
+                   : codecId == BitmapDecoder.TiffDecoderId  ? BitmapEncoder.TiffEncoderId
+                   : BitmapEncoder.PngEncoderId;
+
+    var encoder = await BitmapEncoder.CreateAsync(encoderId, outStream);
+    encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
+        rotatedWidth, rotatedHeight, 96, 96, pixels);
+    await encoder.FlushAsync();
+  }
+
 }
 
 public struct PROPERTYKEY {

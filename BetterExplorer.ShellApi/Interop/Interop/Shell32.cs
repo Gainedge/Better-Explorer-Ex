@@ -697,7 +697,7 @@ namespace BExplorer.Shell.Interop {
       public UInt32 cchInfoTip;
       public IntPtr pclsid;
       public UInt32 dwFlags;
-      public string pszIconFile;
+      public string? pszIconFile;
       public UInt32 cchIconFile;
       public int iIconIndex;
       public string pszLogo;

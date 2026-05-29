@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FolderIconPickerDialog
+  ──────────────────────
+  Shows all icons extracted from a resource file (imageres.dll by default)
+  in a scrollable grid. The user can type or browse to any EXE/DLL/ICO.
+-->
+<ContentDialog
+    x:Class="BetterExplorer.Controls.FolderIconPickerDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:BetterExplorer.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="Change folder icon"
+    PrimaryButtonText="Select"
+    SecondaryButtonText="Cancel"
+    IsPrimaryButtonEnabled="False"
+    DefaultButton="Primary"
+    Closing="OnDialogClosing">
+
+  <Grid Width="560" RowSpacing="8">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />   <!-- source-file bar -->
+      <RowDefinition Height="Auto" />   <!-- status / icon-count label -->
+      <RowDefinition Height="360" />    <!-- icon grid -->
+    </Grid.RowDefinitions>
+
+    <!-- ── Source file bar ─────────────────────────────────────────────── -->
+    <Grid Grid.Row="0" ColumnSpacing="6">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+
+      <TextBox x:Name="SourceFileBox"
+               Grid.Column="0"
+               PlaceholderText="Path to .dll, .exe or .ico file"
+               FontFamily="Consolas"
+               FontSize="12"
+               VerticalAlignment="Center"
+               KeyDown="SourceFileBox_KeyDown" />
+
+      <Button x:Name="BrowseButton"
+              Grid.Column="1"
+              Content="Browse…"
+              VerticalAlignment="Center"
+              Click="BrowseButton_Click" />
+    </Grid>
+
+    <!-- ── Status label ────────────────────────────────────────────────── -->
+    <TextBlock x:Name="StatusText"
+               Grid.Row="1"
+               FontSize="11"
+               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+               VerticalAlignment="Center" />
+
+    <!-- ── Icon grid ────────────────────────────────────────────────────── -->
+    <ScrollViewer Grid.Row="2"
+                  HorizontalScrollBarVisibility="Disabled"
+                  VerticalScrollBarVisibility="Auto"
+                  Padding="0,0,4,0">
+      <GridView x:Name="IconGrid"
+                SelectionMode="Single"
+                IsItemClickEnabled="True"
+                ItemClick="IconGrid_ItemClick"
+                SelectionChanged="IconGrid_SelectionChanged"
+                Padding="2">
+        <GridView.ItemTemplate>
+          <DataTemplate x:DataType="local:IconEntry">
+            <Border Width="44" Height="44"
+                    CornerRadius="{ThemeResource ControlCornerRadius}"
+                    ToolTipService.ToolTip="{x:Bind IndexLabel}">
+              <Image Source="{x:Bind Image, Mode=OneWay}"
+                     Width="32" Height="32"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"
+                     Stretch="Uniform" />
+            </Border>
+          </DataTemplate>
+        </GridView.ItemTemplate>
+        <GridView.ItemContainerStyle>
+          <Style TargetType="GridViewItem">
+            <Setter Property="Padding"  Value="2" />
+            <Setter Property="Margin"   Value="1" />
+            <Setter Property="MinWidth" Value="0" />
+          </Style>
+        </GridView.ItemContainerStyle>
+      </GridView>
+    </ScrollViewer>
+  </Grid>
+</ContentDialog>

@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ContentDialog
+    x:Class="BetterExplorer.Controls.FolderSizeDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="Folder / Drive Size"
+    CloseButtonText="Close"
+    DefaultButton="Close"
+    CornerRadius="12">
+
+  <ContentDialog.Resources>
+    <!-- Widen the dialog shell beyond the 548 px WinUI default -->
+    <x:Double x:Key="ContentDialogMaxWidth">1000</x:Double>
+    <!-- Rounded corners — belt-and-suspenders for all WinUI 3 versions -->
+    <CornerRadius x:Key="OverlayCornerRadius">12</CornerRadius>
+    <CornerRadius x:Key="ContentDialogCornerRadius">12</CornerRadius>
+  </ContentDialog.Resources>
+
+  <Grid Width="940" RowSpacing="10">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="460" />
+    </Grid.RowDefinitions>
+
+    <TextBlock x:Name="PathLabel"
+               Grid.Row="0"
+               FontSize="12"
+               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+               TextWrapping="NoWrap"
+               TextTrimming="CharacterEllipsis" />
+
+    <ProgressBar x:Name="ScanProgress"
+                 Grid.Row="1"
+                 Height="4"
+                 IsIndeterminate="False"
+                 Minimum="0" Maximum="100" Value="0" />
+
+    <TextBlock x:Name="StatusText"
+               Grid.Row="2"
+               FontSize="11"
+               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+               Text="Scanning..." />
+
+    <Grid Grid.Row="3" ColumnSpacing="16">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="460" />
+        <ColumnDefinition Width="*" MinWidth="360" />
+      </Grid.ColumnDefinitions>
+
+      <Grid Grid.Column="0"
+            x:Name="PieCanvasWrapper"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center">
+
+        <Canvas x:Name="PieCanvas"
+                Width="420" Height="420"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                PointerMoved="PieCanvas_PointerMoved"
+                PointerExited="PieCanvas_PointerExited" />
+
+        <Popup x:Name="SlicePopup"
+               IsLightDismissEnabled="False"
+               IsOpen="False">
+          <Border Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                  BorderThickness="1"
+                  CornerRadius="6"
+                  Padding="10,6"
+                  MaxWidth="280">
+            <StackPanel Spacing="2">
+              <TextBlock x:Name="TooltipName"
+                         FontSize="13" FontWeight="SemiBold"
+                         TextWrapping="Wrap" />
+              <TextBlock x:Name="TooltipSize"
+                         FontSize="12"
+                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+              <TextBlock x:Name="TooltipPercent"
+                         FontSize="11"
+                         Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            </StackPanel>
+          </Border>
+        </Popup>
+      </Grid>
+
+      <ScrollViewer Grid.Column="1"
+                    VerticalScrollBarVisibility="Auto"
+                    HorizontalScrollBarVisibility="Disabled"
+                    Padding="0">
+        <ItemsControl x:Name="LegendItems"
+                      Margin="0,0,20,0">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Grid Margin="0,4" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="14" />    <!-- swatch -->
+                  <ColumnDefinition Width="*" />     <!-- name -->
+                  <ColumnDefinition Width="72" />    <!-- size -->
+                  <ColumnDefinition Width="46" />    <!-- percent -->
+                </Grid.ColumnDefinitions>
+                <Rectangle Grid.Column="0" Width="12" Height="12"
+                           RadiusX="2" RadiusY="2"
+                           VerticalAlignment="Center">
+                  <Rectangle.Fill>
+                    <SolidColorBrush Color="{Binding Color}" />
+                  </Rectangle.Fill>
+                </Rectangle>
+                <TextBlock Grid.Column="1"
+                           Text="{Binding Name}"
+                           FontSize="12"
+                           TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center" />
+                <TextBlock Grid.Column="2"
+                           Text="{Binding SizeText}"
+                           FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextAlignment="Right"
+                           VerticalAlignment="Center" />
+                <TextBlock Grid.Column="3"
+                           Text="{Binding PercentText}"
+                           FontSize="11"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           TextAlignment="Right"
+                           VerticalAlignment="Center" />
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </ScrollViewer>
+    </Grid>
+  </Grid>
+</ContentDialog>

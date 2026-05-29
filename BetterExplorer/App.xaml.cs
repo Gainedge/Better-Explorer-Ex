@@ -31,6 +31,14 @@ public partial class App : Application {
   /// executed, and as such is the logical equivalent of main() or WinMain().
   /// </summary>
   public App() {
+    // Read the persisted theme BEFORE InitializeComponent so WinUI initialises
+    // the theme system with the correct value from the very first frame,
+    // preventing the initial black-background flash.
+    var saved = Windows.Storage.ApplicationData.Current.LocalSettings.Values
+        .TryGetValue(BetterExplorer.Controls.SettingsPage.ThemeSettingKey, out var v) ? v as string : null;
+    if (saved == "Light") RequestedTheme = ApplicationTheme.Light;
+    else if (saved == "Dark") RequestedTheme = ApplicationTheme.Dark;
+
     InitializeComponent();
   }
 

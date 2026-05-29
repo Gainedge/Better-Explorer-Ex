@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="BetterExplorer.Controls.Settings.AppearanceSettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+  <ScrollViewer Padding="0,0,0,24">
+    <StackPanel Spacing="4" Padding="24,24,24,0">
+
+      <ctk:SettingsExpander Header="Theme"
+                            Description="Choose your preferred color theme.">
+        <ctk:SettingsExpander.Items>
+          <ctk:SettingsCard Header="System default">
+            <RadioButton x:Name="ThemeDefault" Tag="Default" GroupName="Theme"
+                         IsChecked="True" Checked="OnThemeChecked" />
+          </ctk:SettingsCard>
+          <ctk:SettingsCard Header="Light">
+            <RadioButton x:Name="ThemeLight" Tag="Light" GroupName="Theme"
+                         Checked="OnThemeChecked" />
+          </ctk:SettingsCard>
+          <ctk:SettingsCard Header="Dark">
+            <RadioButton x:Name="ThemeDark" Tag="Dark" GroupName="Theme"
+                         Checked="OnThemeChecked" />
+          </ctk:SettingsCard>
+        </ctk:SettingsExpander.Items>
+      </ctk:SettingsExpander>
+
+      <ctk:SettingsCard Header="Compact list spacing"
+                        Description="Use tighter spacing between items in lists.">
+        <ToggleSwitch x:Name="CompactModeToggle" IsOn="False" />
+      </ctk:SettingsCard>
+
+    </StackPanel>
+  </ScrollViewer>
+
+</Page>

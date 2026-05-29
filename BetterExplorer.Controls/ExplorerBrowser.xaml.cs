@@ -1,9 +1,14 @@
 using System;
+using System.Diagnostics;
+using System.IO;
 using BetterExplorer.ShellApi;
 using BetterExplorer.ShellApi.Interop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Windows.Graphics.Imaging;
+using Windows.System;
 
 namespace BetterExplorer.Controls;
 
@@ -120,6 +125,8 @@ public sealed partial class ExplorerBrowser : UserControl
         UpdateGroupCheckmarks(FileList.GroupColumn);
         PathChanged?.Invoke(this, path);
         UpdateToolbarButtonStates();
+        DriveToolsSection.Visibility =
+            NativeShell.IsDriveRoot(path) ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>
@@ -222,6 +229,26 @@ public sealed partial class ExplorerBrowser : UserControl
       TbRenameButton.IsEnabled     = isSingle;
       TbDeleteButton.IsEnabled     = hasSelection;
       TbPropertiesButton.IsEnabled = hasSelection;
+
+      // Folder Tools contextual section
+      FolderToolsSection.Visibility = isFolder ? Visibility.Visible : Visibility.Collapsed;
+      if (isFolder) {
+        var folderPath = FileList.SelectedFolderPath;
+        TbRestoreFolderIconButton.IsEnabled =
+            folderPath is not null &&
+            NativeShell.HasCustomFolderIcon(folderPath);
+      }
+
+      // Picture Tools contextual section
+      bool hasPicture = FileList.SelectionHasPicture;
+      PictureToolsSection.Visibility = hasPicture ? Visibility.Visible : Visibility.Collapsed;
+      if (hasPicture) {
+        bool singlePicture = FileList.SelectedPicturePath is not null;
+        TbRotateLeftButton.IsEnabled  = singlePicture;
+        TbRotateRightButton.IsEnabled = singlePicture;
+        TbSetWallpaperButton.IsEnabled = singlePicture;
+        TbEditWithButton.IsEnabled    = singlePicture;
+      }
     }
 
     private void TbOpenButton_Click(object sender, RoutedEventArgs e)       => FileList.OpenSelected();
@@ -335,6 +362,140 @@ public sealed partial class ExplorerBrowser : UserControl
         GroupMenuSize.IsChecked = groupColumn == "Size";
     }
 
+    // ── Folder Tools contextual toolbar handlers ──────────────────────────────
+
+    private async void TbChangeFolderIcon_Click(object sender, RoutedEventArgs e)
+    {
+        var folderPath = FileList.SelectedFolderPath;
+        if (folderPath is null) return;
+
+        var picker = new FolderIconPickerDialog
+        {
+            XamlRoot       = XamlRoot,
+            RequestedTheme = ActualTheme,
+        };
+        // Lift the default max-width so the icon grid has enough room.
+        picker.Resources["ContentDialogMaxWidth"] = 640.0;
+
+        picker.StartWithDefaultFile();
+
+        var result = await picker.ShowAsync();
+        if (result != ContentDialogResult.Primary) return;
+
+        if (picker.SelectedFile is { } iconFile)
+        {
+            NativeShell.SetFolderIcon(folderPath, iconFile, picker.SelectedIndex);
+            FileList.RefreshItem(folderPath);
+            UpdateToolbarButtonStates();
+        }
+    }
+
+    private void TbRestoreFolderIcon_Click(object sender, RoutedEventArgs e)
+    {
+        var folderPath = FileList.SelectedFolderPath;
+        if (folderPath is null) return;
+        NativeShell.RestoreFolderIcon(folderPath);
+        FileList.RefreshItemAfterIconClear(folderPath);
+        UpdateToolbarButtonStates();
+    }
+
+    // ── Picture Tools contextual toolbar handlers ──────────────────────────────
+
+    private async void TbRotateLeft_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.SelectedPicturePath;
+        if (path is null) return;
+        try {
+            await NativeShell.RotateImageAsync(path, BitmapRotation.Clockwise270Degrees);
+            FileList.RefreshItem(path);
+        } catch { /* ignore transient IO errors */ }
+    }
+
+    private async void TbRotateRight_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.SelectedPicturePath;
+        if (path is null) return;
+        try {
+            await NativeShell.RotateImageAsync(path, BitmapRotation.Clockwise90Degrees);
+            FileList.RefreshItem(path);
+        } catch { /* ignore transient IO errors */ }
+    }
+
+    private void TbSetWallpaper_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.SelectedPicturePath;
+        if (path is null) return;
+        NativeShell.SetWallpaper(path);
+    }
+
+    private void TbEditWithPaint_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.SelectedPicturePath;
+        if (path is null) return;
+        Process.Start(new ProcessStartInfo("mspaint.exe", $"\"{path}\"")
+            { UseShellExecute = true });
+    }
+
+    private async void TbEditWithPhotos_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.SelectedPicturePath;
+        if (path is null) return;
+        try {
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
+            await Launcher.LaunchFileAsync(file);
+        } catch { /* app may not be installed */ }
+    }
+
+    private void TbEditWithPaint3D_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.SelectedPicturePath;
+        if (path is null) return;
+        Process.Start(new ProcessStartInfo("mspaint.exe",
+            $"/canvas \"{path}\"")
+            { UseShellExecute = true });
+    }
+
+    // ── Drive Tools contextual toolbar handlers ───────────────────────────────
+
+    private void TbFormatDrive_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.CurrentPath;
+        if (string.IsNullOrEmpty(path) || path.Length < 2) return;
+        NativeShell.FormatDrive(path[0]);
+    }
+
+    private void TbDiskCleanup_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.CurrentPath;
+        if (string.IsNullOrEmpty(path) || path.Length < 2) return;
+        NativeShell.OpenDiskCleanup(path[0]);
+    }
+
+    private void TbDriveProperties_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.CurrentPath;
+        if (!string.IsNullOrEmpty(path))
+            NativeShell.ShowShellProperties(path);
+    }
+
+    // Drive Tools — scan the current drive / root path
+    private async void TbFolderSize_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.CurrentPath;
+        if (string.IsNullOrEmpty(path)) return;
+        var dlg = new FolderSizeDialog(path) { XamlRoot = XamlRoot };
+        await dlg.ShowAsync();
+    }
+
+    // Folder Tools — scan the selected folder
+    private async void TbFolderSizeFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var path = FileList.SelectedFolderPath;
+        if (string.IsNullOrEmpty(path)) return;
+        var dlg = new FolderSizeDialog(path) { XamlRoot = XamlRoot };
+        await dlg.ShowAsync();
+    }
+
     // ── Tree / file-list splitter ─────────────────────────────────────────────
 
     private bool   _splitterDragging;
@@ -370,18 +531,42 @@ public sealed partial class ExplorerBrowser : UserControl
         e.Handled = true;
     }
 
-    private SettingsWindow? _settingsWindow;
+    private ContentDialog? _settingsDialog;
 
-    private void OnSettingsButtonClick(object sender, RoutedEventArgs e)
+    private async void OnSettingsButtonClick(object sender, RoutedEventArgs e)
     {
-        if (_settingsWindow is not null)
-        {
-            _settingsWindow.Activate();
-            return;
-        }
+        // Only one instance at a time.
+        if (_settingsDialog is not null) return;
 
-        _settingsWindow = new SettingsWindow();
-        _settingsWindow.Closed += (_, _) => _settingsWindow = null;
-        _settingsWindow.Activate();
+        var page = new SettingsPage();
+
+        _settingsDialog = new ContentDialog
+        {
+            Title             = "Settings",
+            Content           = page,
+            XamlRoot          = XamlRoot,
+            RequestedTheme    = ActualTheme,
+        };
+        // Lift the default MaxWidth cap so the dialog grows to fit SettingsPage.
+        _settingsDialog.Resources["ContentDialogMaxWidth"] = 1024.0;
+
+        page.CloseRequested += OnSettingsCloseRequested;
+        SettingsPage.ThemeChangeRequested += OnSettingsThemeChanged;
+
+        await _settingsDialog.ShowAsync();
+
+        SettingsPage.ThemeChangeRequested -= OnSettingsThemeChanged;
+        page.CloseRequested -= OnSettingsCloseRequested;
+        _settingsDialog = null;
     }
-}
+
+    private void OnSettingsThemeChanged(Microsoft.UI.Xaml.ElementTheme theme)
+    {
+        if (_settingsDialog is not null)
+            _settingsDialog.RequestedTheme = theme;
+    }
+
+    private void OnSettingsCloseRequested(object? sender, EventArgs e)
+        => _settingsDialog?.Hide();
+
+    }

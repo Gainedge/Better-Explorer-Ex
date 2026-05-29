@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="BetterExplorer.Controls.Settings.GeneralSettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctk="using:CommunityToolkit.WinUI.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+  <ScrollViewer Padding="0,0,0,24">
+    <StackPanel Spacing="4" Padding="24,24,24,0">
+
+      <ctk:SettingsCard Header="Show hidden files">
+        <ToggleSwitch x:Name="ShowHiddenFilesToggle"
+                      IsOn="False"
+                      Toggled="OnShowHiddenFilesToggled" />
+      </ctk:SettingsCard>
+
+      <ctk:SettingsCard Header="Show file extensions">
+        <ToggleSwitch x:Name="ShowExtensionsToggle"
+                      IsOn="True"
+                      Toggled="OnShowExtensionsToggled" />
+      </ctk:SettingsCard>
+
+      <ctk:SettingsExpander x:Name="SearchEngineExpander"
+                            Header="Search engine"
+                            Description="Choose which engine is used when you type in the search box.">
+        <ctk:SettingsExpander.Items>
+          <ctk:SettingsCard Header="Windows Search"
+                            Description="Built-in Windows search">
+            <RadioButton x:Name="SearchEngineWindowsSearch"
+                         Tag="WindowsSearch"
+                         GroupName="SearchEngine"
+                         IsChecked="True"
+                         Checked="OnSearchEngineChecked" />
+          </ctk:SettingsCard>
+          <ctk:SettingsCard Header="Everything"
+                            Description="voidtools">
+            <RadioButton x:Name="SearchEngineEverything"
+                         Tag="Everything"
+                         GroupName="SearchEngine"
+                         IsEnabled="False"
+                         Checked="OnSearchEngineChecked" />
+          </ctk:SettingsCard>
+        </ctk:SettingsExpander.Items>
+      </ctk:SettingsExpander>
+
+      <InfoBar x:Name="EverythingNotFoundBar"
+               Title="Everything was not detected on this machine."
+               Severity="Warning"
+               IsOpen="False"
+               IsClosable="False" />
+
+      <ctk:SettingsExpander x:Name="FileOpHandlerExpander"
+                            Header="File operation handler"
+                            Description="Choose which program performs copy, move, and paste operations.">
+        <ctk:SettingsExpander.Items>
+          <ctk:SettingsCard Header="System"
+                            Description="Windows built-in">
+            <RadioButton x:Name="FileOpSystem"
+                         Tag="System"
+                         GroupName="FileOpHandler"
+                         IsChecked="True"
+                         Checked="OnFileOpHandlerChecked" />
+          </ctk:SettingsCard>
+          <ctk:SettingsCard Header="TeraCopy">
+            <RadioButton x:Name="FileOpTeraCopy"
+                         Tag="TeraCopy"
+                         GroupName="FileOpHandler"
+                         IsEnabled="False"
+                         Checked="OnFileOpHandlerChecked" />
+          </ctk:SettingsCard>
+        </ctk:SettingsExpander.Items>
+      </ctk:SettingsExpander>
+
+      <InfoBar x:Name="TeraCopyNotFoundBar"
+               Title="TeraCopy was not detected on this machine."
+               Severity="Warning"
+               IsOpen="False"
+               IsClosable="False" />
+
+    </StackPanel>
+  </ScrollViewer>
+
+</Page>
