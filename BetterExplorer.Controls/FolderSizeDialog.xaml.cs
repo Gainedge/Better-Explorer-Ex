@@ -14,17 +14,16 @@ using System.Threading.Tasks;
 
 namespace BetterExplorer.Controls
 {
-    // ── Data models ──────────────────────────────────────────────────────────
+    // â”€â”€ Data models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     internal sealed class FolderSizeEntry
     {
-        public string Name      { get; init; } = string.Empty;
-        public string Path      { get; init; } = string.Empty;
-        public long   Bytes     { get; set;  }
-        public Color  Color     { get; init; }
-        public long   TotalBytes { get; set; }   // stamped before legend binding
-        public string SizeText   => FormatBytes(Bytes);
-        public string PercentText => TotalBytes > 0 ? $"{Bytes * 100.0 / TotalBytes:F1}%" : "";
+        public string Name    { get; init; } = string.Empty;
+        public string Path    { get; init; } = string.Empty;
+        public long   Bytes   { get; set;  }
+        public Color  Color   { get; init; }
+        public string SizeText    => FormatBytes(Bytes);
+        public string PercentText { get; set; } = string.Empty;
 
         // Geometry for hit-testing (start/sweep in radians)
         public double StartAngle { get; set; }
@@ -39,11 +38,11 @@ namespace BetterExplorer.Controls
         }
     }
 
-    // ── Dialog ───────────────────────────────────────────────────────────────
+    // â”€â”€ Dialog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     public sealed partial class FolderSizeDialog : ContentDialog
     {
-        // Palette – enough for up to 20 slices before wrapping
+        // Palette â€“ enough for up to 20 slices before wrapping
         private static readonly Color[] _palette =
         [
             Color.FromArgb(255,  70, 130, 180), Color.FromArgb(255, 255, 127,  14),
@@ -76,55 +75,42 @@ namespace BetterExplorer.Controls
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
+            // Round the dialog container corners by finding the root Border in the visual tree
+            ApplyRoundedCorners(this);
             PathLabel.Text = _rootPath;
-            ApplyRoundedCorners();
             _ = ScanAsync(_cts.Token);
         }
 
-        // Walk the visual tree and round every Border that makes up the dialog shell.
-        private void ApplyRoundedCorners()
+        private static void ApplyRoundedCorners(DependencyObject root)
         {
             var radius = new CornerRadius(12);
-            ApplyToVisualTree(this, radius);
-        }
-
-        private static void ApplyToVisualTree(DependencyObject root, CornerRadius radius)
-        {
-            int count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
-            for (int i = 0; i < count; i++)
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
             {
-                var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+                var child = VisualTreeHelper.GetChild(root, i);
                 if (child is Border b)
+                {
                     b.CornerRadius = radius;
-                ApplyToVisualTree(child, radius);
+                }
+                ApplyRoundedCorners(child);
             }
         }
 
-        // ── Scanning ─────────────────────────────────────────────────────────
+        // â”€â”€ Scanning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
         private async Task ScanAsync(CancellationToken ct)
         {
             try
             {
                 // Enumerate immediate subdirs
-                var enumOpts = new EnumerationOptions
-                {
-                    IgnoreInaccessible    = true,
-                    AttributesToSkip      = FileAttributes.ReparsePoint,  // skip junctions/symlinks
-                    RecurseSubdirectories = false,
-                };
-
                 string[] dirs;
-                try { dirs = Directory.GetDirectories(_rootPath, "*", enumOpts); }
+                try { dirs = Directory.GetDirectories(_rootPath); }
                 catch { dirs = []; }
 
                 long looseFiles = 0;
                 try
                 {
-                    foreach (var f in Directory.EnumerateFiles(_rootPath, "*", enumOpts))
-                    {
-                        try { looseFiles += new FileInfo(f).Length; } catch { }
-                    }
+                    foreach (var f in Directory.EnumerateFiles(_rootPath))
+                        looseFiles += new FileInfo(f).Length;
                 }
                 catch { /* ignore */ }
 
@@ -201,40 +187,15 @@ namespace BetterExplorer.Controls
         private static long RecurseDirectory(string path, CancellationToken ct)
         {
             long total = 0;
-            var stack = new Stack<string>();
-            stack.Push(path);
-
-            var fileOpts = new EnumerationOptions
+            try
             {
-                IgnoreInaccessible    = true,
-                AttributesToSkip      = FileAttributes.ReparsePoint,
-                RecurseSubdirectories = false,
-            };
-
-            while (stack.Count > 0 && !ct.IsCancellationRequested)
-            {
-                var current = stack.Pop();
-
-                // Sum files in this directory
-                try
+                foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
                 {
-                    foreach (var f in Directory.EnumerateFiles(current, "*", fileOpts))
-                    {
-                        if (ct.IsCancellationRequested) break;
-                        try { total += new FileInfo(f).Length; } catch { }
-                    }
+                    if (ct.IsCancellationRequested) break;
+                    try { total += new FileInfo(f).Length; } catch { }
                 }
-                catch { /* access denied — skip files in this dir */ }
-
-                // Queue sub-directories
-                try
-                {
-                    foreach (var sub in Directory.EnumerateDirectories(current, "*", fileOpts))
-                        stack.Push(sub);
-                }
-                catch { /* access denied — skip sub-dirs */ }
             }
-
+            catch { }
             return total;
         }
 
@@ -246,7 +207,7 @@ namespace BetterExplorer.Controls
             return $"{b} B";
         }
 
-        // ── Incremental redraw throttle ───────────────────────────────────────
+        // â”€â”€ Incremental redraw throttle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
         private void TryIncrementalRedraw(int progressPct)
         {
@@ -262,7 +223,7 @@ namespace BetterExplorer.Controls
             });
         }
 
-        // ── Pie-chart drawing ─────────────────────────────────────────────────
+        // â”€â”€ Pie-chart drawing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
         private void DrawPieChart()
         {
@@ -328,19 +289,22 @@ namespace BetterExplorer.Controls
             };
         }
 
-        // ── Legend ────────────────────────────────────────────────────────────
+        // â”€â”€ Legend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
         private void RebuildLegend()
         {
-            long total = _totalBytes;
+            var total = _totalBytes > 0 ? _totalBytes : 1L;
+            var items = new List<FolderSizeEntry>(_entries.Count);
             foreach (var e in _entries)
-                e.TotalBytes = total;
-
+            {
+                e.PercentText = $"{e.Bytes * 100.0 / total:F1}%";
+                items.Add(e);
+            }
             LegendItems.ItemsSource = null;
-            LegendItems.ItemsSource = new List<FolderSizeEntry>(_entries);
+            LegendItems.ItemsSource = items;
         }
 
-        // ── Slice hit-testing (pointer events) ───────────────────────────────
+        // â”€â”€ Slice hit-testing (pointer events) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
         private void PieCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
         {

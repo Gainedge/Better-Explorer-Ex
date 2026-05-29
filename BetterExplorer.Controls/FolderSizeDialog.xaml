@@ -8,18 +8,17 @@
     mc:Ignorable="d"
     Title="Folder / Drive Size"
     CloseButtonText="Close"
-    DefaultButton="Close"
-    CornerRadius="12">
+    DefaultButton="Close">
 
   <ContentDialog.Resources>
-    <!-- Widen the dialog shell beyond the 548 px WinUI default -->
-    <x:Double x:Key="ContentDialogMaxWidth">1000</x:Double>
-    <!-- Rounded corners — belt-and-suspenders for all WinUI 3 versions -->
+    <!-- Allow the dialog to be wider than the default 548 px cap -->
+    <x:Double x:Key="ContentDialogMaxWidth">1100</x:Double>
+    <!-- Round the dialog corners -->
     <CornerRadius x:Key="OverlayCornerRadius">12</CornerRadius>
     <CornerRadius x:Key="ContentDialogCornerRadius">12</CornerRadius>
   </ContentDialog.Resources>
 
-  <Grid Width="940" RowSpacing="10">
+  <Grid Width="1020" RowSpacing="10">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
@@ -49,7 +48,7 @@
     <Grid Grid.Row="3" ColumnSpacing="16">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="460" />
-        <ColumnDefinition Width="*" MinWidth="360" />
+        <ColumnDefinition Width="*" />
       </Grid.ColumnDefinitions>
 
       <Grid Grid.Column="0"
@@ -91,17 +90,16 @@
       <ScrollViewer Grid.Column="1"
                     VerticalScrollBarVisibility="Auto"
                     HorizontalScrollBarVisibility="Disabled"
-                    Padding="0">
-        <ItemsControl x:Name="LegendItems"
-                      Margin="0,0,20,0">
+                    Padding="0,0,14,0">
+        <ItemsControl x:Name="LegendItems">
           <ItemsControl.ItemTemplate>
             <DataTemplate>
-              <Grid Margin="0,4" ColumnSpacing="8">
+              <Grid Margin="0,3" ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="14" />    <!-- swatch -->
-                  <ColumnDefinition Width="*" />     <!-- name -->
-                  <ColumnDefinition Width="72" />    <!-- size -->
-                  <ColumnDefinition Width="46" />    <!-- percent -->
+                  <ColumnDefinition Width="14" />
+                  <ColumnDefinition Width="*" />
+                  <ColumnDefinition Width="Auto" />
+                  <ColumnDefinition Width="44" />
                 </Grid.ColumnDefinitions>
                 <Rectangle Grid.Column="0" Width="12" Height="12"
                            RadiusX="2" RadiusY="2"
@@ -119,11 +117,10 @@
                            Text="{Binding SizeText}"
                            FontSize="12"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           TextAlignment="Right"
                            VerticalAlignment="Center" />
                 <TextBlock Grid.Column="3"
                            Text="{Binding PercentText}"
-                           FontSize="11"
+                           FontSize="12"
                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                            TextAlignment="Right"
                            VerticalAlignment="Center" />
