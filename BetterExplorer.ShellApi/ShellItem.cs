@@ -147,6 +147,19 @@ public sealed class ShellItem : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    /// <summary>
+    /// Silently clears image references without raising <see cref="PropertyChanged"/>.
+    /// Call this just before the owning collection is cleared so WinUI containers
+    /// are not asked to re-render items that are about to be thrown away.
+    /// </summary>
+    public void ClearReferences() {
+        _icon = null;
+        _overlayIcon = null;
+        _isSelected = false;
+        _isCut = false;
+        _hasRealThumbnail = false;
+    }
+
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }

@@ -26,8 +26,9 @@ public sealed class RangeObservableCollection<T> : ObservableCollection<T>
     public void AddRange(IEnumerable<T> items)
     {
         _suppressNotification = true;
-        foreach (var item in items)
-            Items.Add(item);
+        // Cast to the concrete List<T> backing store to use its native AddRange,
+        // which copies in bulk rather than calling virtual Add for every element.
+        ((System.Collections.Generic.List<T>)Items).AddRange(items);
         _suppressNotification = false;
         OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
@@ -39,8 +40,7 @@ public sealed class RangeObservableCollection<T> : ObservableCollection<T>
     {
         _suppressNotification = true;
         Items.Clear();
-        foreach (var item in items)
-            Items.Add(item);
+        ((System.Collections.Generic.List<T>)Items).AddRange(items);
         _suppressNotification = false;
         OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }

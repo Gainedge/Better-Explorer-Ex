@@ -36,6 +36,15 @@ public static class NativeShell {
   private static readonly Guid FOLDERID_Links =
       new("bfb9d5e0-c6a9-404c-b2b2-ae6db6af4968");
 
+  // ── Global shell-call concurrency cap ────────────────────────────────────
+  // Every blocking COM call into IShellItemImageFactory.GetImage() and
+  // SHGetFileInfo() can take 100ms–1000ms (e.g. ResizeToFit on slow drives).
+  // Without a cap, N rapid navigations leave N×8 thread-pool threads blocked
+  // in COM, starving the pool and causing the progressive-slowdown pattern.
+  // 8 slots matches ThumbConcurrency; stale workers wait here instead of
+  // monopolising thread-pool threads.
+  private static readonly SemaphoreSlim _shellCallSem = new(8, 8);
+
   // ── SIIGBF flags ──────────────────────────────────────────────────────────
 
   [Flags]
@@ -1189,15 +1198,23 @@ public static class NativeShell {
   /// </summary>
   public static async Task<(byte[]? Pixels, int W, int H, int Hr)> GetShellImagePixelsAsync(
       string path, uint size, SIIGBF flags, CancellationToken ct) {
-    return await Task.Run(() => {
-      int rc = TryGetShellHBitmapHr(path, size, flags, out var hbm);
-      if (hbm == IntPtr.Zero)
-        return ((byte[]?)null, 0, 0, rc);
-      try {
-        var (px, pw, ph) = HBitmapToPixels(hbm);
-        return (px, pw, ph, rc);
-      } finally { DeleteObject(hbm); }
-    }, ct).ConfigureAwait(false);
+    // Acquire the global cap BEFORE entering Task.Run so a cancelled token
+    // skips the wait entirely — stale workers never block a thread-pool thread.
+    try { await _shellCallSem.WaitAsync(ct).ConfigureAwait(false); }
+    catch (OperationCanceledException) { return (null, 0, 0, unchecked((int)0x80004004)); }
+    try {
+      return await Task.Run(() => {
+        if (ct.IsCancellationRequested)
+          return ((byte[]?)null, 0, 0, unchecked((int)0x80004004));
+        int rc = TryGetShellHBitmapHr(path, size, flags, out var hbm);
+        if (hbm == IntPtr.Zero)
+          return ((byte[]?)null, 0, 0, rc);
+        try {
+          var (px, pw, ph) = HBitmapToPixels(hbm);
+          return (px, pw, ph, rc);
+        } finally { DeleteObject(hbm); }
+      }, ct).ConfigureAwait(false);
+    } finally { _shellCallSem.Release(); }
   }
 
   public static async Task<(WriteableBitmap? Bmp, int Hr)> GetShellImageResultAsync(
@@ -1220,7 +1237,14 @@ public static class NativeShell {
   /// </summary>
   public static async Task<(byte[]? Pixels, int W, int H, int Slot)> GetOverlayIconPixelsAsync(
       string path, CancellationToken ct) {
-    return await Task.Run(() => GetOverlayIconPixelsCore(path), ct).ConfigureAwait(false);
+    try { await _shellCallSem.WaitAsync(ct).ConfigureAwait(false); }
+    catch (OperationCanceledException) { return (null, 0, 0, 0); }
+    try {
+      return await Task.Run(() => {
+        if (ct.IsCancellationRequested) return (null, 0, 0, 0);
+        return GetOverlayIconPixelsCore(path);
+      }, ct).ConfigureAwait(false);
+    } finally { _shellCallSem.Release(); }
   }
 
   private static (byte[]? Pixels, int W, int H, int Slot) GetOverlayIconPixelsCore(string path) {
@@ -1474,7 +1498,16 @@ public static class NativeShell {
             var path = paths[i];
             if (string.IsNullOrEmpty(path))
               return;
-            results[i] = TryGetCachedPixels(path, size);
+            // Acquire the global shell-call cap synchronously.
+            // Cache-only probes are fast but still block on COM; gating them
+            // prevents stale batch workers from flooding the thread pool.
+            if (!_shellCallSem.Wait(0)) {
+              // If all slots are busy, wait with cancellation support.
+              try { _shellCallSem.Wait(ct); }
+              catch (OperationCanceledException) { return; }
+            }
+            try { results[i] = TryGetCachedPixels(path, size); }
+            finally { _shellCallSem.Release(); }
           });
     } catch (OperationCanceledException) {
       // Cancellation is expected; return whatever was computed so far.
