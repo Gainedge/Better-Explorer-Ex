@@ -8,7 +8,9 @@ namespace BetterExplorer.ShellApi;
 /// </summary>
 public sealed class DetailsColumn : INotifyPropertyChanged
 {
-    private double _width;
+    // internal so DetailsColumnSettings.ApplyColumns can bulk-set widths without
+    // firing PropertyChanged for each column during a batch update.
+    internal double _width;
     private string _sortIndicator = string.Empty;
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -34,6 +36,10 @@ public sealed class DetailsColumn : INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Width)));
         }
     }
+
+    /// <summary>Fires PropertyChanged for Width after a batch backing-field update.</summary>
+    internal void RaiseWidth() =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Width)));
 
     /// <summary>Sort-direction indicator text (" ▲" / " ▼" / "").</summary>
     public string SortIndicator

@@ -78,7 +78,16 @@ public sealed class DetailsRowPanel : Panel
     private void OnColumnsCollectionChanged(object? sender,
         System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
-        // Re-subscribe property change listeners for new columns.
+        // Move: column objects are the same, just reordered. MeasureOverride reads
+        // the Columns list in order, so a single InvalidateMeasure() is sufficient.
+        // No subscription changes needed — the same objects are still in the list.
+        if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Move)
+        {
+            InvalidateMeasure();
+            return;
+        }
+
+        // For Add events subscribe; for Remove events unsubscribe width listeners.
         if (e.NewItems != null)
             foreach (DetailsColumn col in e.NewItems)
                 col.PropertyChanged += OnColumnPropertyChanged;

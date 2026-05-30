@@ -100,16 +100,26 @@ public sealed partial class DetailsRowControl : UserControl
 
     private void OnColumnsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        // Subscribe/unsubscribe width listeners for added/removed columns.
-        if (e.OldItems != null)
-            foreach (DetailsColumn col in e.OldItems)
-                col.PropertyChanged -= OnColumnPropertyChanged;
+        // Move events: the same column objects just changed position.
+        // DetailsRowPanel.MeasureOverride reads Columns in order, so
+        // InvalidateMeasure() is enough — no subscription changes, no cell rebuild.
+        if (e.Action == NotifyCollectionChangedAction.Move)
+        {
+            _panel?.InvalidateMeasure();
+            return;
+        }
 
+        // Add: subscribe width listener for new columns.
         if (e.NewItems != null)
             foreach (DetailsColumn col in e.NewItems)
                 col.PropertyChanged += OnColumnPropertyChanged;
 
-        // Column list changed — full rebuild needed.
+        // Remove: unsubscribe. Guard against duplicate removal (shouldn't happen, but safe).
+        if (e.OldItems != null)
+            foreach (DetailsColumn col in e.OldItems)
+                col.PropertyChanged -= OnColumnPropertyChanged;
+
+        // Reset / Add / Remove all require a full cell rebuild.
         RebuildCells();
     }
 

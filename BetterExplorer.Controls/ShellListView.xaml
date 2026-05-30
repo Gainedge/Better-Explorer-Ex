@@ -440,7 +440,6 @@
 
               <ContentPresenter
                                 x:Name="ContentPresenter"
-                                ContentTransitions="{TemplateBinding ContentTransitions}"
                                 ContentTemplate="{TemplateBinding ContentTemplate}"
                                 Content="{TemplateBinding Content}"
                                 Padding="4"
@@ -590,6 +589,12 @@
                       Drop="OnShellViewDrop"
                       KeyDown="OnShellViewKeyDown"
                       Padding="8">
+        <ListView.Transitions>
+          <TransitionCollection />
+        </ListView.Transitions>
+        <ListView.ItemContainerTransitions>
+          <TransitionCollection />
+        </ListView.ItemContainerTransitions>
         <ListView.GroupStyle>
           <GroupStyle HidesIfEmpty="False">
             <GroupStyle.HeaderTemplate>

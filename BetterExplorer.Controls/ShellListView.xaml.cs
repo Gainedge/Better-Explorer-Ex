@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -9,7 +9,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 using BetterExplorer.ShellApi;
 using BetterExplorer.ShellApi.Interop;
@@ -222,21 +221,16 @@ public sealed partial class ShellListView : UserControl {
   private const int CloudThumbRetryMax = 16;   // ~40 s total with progressive back-off
   private const int CloudThumbRetryBaseMs = 500;  // delay = min(retry * 500, 4000)
   private const int CloudThumbRetryMaxMs = 4000;
-  private Channel<(ShellItem Item, uint Size, int Retry)> _thumbChannel = CreateChannel();
+  private BlockingCollection<(ShellItem Item, uint Size, int Retry)> _thumbQueue =
+      new BlockingCollection<(ShellItem, uint, int)>(512);
 
-  // ── Overlay icon channel ─────────────────────────────────────────────────
-  // Separate lightweight channel for shell overlay icons (shortcut arrow, OneDrive sync,
+  // ── Overlay icon queue ────────────────────────────────────────────────────
+  // Separate lightweight queue for shell overlay icons (shortcut arrow, OneDrive sync,
   // Git status from TortoiseGit, etc.).  Workers are cancelled together with the
   // thumbnail workers so overlays don't outlive the current navigation.
-  private Channel<ShellItem> _overlayChannel = CreateOverlayChannel();
+  private BlockingCollection<ShellItem> _overlayQueue =
+      new BlockingCollection<ShellItem>(512);
   private const int OverlayConcurrency = 2;
-
-  private static Channel<ShellItem> CreateOverlayChannel() =>
-      Channel.CreateBounded<ShellItem>(new BoundedChannelOptions(512) {
-        FullMode = BoundedChannelFullMode.DropOldest,
-        SingleReader = false,
-        SingleWriter = false
-      });
 
   // Per-overlay bitmap cache. The pixel array from NativeShell._overlayPixelCache is reused
   // by reference for the same overlay slot, so we key on object identity to deduplicate bitmaps.
@@ -268,13 +262,6 @@ public sealed partial class ShellListView : UserControl {
         ".exe", ".dll", ".lnk", ".ico", ".cpl"
     };
 
-  private static Channel<(ShellItem, uint, int)> CreateChannel() =>
-      Channel.CreateBounded<(ShellItem, uint, int)>(new BoundedChannelOptions(512) {
-        FullMode = BoundedChannelFullMode.DropOldest,
-        SingleReader = false,
-        SingleWriter = false
-      });
-
   // ── Details column resize state ──────────────────────────────────────────
 
   private DetailsColumnSettings DetailsColumns =>
@@ -296,6 +283,8 @@ public sealed partial class ShellListView : UserControl {
   private bool _sortAscending = true;
   private string _groupColumn = string.Empty;  // empty = no grouping
   private ShellViewMode _currentMode = ShellViewMode.Details;
+  // Cached once on first use — avoids allocating 8 Setter objects on every navigation.
+  private Style? _cachedListRowStyle;
   // DPI scale factor read from XamlRoot.RasterizationScale (1.0 = 96 dpi, 1.5 = 144 dpi, etc.).
   // Used to request shell bitmaps at physical pixels so icons are never upscaled.
   private double _dpiScale = 1.0;
@@ -343,6 +332,15 @@ public sealed partial class ShellListView : UserControl {
     _dpiScale = XamlRoot?.RasterizationScale ?? 1.0;
     if (XamlRoot is not null)
       XamlRoot.Changed += OnXamlRootChanged;
+
+    // WinUI 3 ListView default style includes ItemContainerTransitions (entrance / add /
+    // delete animations). Every CollectionChanged.Reset with N items creates N compositor
+    // animation objects that are disposed asynchronously on the render thread.  After many
+    // navigations the accumulated clean-up work causes progressive slowdown.
+    // Clearing both collections here (and in XAML) eliminates all per-item animation
+    // allocation completely — no animation means no compositor object per container.
+    ShellView.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
+    ShellView.Transitions              = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
     // Only fall back to C:\ if no navigation has been requested yet (neither completed
     // nor pending). If Navigate/NavigateToKnownFolder was already called before the
     // control finished loading, the async LoadDirectory is already in flight — don't
@@ -968,7 +966,7 @@ public sealed partial class ShellListView : UserControl {
 
           // Push through the worker queue with priority so the thumbnail
           // is re-fetched via ResizeToFit (fresh read, not image-list cache).
-          _thumbChannel.Writer.TryWrite((item, size, 0));
+          _thumbQueue.TryAdd((item, size, 0));
           return;
       }
 
@@ -1001,7 +999,7 @@ public sealed partial class ShellListView : UserControl {
 
       // Fallback: if the shell returned nothing (e.g. icon extraction failed),
       // push the item onto the normal worker queue.
-      _thumbChannel.Writer.TryWrite((item, size, 0));
+      _thumbQueue.TryAdd((item, size, 0));
   }
 
   /// <summary>
@@ -1222,6 +1220,8 @@ public sealed partial class ShellListView : UserControl {
     if (string.Equals(virtualPath, CurrentPath, StringComparison.OrdinalIgnoreCase))
       return;
 
+    var diagKf = new NavDiag(virtualPath);
+
     // Cancel any active search so its results don't bleed into the new folder.
     if (_isSearchActive) {
       _isSearchActive = false;
@@ -1280,6 +1280,8 @@ public sealed partial class ShellListView : UserControl {
     } catch (OperationCanceledException) { return; } catch { }
     if (IsStale()) return;
 
+    diagKf.Mark("Cleared+Settings+Enum");
+
     var items = enumTask.Result;
 
     if (items.Count > 0) {
@@ -1303,18 +1305,33 @@ public sealed partial class ShellListView : UserControl {
       } catch (OperationCanceledException) { return; }
       if (IsStale()) return;
 
-      // ── Warm type-icon cache and preload viewport thumbnails concurrently ───
+      diagKf.Mark("Sort+PreStamp");
+
+      // ── Show items immediately ────────────────────────────────────────────
+      Items.AddRange(items);
+      ApplyGrouping();
+      CurrentPath = virtualPath;
+      _pendingNavigatePath = null;
+      BusyChanged?.Invoke(this, false);
+      PathChanged?.Invoke(this, CurrentPath);
+      CanGoBack = _backStack.Count > 0;
+      CanGoForward = _forwardStack.Count > 0;
+      ApplyPendingSelection();
+      UpdateStatusBar(0);
+      StartFolderWatcher(virtualPath);
+
+      diagKf.Mark("AddRange+UI");
+
       int viewportCount = Math.Min(items.Count, EstimateViewportItemCount(ViewMode));
       var viewportSlice = viewportCount == items.Count ? items : items.GetRange(0, viewportCount);
       try {
         await WarmAndPreloadParallelAsync(items, viewportSlice, size, ct);
-      } catch (OperationCanceledException) { return; }
-      if (IsStale()) return;
-
-      Items.AddRange(items);
+      } catch (OperationCanceledException) { }
+      diagKf.Finish("WarmAndPreload");
+      return;
     }
 
-    // Update CurrentPath and fire PathChanged regardless of whether items were found.
+    // No items found — still update path/state.
     ApplyGrouping();
     CurrentPath = virtualPath;
     _pendingNavigatePath = null;
@@ -1323,9 +1340,9 @@ public sealed partial class ShellListView : UserControl {
     CanGoBack = _backStack.Count > 0;
     CanGoForward = _forwardStack.Count > 0;
     ApplyPendingSelection();
-    UpdateStatusBar();
-    // Watch the virtual folder for shell change notifications (drive add/remove, etc.).
+    UpdateStatusBar(0);
     StartFolderWatcher(virtualPath);
+    diagKf.Finish("(empty folder)");
   }
 
   public void ClearRAM() {
@@ -1355,6 +1372,8 @@ public sealed partial class ShellListView : UserControl {
       CancelAndDisposeAsync(oldLdSearchCts);
       SearchQueryChanged?.Invoke(this, null);
     }
+
+    var diag = new NavDiag(path);
 
     // Cancel any previous navigation and start a fresh CTS first so the tasks
     // we're about to launch are governed by the new token.
@@ -1392,6 +1411,8 @@ public sealed partial class ShellListView : UserControl {
     foreach (var it in Items) it.ClearReferences();
     Items.Clear();
 
+    diag.Mark("Cleared+CancelOld");
+
     // ── Remaining synchronous cleanup (runs while the tasks above are in-flight) ─
     // Stop watching the outgoing folder immediately so stale events from the
     // previous directory do not race with the new navigation.
@@ -1423,6 +1444,8 @@ public sealed partial class ShellListView : UserControl {
       } catch (OperationCanceledException) { return; } catch { }
       if (IsStale()) return;
 
+      diag.Mark("Settings+Enum (virtual)");
+
       // Read size AFTER settings have been applied — ApplyFolderSettings may have changed ViewMode.
       uint kfSize = PhysicalSize(ThumbnailSizeForMode(ViewMode));
       var kfIconSnap = new Dictionary<(string Ext, uint Size), WriteableBitmap>(_typeIconCache);
@@ -1444,14 +1467,29 @@ public sealed partial class ShellListView : UserControl {
       } catch (OperationCanceledException) { return; }
       if (IsStale()) return;
 
-      // ── Warm type-icon cache and preload viewport thumbnails concurrently ───
-      int kfViewport = Math.Min(kfItems.Count, EstimateViewportItemCount(ViewMode));
-      var kfSlice = kfViewport == kfItems.Count ? kfItems : kfItems.GetRange(0, kfViewport);
+      diag.Mark("Sort+PreStamp (virtual)");
+
+      // ── Warm type-icon cache BEFORE showing items (virtual path) ──────────
       try {
-        await WarmAndPreloadParallelAsync(kfItems, kfSlice, kfSize, ct);
+        await WarmTypeIconCacheAsync(kfItems, kfSize, ct);
       } catch (OperationCanceledException) { return; }
       if (IsStale()) return;
+      ApplyCachedIcons(kfItems, kfSize);
 
+      diag.Mark("PreWarm (virtual)");
+
+      // ── Pre-stamp any cached thumbnails (virtual path) ────────────────────
+      if (!IsIconOnlyMode(ViewMode)) {
+        foreach (var item in kfItems) {
+          if (item.HasRealThumbnail) continue;
+          if (_thumbCache.TryGetValue((item.FullPath, kfSize), out var cached)) {
+            item.Icon = cached;
+            item.HasRealThumbnail = true;
+          }
+        }
+      }
+
+      // ── Show items immediately, then warm caches in the background ────────
       Items.AddRange(kfItems);
       ApplyGrouping();
       CurrentPath = path;
@@ -1462,8 +1500,18 @@ public sealed partial class ShellListView : UserControl {
       PathChanged?.Invoke(this, path);
       UpdateSortIndicators();
       ApplyPendingSelection();
+      UpdateStatusBar(0);
 
       StartFolderWatcher(path);
+
+      diag.Mark("AddRange+UI (virtual)");
+
+      int kfViewport = Math.Min(kfItems.Count, EstimateViewportItemCount(ViewMode));
+      var kfSlice = kfViewport == kfItems.Count ? kfItems : kfItems.GetRange(0, kfViewport);
+      try {
+        await WarmAndPreloadParallelAsync(kfItems, kfSlice, kfSize, ct);
+      } catch (OperationCanceledException) { }
+      diag.Finish("WarmAndPreload (virtual)");
       return;
     }
 
@@ -1477,14 +1525,14 @@ public sealed partial class ShellListView : UserControl {
 
     if (IsStale()) return;
 
+    diag.Mark("Settings+Enum");
+
     // Read size AFTER settings have been applied — ApplyFolderSettings may have changed ViewMode.
     uint size = PhysicalSize(ThumbnailSizeForMode(ViewMode));
 
     // Snapshot the caches before going off-thread (they are UI-thread-only dictionaries).
     // This lets the sort task stamp already-cached icons without touching UI-thread state.
     var iconCacheSnap  = new Dictionary<(string Ext, uint Size), WriteableBitmap>(_typeIconCache);
-    var perFileSnap    = new HashSet<string>(_perFileIconExts, StringComparer.OrdinalIgnoreCase);
-    var thumbExtSnap   = new HashSet<string>(_thumbnailExts,  StringComparer.OrdinalIgnoreCase);
 
     // Sort + stamp off-thread — pure O(n log n) comparison + O(n) cache lookups, no UI requirements.
     List<ShellItem> allItems;
@@ -1509,15 +1557,37 @@ public sealed partial class ShellListView : UserControl {
     } catch (OperationCanceledException) { return; }
     if (IsStale()) return;
 
-    // ── Warm type-icon cache and preload viewport thumbnails concurrently ─────
-    int viewportCount = Math.Min(allItems.Count, EstimateViewportItemCount(ViewMode));
-    var viewportSlice = viewportCount == allItems.Count ? allItems : allItems.GetRange(0, viewportCount);
+    diag.Mark("Sort+PreStamp");
+
+    // ── Warm type-icon cache BEFORE showing items ─────────────────────────────
+    // On the first navigation _typeIconCache is empty, so the pre-stamp above
+    // produced nothing and items would briefly show fallback icons. By warming
+    // here (before AddRange) every item already has its icon on the first frame.
+    // On subsequent navigations the cache is already warm, so this is a no-op.
     try {
-      await WarmAndPreloadParallelAsync(allItems, viewportSlice, size, ct);
+      await WarmTypeIconCacheAsync(allItems, size, ct);
     } catch (OperationCanceledException) { return; }
     if (IsStale()) return;
+    ApplyCachedIcons(allItems, size);
 
-    // ── Show ALL items at once ────────────────────────────────────────────────
+    diag.Mark("PreWarm");
+
+    // ── Pre-stamp any cached thumbnails before showing items ─────────────────
+    // _thumbCache persists across navigations. Items revisited will already have
+    // their real thumbnail in cache — stamp them now so they appear immediately.
+    if (!IsIconOnlyMode(ViewMode)) {
+      foreach (var item in allItems) {
+        if (item.HasRealThumbnail) continue;
+        if (_thumbCache.TryGetValue((item.FullPath, size), out var cached)) {
+          item.Icon = cached;
+          item.HasRealThumbnail = true;
+        }
+      }
+    }
+
+    diag.Mark("PreStampThumbs");
+
+    // ── Show ALL items at once BEFORE warming so the list appears immediately ──
     Items.AddRange(allItems);
     ApplyGrouping();
     CurrentPath = path;
@@ -1528,10 +1598,21 @@ public sealed partial class ShellListView : UserControl {
     PathChanged?.Invoke(this, path);
     UpdateSortIndicators();
     ApplyPendingSelection();
-    UpdateStatusBar();
+    UpdateStatusBar(0);
 
     // Watch the folder for live filesystem changes now that it is fully loaded.
     StartFolderWatcher(path);
+
+    diag.Mark("AddRange+UI");
+
+    // ── Warm type-icon cache and preload viewport thumbnails in the background ─
+    // Items are already visible — this just stamps better icons onto them.
+    int viewportCount = Math.Min(allItems.Count, EstimateViewportItemCount(ViewMode));
+    var viewportSlice = viewportCount == allItems.Count ? allItems : allItems.GetRange(0, viewportCount);
+    try {
+      await WarmAndPreloadParallelAsync(allItems, viewportSlice, size, ct);
+    } catch (OperationCanceledException) { }
+    diag.Finish("WarmAndPreload");
     ClearRAM();
   }
 
@@ -1779,7 +1860,7 @@ public sealed partial class ShellListView : UserControl {
         continue;
       if (ShellView.ContainerFromItem(item) == null)
         continue;
-      _thumbChannel.Writer.TryWrite((item, size, 0));
+      _thumbQueue.TryAdd((item, size, 0));
     }
   }
 
@@ -1807,7 +1888,7 @@ public sealed partial class ShellListView : UserControl {
                         (item.IsFolder || _thumbnailExts.Contains(ext));
       if (!canUpgrade && !_perFileIconExts.Contains(ext))
         continue;
-      _thumbChannel.Writer.TryWrite((item, size, 0));
+      _thumbQueue.TryAdd((item, size, 0));
     }
   }
 
@@ -1886,6 +1967,8 @@ public sealed partial class ShellListView : UserControl {
   private async Task WarmAndPreloadParallelAsync(
       List<ShellItem> allItems, List<ShellItem> viewportSlice, uint size, CancellationToken ct) {
 
+    var wd = new NavDiag($"Warm size={size} all={allItems.Count} vp={viewportSlice.Count}");
+
     // ── Single-pass prep (UI thread, no I/O) ─────────────────────────────────
     // Build icon-warm and thumb-preload work packages in one iteration of allItems.
     var warmIndex  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -1928,6 +2011,8 @@ public sealed partial class ShellListView : UserControl {
     bool needThumbPreload = doPreload && thumbPaths != null &&
                             Array.Exists(thumbPaths, p => p != null);
 
+    wd.Mark($"Prep (warm={warmKeys.Count} preload={needThumbPreload})");
+
     if (!needIconWarm && !needThumbPreload)
       return;
     if (ct.IsCancellationRequested) return;
@@ -1958,6 +2043,8 @@ public sealed partial class ShellListView : UserControl {
     try {
       await Task.WhenAll(iconTask, thumbTask).ConfigureAwait(true);
     } catch (OperationCanceledException) { return; }
+
+    wd.Mark("OffThread (icon+thumb)");
 
     if (ct.IsCancellationRequested) return;
 
@@ -1995,6 +2082,8 @@ public sealed partial class ShellListView : UserControl {
         viewportSlice[i].HasRealThumbnail = true;
       }
     }
+
+    wd.Finish("UI stamp");
   }
 
   private static WriteableBitmap? FindAnyCachedIcon(string ext) =>
@@ -2051,7 +2140,7 @@ public sealed partial class ShellListView : UserControl {
     SelectionChanged?.Invoke(this, EventArgs.Empty);
   }
 
-  private void UpdateStatusBar() {
+  private void UpdateStatusBar(int selectedCount = -1) {
     // Snapshot counts on the calling thread (always UI thread), then post the
     // actual TextBlock writes at Low priority so the list render frame is not
     // delayed by this housekeeping work.
@@ -2059,7 +2148,9 @@ public sealed partial class ShellListView : UserControl {
     // because the ListView's SelectedItems collection may not yet reflect the
     // current change when called from inside the SelectionChanged handler.
     int total = Items.Count;
-    int selected = Items.Count(i => i.IsSelected);
+    // When called after navigation, the caller knows selection is 0 and passes 0.
+    // Otherwise (-1) fall back to the full O(n) count so selection-driven calls remain correct.
+    int selected = selectedCount >= 0 ? selectedCount : Items.Count(i => i.IsSelected);
 
     DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
       StatusTotalText.Text = total == 1 ? "1 item" : $"{total} items";
@@ -2272,7 +2363,7 @@ public sealed partial class ShellListView : UserControl {
     // Enqueue before the HasRealThumbnail early-return so folders whose thumbnails
     // were pre-populated by PreloadCachedThumbnailsAsync still get their overlays.
     if (item.OverlayIcon is null && !item.FullPath.StartsWith("::", StringComparison.Ordinal))
-      _overlayChannel.Writer.TryWrite(item);
+      _overlayQueue.TryAdd(item);
 
     // Phase 1 — enqueue thumbnail upgrade if needed. Zero blocking work here.
     if (item.HasRealThumbnail)
@@ -2286,7 +2377,7 @@ public sealed partial class ShellListView : UserControl {
     bool isPerFile = _perFileIconExts.Contains(ext);
 
     if (canUpgrade || isPerFile || item.Icon == null)
-      _thumbChannel.Writer.TryWrite((item, size, 0));
+      _thumbQueue.TryAdd((item, size, 0));
   }
 
   // ── Thumbnail worker ──────────────────────────────────────────────────────
@@ -2294,46 +2385,61 @@ public sealed partial class ShellListView : UserControl {
   private void RestartThumbnailWorker() {
     var oldThumbCts = _thumbCts;
     _thumbCts = new CancellationTokenSource();
-    // Replace channels BEFORE cancelling — retry continuations capture the writer at
-    // schedule time so they write to the dead old channel, not the new one.
-    _thumbChannel = CreateChannel();
-    _overlayChannel = CreateOverlayChannel();
-    // Cancel() MUST run synchronously on the UI thread so that any Low-priority
-    // DispatcherQueue callbacks that were already enqueued by the old workers see
-    // ct.IsCancellationRequested == true and exit BEFORE calling PixelsToBitmapSync.
-    // If Cancel() is deferred, those callbacks run with ct still false and create
-    // real WriteableBitmaps for dead items — this is the progressive-slowdown root cause.
-    // Dispose() alone is deferred because it can block on finalizer/COM cleanup.
+
+    // Dispose old queues — this unblocks any thread sitting in Take(ct) immediately,
+    // because CompleteAdding causes the blocking call to throw InvalidOperationException
+    // rather than waiting on the old CTS.  No cancellation registrations accumulate.
+    var oldThumbQueue   = _thumbQueue;
+    var oldOverlayQueue = _overlayQueue;
+    _thumbQueue   = new BlockingCollection<(ShellItem, uint, int)>(512);
+    _overlayQueue = new BlockingCollection<ShellItem>(512);
+
+    // Cancel BEFORE completing addition so any thread that races past the Take check
+    // will still see ct.IsCancellationRequested == true.
     oldThumbCts.Cancel();
-    _ = Task.Run(() => { try { oldThumbCts.Dispose(); } catch { } });
+    // CompleteAdding wakes threads blocked in Take; they exit cleanly on the next loop.
+    oldThumbQueue.CompleteAdding();
+    oldOverlayQueue.CompleteAdding();
+    _ = Task.Run(() => {
+      try { oldThumbCts.Dispose(); }     catch { }
+      try { oldThumbQueue.Dispose(); }   catch { }
+      try { oldOverlayQueue.Dispose(); } catch { }
+    });
 
-    var reader = _thumbChannel.Reader;
-    var ct = _thumbCts.Token;
-    for (var i = 0; i < ThumbConcurrency; i++)
-      _ = ProcessThumbnailQueueAsync(reader, ct);
+    var thumbQueue   = _thumbQueue;
+    var overlayQueue = _overlayQueue;
+    var ct           = _thumbCts.Token;
+    var dq           = DispatcherQueue;
 
-    var overlayReader = _overlayChannel.Reader;
-    for (var i = 0; i < OverlayConcurrency; i++)
-      _ = ProcessOverlayQueueAsync(overlayReader, ct);
+    for (var i = 0; i < ThumbConcurrency; i++) {
+      var t = new Thread(() => ProcessThumbnailQueue(thumbQueue, dq, ct)) {
+        IsBackground = true,
+        Name         = $"ThumbWorker-{i}"
+      };
+      t.Start();
+    }
+    for (var i = 0; i < OverlayConcurrency; i++) {
+      var t = new Thread(() => ProcessOverlayQueue(overlayQueue, dq, ct)) {
+        IsBackground = true,
+        Name         = $"OverlayWorker-{i}"
+      };
+      t.Start();
+    }
   }
 
-  private async Task ProcessThumbnailQueueAsync(
-      ChannelReader<(ShellItem Item, uint Size, int Retry)> reader, CancellationToken ct) {
-    // All pixel/COM work runs off the UI thread (ConfigureAwait(false)).
+  private void ProcessThumbnailQueue(
+      BlockingCollection<(ShellItem Item, uint Size, int Retry)> queue,
+      DispatcherQueue dq, CancellationToken ct) {
+    // All pixel/COM work runs on this background thread.
     // Only the final WriteableBitmap creation + item.Icon assignment is
-    // dispatched back to the UI thread at Low priority, so it never preempts
-    // Phase-1 callbacks or other layout work.
-    var dq = DispatcherQueue;
+    // dispatched back to the UI thread at Low priority.
     try {
-      await foreach (var (item, size, retry) in reader.ReadAllAsync(ct).ConfigureAwait(false)) {
-        if (ct.IsCancellationRequested)
-          break;
-        if (item.HasRealThumbnail)
-          continue;
+      foreach (var (item, size, retry) in queue.GetConsumingEnumerable(ct)) {
+        if (ct.IsCancellationRequested) break;
+        if (item.HasRealThumbnail) continue;
 
         var ext = TypeIconKey(item);
         bool isPerItemFolder = IsPerItemFolder(item);
-        // Per-item folders (drives, virtual-path) must use IconOnly — never ResizeToFit.
         bool canUpgrade = !isPerItemFolder && (item.IsFolder || _thumbnailExts.Contains(ext));
         bool isPerFile = _perFileIconExts.Contains(ext);
 
@@ -2343,89 +2449,70 @@ public sealed partial class ShellListView : UserControl {
             byte[]? px = null;
             int w = 0, h = 0;
             if (isPerFile || isPerItemFolder || !_typeIconCache.ContainsKey((ext, size))) {
-              (px, w, h, _) = await NativeShell.GetShellImagePixelsAsync(
-                  item.FullPath, size, NativeShell.SIIGBF.IconOnly, ct).ConfigureAwait(false);
+              (px, w, h, _) = NativeShell.GetShellImagePixelsSync(
+                  item.FullPath, size, NativeShell.SIIGBF.IconOnly, ct);
             }
-            if (ct.IsCancellationRequested)
-              continue;
+            if (ct.IsCancellationRequested) continue;
             if (px != null) {
-              var capPx = px;
-              var capW = w;
-              var capH = h;
-              var capExt = ext;
-              var capSize = size;
-              dq.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
-                if (ct.IsCancellationRequested)
-                  return;
+              var capPx = px; var capW = w; var capH = h;
+              var capExt = ext; var capSize = size;
+              dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
+                if (ct.IsCancellationRequested) return;
                 var wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
-                if (wb == null)
-                  return;
-                // isPerFile (.exe etc.) icons are never cached; per-item folders
-                // ARE cached but under their unique per-item key.
-                if (!isPerFile)
-                  _typeIconCache[(capExt, capSize)] = wb;
-                if (!item.HasRealThumbnail)
-                  item.Icon = wb;
+                if (wb == null) return;
+                if (!isPerFile) _typeIconCache[(capExt, capSize)] = wb;
+                if (!item.HasRealThumbnail) item.Icon = wb;
               });
             } else if (_typeIconCache.TryGetValue((ext, size), out var cached)) {
               var capCached = cached;
-              dq.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
-                if (!item.HasRealThumbnail)
-                  item.Icon = capCached;
+              dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
+                if (!item.HasRealThumbnail) item.Icon = capCached;
               });
             }
             continue;
           }
 
-          // ── Thumbnail-eligible items ─────────────────────────────────────
-          // Fetch pixels entirely off-thread.
-          byte[]? pixels;
-          int pw, ph;
-          bool isPending;
+          // ── Thumbnail-eligible items ──────────────────────────────────────
+          byte[]? pixels; int pw, ph; bool isPending;
 
           if (NativeShell.IsCloudOnlyItem(item.FullPath)) {
-            // Don't block this worker slot: fire an independent task governed by its
-            // own high-concurrency semaphore so all 8 workers stay free for other items.
+            // Fire an independent async task (Storage API needs async) governed
+            // by its own high-concurrency semaphore.
             _ = LoadCloudThumbnailAsync(item, size, retry, dq, ct);
             continue;
           } else {
             int hr;
-            (pixels, pw, ph, hr) = await NativeShell.GetShellImagePixelsAsync(
-                item.FullPath, size, NativeShell.SIIGBF.ResizeToFit, ct).ConfigureAwait(false);
+            (pixels, pw, ph, hr) = NativeShell.GetShellImagePixelsSync(
+                item.FullPath, size, NativeShell.SIIGBF.ResizeToFit, ct);
             isPending = (hr == NativeShell.E_PENDING);
           }
 
-          if (ct.IsCancellationRequested)
-            continue;
+          if (ct.IsCancellationRequested) continue;
 
           if (pixels != null) {
-            var capPx = pixels;
-            var capW = pw;
-            var capH = ph;
-            dq.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
-              if (ct.IsCancellationRequested)
-                return;
+            var capPx = pixels; var capW = pw; var capH = ph;
+            dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
+              if (ct.IsCancellationRequested) return;
               var wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
               if (wb != null) { item.Icon = wb; item.HasRealThumbnail = true; }
             });
           } else if (isPending || pixels == null) {
             if (retry < CloudThumbRetryMax) {
               int delayMs = Math.Min((retry + 1) * CloudThumbRetryBaseMs, CloudThumbRetryMaxMs);
-              // No ct in Task.Delay: passing ct registers a cancellation callback on the
-              // CTS for every pending retry item.  When Cancel() is called those callbacks
-              // run synchronously on the UI thread, causing per-navigation stall that grows
-              // with the number of pending retries.  capturedCt guards the write instead.
-              var capturedWriter = _thumbChannel.Writer;
+              var capturedQueue = _thumbQueue;
               var capturedCt = ct;
               _ = Task.Delay(delayMs).ContinueWith(_ => {
                 if (!capturedCt.IsCancellationRequested && !item.HasRealThumbnail)
-                  capturedWriter.TryWrite((item, size, retry + 1));
+                  capturedQueue.TryAdd((item, size, retry + 1));
               }, TaskScheduler.Default);
             }
           }
         } catch (OperationCanceledException) { break; } catch { }
       }
-    } catch (OperationCanceledException) { }
+    } catch (OperationCanceledException) {
+    } catch (InvalidOperationException) {
+      // CompleteAdding was called — queue exhausted, exit normally.
+    }
   }
 
   // ── Cloud thumbnail loader ────────────────────────────────────────────────
@@ -2505,12 +2592,12 @@ public sealed partial class ShellListView : UserControl {
         // ── 6. Nothing available yet — schedule a retry with back-off ─────────
         if (retry < CloudThumbRetryMax) {
           int delayMs = Math.Min((retry + 1) * CloudThumbRetryBaseMs, CloudThumbRetryMaxMs);
-          // No ct in Task.Delay — see ProcessThumbnailQueueAsync for the full rationale.
-          var capturedWriter = _thumbChannel.Writer;
+          // No ct in Task.Delay — see ProcessThumbnailQueue for the full rationale.
+          var capturedQueue = _thumbQueue;
           var capturedCt = ct;
           _ = Task.Delay(delayMs).ContinueWith(_ => {
             if (!capturedCt.IsCancellationRequested && !item.HasRealThumbnail)
-              capturedWriter.TryWrite((item, size, retry + 1));
+              capturedQueue.TryAdd((item, size, retry + 1));
           }, TaskScheduler.Default);
         }
       }
@@ -2520,29 +2607,24 @@ public sealed partial class ShellListView : UserControl {
   }
 
   // ── Overlay icon worker ───────────────────────────────────────────────────
-  // Runs independently of the thumbnail pipeline.  Queries shell overlay index
-  // via SHGetFileInfo, then extracts the overlay HICON from the system image list.
-  // All COM/GDI work stays off the UI thread; only the final bitmap assignment
+  // Runs on a background thread — no async machinery, no cancellation registrations.
+  // All COM/GDI work stays on this thread; only the final bitmap assignment
   // is dispatched at Low priority to avoid interfering with layout passes.
 
-  private async Task ProcessOverlayQueueAsync(
-      ChannelReader<ShellItem> reader, CancellationToken ct) {
-    var dq = DispatcherQueue;
+  private void ProcessOverlayQueue(
+      BlockingCollection<ShellItem> queue, DispatcherQueue dq, CancellationToken ct) {
     try {
-      await foreach (var item in reader.ReadAllAsync(ct).ConfigureAwait(false)) {
+      foreach (var item in queue.GetConsumingEnumerable(ct)) {
         if (ct.IsCancellationRequested) break;
-        if (item.OverlayIcon is not null) continue;   // already loaded
+        if (item.OverlayIcon is not null) continue;
 
         try {
-          var (px, w, h, slot) = await NativeShell.GetOverlayIconPixelsAsync(item.FullPath, ct)
-              .ConfigureAwait(false);
+          var (px, w, h, slot) = NativeShell.GetOverlayIconPixelsSync(item.FullPath, ct);
           if (ct.IsCancellationRequested) continue;
-          if (px is null || slot == 0) continue;   // no overlay for this item
+          if (px is null || slot == 0) continue;
 
-          // Materialise (or reuse) a WriteableBitmap for this overlay slot.
-          // All files sharing the same shell extension handler get the same bitmap object.
           var capPx = px; var capW = w; var capH = h; var capSlot = slot;
-          dq.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
+          dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
             if (ct.IsCancellationRequested || item.OverlayIcon is not null) return;
             WriteableBitmap? wb;
             lock (_overlayBitmapCache) {
@@ -2555,7 +2637,8 @@ public sealed partial class ShellListView : UserControl {
           });
         } catch (OperationCanceledException) { break; } catch { }
       }
-    } catch (OperationCanceledException) { }
+    } catch (OperationCanceledException) {
+    } catch (InvalidOperationException) { }
   }
 
   // ── Double-tap navigation ─────────────────────────────────────────────────
@@ -3058,6 +3141,14 @@ public sealed partial class ShellListView : UserControl {
   }
 
   private void ApplyViewMode(ShellViewMode mode) {
+    // -- Fast path: mode unchanged ------------------------------------------
+    // Skip everything when navigating between folders that share the same view
+    // mode.  ViewMode assignment in ApplyFolderSettings now only calls SetValue
+    // when the value actually changes, so this guard is a safety net for any
+    // other callers that might still reach here with an unchanged value.
+    if (mode == _currentMode && _applyingFolderSettings)
+      return;
+
     CollapseAllNameExpansions();
     RestartThumbnailWorker();
     var size = PhysicalSize(ThumbnailSizeForMode(mode));
@@ -3071,14 +3162,13 @@ public sealed partial class ShellListView : UserControl {
         item.Icon = null;
     }
 
-    // If there are items and the new size isn’t yet cached, warm it off-thread
+    // If there are items and the new size is not yet cached, warm it off-thread
     // and re-stamp so icons switch to the correct resolution without waiting for
     // the per-item thumbnail worker (which would show null/blank in the meantime).
     if (allItems.Count > 0) {
       var ct = _thumbCts.Token;
       _ = WarmAndStampAsync(allItems, size, ct);
     }
-
     string templateKey = mode switch {
       ShellViewMode.ExtraLargeIcons => "ExtraLargeIconsTemplate",
       ShellViewMode.LargeIcons => "LargeIconsTemplate",
@@ -3099,30 +3189,34 @@ public sealed partial class ShellListView : UserControl {
 
     ShellView.ItemContainerStyle = isWrapMode
         ? (Style)Resources["WrapIconListViewItemStyle"]
-        : new Style(typeof(ListViewItem)) {
-          BasedOn = (Style)Application.Current.Resources["DefaultListViewItemStyle"],
-          Setters =
-            {
-                    new Setter(ListViewItem.HorizontalContentAlignmentProperty, HorizontalAlignment.Left),
-                    new Setter(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left),
-                    new Setter(Control.PaddingProperty, new Thickness(0)),
-                    new Setter(FrameworkElement.MarginProperty, new Thickness(2, 1, 2, 1)),
-                    new Setter(Control.UseSystemFocusVisualsProperty, false),
-                    new Setter(FrameworkElement.FocusVisualMarginProperty, new Thickness(0)),
-                    new Setter(Control.FocusVisualPrimaryThicknessProperty, new Thickness(0)),
-                    new Setter(Control.FocusVisualSecondaryThicknessProperty, new Thickness(0))
-            }
-        };
+        : (_cachedListRowStyle ??= new Style(typeof(ListViewItem)) {
+            BasedOn = (Style)Application.Current.Resources["DefaultListViewItemStyle"],
+            Setters =
+              {
+                      new Setter(ListViewItem.HorizontalContentAlignmentProperty, HorizontalAlignment.Left),
+                      new Setter(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left),
+                      new Setter(Control.PaddingProperty, new Thickness(0)),
+                      new Setter(FrameworkElement.MarginProperty, new Thickness(2, 1, 2, 1)),
+                      new Setter(Control.UseSystemFocusVisualsProperty, false),
+                      new Setter(FrameworkElement.FocusVisualMarginProperty, new Thickness(0)),
+                      new Setter(Control.FocusVisualPrimaryThicknessProperty, new Thickness(0)),
+                      new Setter(Control.FocusVisualSecondaryThicknessProperty, new Thickness(0))
+              }
+          });
 
     ShellView.ItemsPanel = mode switch {
       ShellViewMode.List or ShellViewMode.Details or ShellViewMode.Content
-          => BuildStackingPanel(),
-      ShellViewMode.ExtraLargeIcons => BuildWrapPanel(256 + 8 + 57),
-      ShellViewMode.LargeIcons => BuildWrapPanel(128 + 8 + 57),
-      ShellViewMode.MediumIcons => BuildWrapPanel(96 + 8 + 57),
-      ShellViewMode.SmallIcons => BuildWrapPanel(48 + 8 + 57),
-      _ => BuildWrapPanel()
+          => GetStackingPanel(),
+      ShellViewMode.ExtraLargeIcons => GetWrapPanel(256 + 8 + 57),
+      ShellViewMode.LargeIcons => GetWrapPanel(128 + 8 + 57),
+      ShellViewMode.MediumIcons => GetWrapPanel(96 + 8 + 57),
+      ShellViewMode.SmallIcons => GetWrapPanel(48 + 8 + 57),
+      _ => GetWrapPanel(0)
     };
+    // Changing ItemsPanel can restore the default TransitionCollection from the panel's
+    // default style — clear it again to keep per-container animations disabled.
+    ShellView.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
+    ShellView.Transitions              = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
 
     DetailsHeader.Visibility = Visibility.Visible;
     _currentMode = mode;
@@ -3130,25 +3224,65 @@ public sealed partial class ShellListView : UserControl {
 
     // For non-Details views every column gets a fixed 200 px width.
     // For Details view, restore the widths that were saved for the current folder.
+    // When called from ApplyFolderSettings (_applyingFolderSettings == true),
+    // the caller already calls dc.ApplyColumns with the correct widths for the
+    // destination path — skip the async restore here to avoid a race where
+    // RestoreDetailsColumnWidthsAsync fires with the *old* CurrentPath and then
+    // overwrites the correct widths that ApplyFolderSettings already set.
     if (mode != ShellViewMode.Details) {
-      foreach (var col in DetailsColumns.Columns)
-        col.Width = 200;
-    } else if (!string.IsNullOrEmpty(CurrentPath)) {
-      // Best-effort async restore; runs without blocking the UI.
+      if (!_applyingFolderSettings)
+        foreach (var col in DetailsColumns.Columns)
+          col.Width = 200;
+    } else if (!_applyingFolderSettings && !string.IsNullOrEmpty(CurrentPath)) {
+      // User-triggered view-mode switch: restore widths for the current folder.
       _ = RestoreDetailsColumnWidthsAsync(CurrentPath);
     }
   }
 
   private async Task RestoreDetailsColumnWidthsAsync(string path) {
     var settings = await FolderSettingsDb.Instance.LoadAsync(path);
+    var dc = DetailsColumns;
+    var desired = new System.Collections.Generic.List<(string Key, double Width)>(settings.Columns.Count);
+    var seen    = new System.Collections.Generic.HashSet<string>(settings.Columns.Count);
     foreach (var rec in settings.Columns) {
-      var col = DetailsColumns.Columns.FirstOrDefault(c => c.Key == rec.Key);
-      if (col is not null)
-        col.Width = rec.Width;
+      if (dc.Columns.Any(c => c.Key == rec.Key)) {
+        desired.Add((rec.Key, rec.Width));
+        seen.Add(rec.Key);
+      }
     }
+    foreach (var col in dc.Columns)
+      if (!seen.Contains(col.Key))
+        desired.Add((col.Key, col.Width));
+    dc.ApplyColumns(desired);
   }
 
-  private static ItemsPanelTemplate BuildWrapPanel(double itemHeight = 0) {
+  // ── Cached ItemsPanelTemplate instances ──────────────────────────────────
+  // XamlReader.Load performs a full XAML parse+compile every call.  Parsing
+  // the same XAML string on every navigation was the main cause of the
+  // progressively-growing "Settings+Enum" phase timing.  Create each template
+  // exactly once (lazy, on first use) and reuse it for all subsequent navigations.
+
+  private static ItemsPanelTemplate? _panelWrapDefault;
+  private static ItemsPanelTemplate? _panelWrapXL;
+  private static ItemsPanelTemplate? _panelWrapLarge;
+  private static ItemsPanelTemplate? _panelWrapMedium;
+  private static ItemsPanelTemplate? _panelWrapSmall;
+  private static ItemsPanelTemplate? _panelStacking;
+
+  private static ItemsPanelTemplate GetWrapPanel(double itemHeight) {
+    // Cache keyed by the fixed height values used in ApplyViewMode.
+    if (itemHeight <= 0)   return _panelWrapDefault ??= BuildWrapPanel(0);
+    if (itemHeight >= 320) return _panelWrapXL      ??= BuildWrapPanel(itemHeight);
+    if (itemHeight >= 190) return _panelWrapLarge   ??= BuildWrapPanel(itemHeight);
+    if (itemHeight >= 160) return _panelWrapMedium  ??= BuildWrapPanel(itemHeight);
+    if (itemHeight >= 110) return _panelWrapSmall   ??= BuildWrapPanel(itemHeight);
+    return _panelWrapDefault ??= BuildWrapPanel(0);
+  }
+
+  private static ItemsPanelTemplate GetStackingPanel() =>
+      _panelStacking ??= BuildStackingPanel();
+
+  private static ItemsPanelTemplate BuildWrapPanel(double itemHeight) {
     string heightAttr = itemHeight > 0 ? $" ItemHeight=\"{itemHeight}\"" : string.Empty;
     return (ItemsPanelTemplate)XamlLoad(
         $"""
@@ -3505,7 +3639,9 @@ public sealed partial class ShellListView : UserControl {
     // to run inline on the UI thread *before* Items.Clear() — producing the "few seconds" freeze
     // between double-click and the list actually clearing.
     await Task.Yield();
+    var afs = new NavDiag($"ApplyFolderSettings {System.IO.Path.GetFileName(path)}");
     var settings = await FolderSettingsDb.Instance.LoadAsync(path);
+    afs.Mark("DbLoad");
 
     _applyingFolderSettings = true;
     try {
@@ -3513,37 +3649,46 @@ public sealed partial class ShellListView : UserControl {
       _sortColumn   = settings.SortColumn;
       _sortAscending = settings.SortAscending;
 
-      // Apply column order and widths.
+      // Apply column order and widths in a single batched operation that fires
+      // exactly one set of notifications (vs. Clear + N×Add = N*4 PropertyChanged
+      // events which caused a layout pass per item row per navigation).
+      bool isDetails = settings.ViewMode == ShellViewMode.Details;
       var dc = DetailsColumns;
-      var newColumns = new System.Collections.Generic.List<BetterExplorer.ShellApi.DetailsColumn>();
+
+      // Build the desired (key, width) list from persisted settings.
+      // Columns absent from saved settings are appended in their current order.
+      var desired = new System.Collections.Generic.List<(string Key, double Width)>(
+          settings.Columns.Count + dc.Columns.Count);
+      var seen = new System.Collections.Generic.HashSet<string>(settings.Columns.Count);
       foreach (var rec in settings.Columns) {
-        var existing = dc.Columns.FirstOrDefault(c => c.Key == rec.Key);
-        if (existing is not null) {
-          // Only restore saved widths in Details view; all other views use a fixed 200 px.
-          existing.Width = settings.ViewMode == ShellViewMode.Details ? rec.Width : 200;
-          newColumns.Add(existing);
+        if (dc.Columns.Any(c => c.Key == rec.Key)) {
+          desired.Add((rec.Key, isDetails ? rec.Width : 200.0));
+          seen.Add(rec.Key);
         }
       }
-      // Any columns that are in the current set but not in the saved settings go at the end.
       foreach (var col in dc.Columns)
-        if (!newColumns.Contains(col)) {
-          col.Width = settings.ViewMode == ShellViewMode.Details ? col.Width : 200;
-          newColumns.Add(col);
-        }
+        if (!seen.Contains(col.Key))
+          desired.Add((col.Key, isDetails ? col.Width : 200.0));
 
-      dc.Columns.Clear();
-      foreach (var col in newColumns)
-        dc.Columns.Add(col);
+      // ApplyColumns is a no-op if order and widths already match.
+      dc.ApplyColumns(desired);
 
-      // Apply view mode (will fire OnViewModeChanged → ApplyViewMode).
-      ViewMode = settings.ViewMode;
+      afs.Mark("Columns");
+
+      // Apply view mode — skip the SetValue entirely if unchanged, because WinUI3
+      // fires OnViewModeChanged (→ ApplyViewMode + CollapseAllNameExpansions) even
+      // when the old and new values are identical.
+      if (settings.ViewMode != ViewMode)
+        ViewMode = settings.ViewMode;
       // Apply group column (empty = no grouping).
       _groupColumn = settings.GroupColumn ?? string.Empty;
+      afs.Mark("ViewMode");
     } finally {
       _applyingFolderSettings = false;
     }
 
     UpdateSortIndicators();
+    afs.Finish("SortIndicators");
   }
 
   /// <summary>

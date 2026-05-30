@@ -1229,7 +1229,41 @@ public static class NativeShell {
   // ── Shell overlay icons ──────────────────────────────────────────────────
 
   /// <summary>
-  /// Returns premultiplied 32×32 BGRA pixel data for the shell overlay icon of
+  /// Synchronous equivalent of <see cref="GetShellImagePixelsAsync"/> for use on
+  /// dedicated background threads where blocking is acceptable.
+  /// </summary>
+  public static (byte[]? Pixels, int W, int H, int Hr) GetShellImagePixelsSync(
+      string path, uint size, SIIGBF flags, CancellationToken ct) {
+    try { _shellCallSem.Wait(ct); }
+    catch (OperationCanceledException) { return (null, 0, 0, unchecked((int)0x80004004)); }
+    try {
+      if (ct.IsCancellationRequested)
+        return (null, 0, 0, unchecked((int)0x80004004));
+      int rc = TryGetShellHBitmapHr(path, size, flags, out var hbm);
+      if (hbm == IntPtr.Zero)
+        return (null, 0, 0, rc);
+      try {
+        var (px, pw, ph) = HBitmapToPixels(hbm);
+        return (px, pw, ph, rc);
+      } finally { DeleteObject(hbm); }
+    } finally { _shellCallSem.Release(); }
+  }
+
+  /// <summary>
+  /// Synchronous equivalent of <see cref="GetOverlayIconPixelsAsync"/> for use on
+  /// dedicated background threads where blocking is acceptable.
+  /// </summary>
+  public static (byte[]? Pixels, int W, int H, int Slot) GetOverlayIconPixelsSync(
+      string path, CancellationToken ct) {
+    try { _shellCallSem.Wait(ct); }
+    catch (OperationCanceledException) { return (null, 0, 0, 0); }
+    try {
+      if (ct.IsCancellationRequested) return (null, 0, 0, 0);
+      return GetOverlayIconPixelsCore(path);
+    } finally { _shellCallSem.Release(); }
+  }
+
+
   /// <paramref name="path"/>, or <c>(null, 0, 0, 0)</c> when no overlay is registered.
   /// The <c>Slot</c> value (1-15) is stable per overlay handler and can be used to
   /// deduplicate bitmaps across items that share the same extension handler.
