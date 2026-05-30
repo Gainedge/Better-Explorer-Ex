@@ -1469,16 +1469,16 @@ public sealed partial class ShellListView : UserControl {
 
       diag.Mark("Sort+PreStamp (virtual)");
 
-      // ── Warm type-icon cache BEFORE showing items (virtual path) ──────────
+      // Same parallel pre-warm + shell cache preload before AddRange (virtual path).
+      int kfViewportPre = Math.Min(kfItems.Count, EstimateViewportItemCount(ViewMode));
+      var kfSlicePre = kfViewportPre == kfItems.Count ? kfItems : kfItems.GetRange(0, kfViewportPre);
       try {
-        await WarmTypeIconCacheAsync(kfItems, kfSize, ct);
+        await Task.WhenAll(
+            WarmTypeIconCacheAsync(kfItems, kfSize, ct),
+            PreloadCachedThumbnailsAsync(kfSlicePre, kfSize, ct));
       } catch (OperationCanceledException) { return; }
       if (IsStale()) return;
       ApplyCachedIcons(kfItems, kfSize);
-
-      diag.Mark("PreWarm (virtual)");
-
-      // ── Pre-stamp any cached thumbnails (virtual path) ────────────────────
       if (!IsIconOnlyMode(ViewMode)) {
         foreach (var item in kfItems) {
           if (item.HasRealThumbnail) continue;
@@ -1488,6 +1488,8 @@ public sealed partial class ShellListView : UserControl {
           }
         }
       }
+
+      diag.Mark("PreWarm+PreThumb (virtual)");
 
       // ── Show items immediately, then warm caches in the background ────────
       Items.AddRange(kfItems);
@@ -1559,22 +1561,27 @@ public sealed partial class ShellListView : UserControl {
 
     diag.Mark("Sort+PreStamp");
 
-    // ── Warm type-icon cache BEFORE showing items ─────────────────────────────
-    // On the first navigation _typeIconCache is empty, so the pre-stamp above
-    // produced nothing and items would briefly show fallback icons. By warming
-    // here (before AddRange) every item already has its icon on the first frame.
-    // On subsequent navigations the cache is already warm, so this is a no-op.
+    // ── Warm type-icon cache + probe shell thumbnail disk-cache, both BEFORE AddRange ─
+    // Running them concurrently halves latency vs. sequential.
+    // WarmTypeIconCacheAsync  → fills _typeIconCache for every unique extension.
+    // PreloadCachedThumbnailsAsync → probes the Windows shell disk-cache (E_PENDING
+    //   is skipped, only already-rendered thumbnails are stamped).
+    // After both complete, the _thumbCache in-memory pass picks up any bitmaps
+    // that were cached from a previous visit to this folder.
+    int viewportCountPre = Math.Min(allItems.Count, EstimateViewportItemCount(ViewMode));
+    var viewportSlicePre = viewportCountPre == allItems.Count
+        ? allItems : allItems.GetRange(0, viewportCountPre);
     try {
-      await WarmTypeIconCacheAsync(allItems, size, ct);
+      await Task.WhenAll(
+          WarmTypeIconCacheAsync(allItems, size, ct),
+          PreloadCachedThumbnailsAsync(viewportSlicePre, size, ct));
     } catch (OperationCanceledException) { return; }
     if (IsStale()) return;
     ApplyCachedIcons(allItems, size);
 
-    diag.Mark("PreWarm");
+    diag.Mark("PreWarm+PreThumb");
 
-    // ── Pre-stamp any cached thumbnails before showing items ─────────────────
-    // _thumbCache persists across navigations. Items revisited will already have
-    // their real thumbnail in cache — stamp them now so they appear immediately.
+    // ── Also stamp from our own _thumbCache (revisited folders) ─────────────
     if (!IsIconOnlyMode(ViewMode)) {
       foreach (var item in allItems) {
         if (item.HasRealThumbnail) continue;
@@ -1587,7 +1594,7 @@ public sealed partial class ShellListView : UserControl {
 
     diag.Mark("PreStampThumbs");
 
-    // ── Show ALL items at once BEFORE warming so the list appears immediately ──
+    // ── Show ALL items at once ─────────────────────────────────────────────
     Items.AddRange(allItems);
     ApplyGrouping();
     CurrentPath = path;
