@@ -211,6 +211,12 @@ public sealed partial class ExplorerBrowser : UserControl {
   private void UpLevelButton_Click(object sender, RoutedEventArgs e) => FileList.GoUp();
   private void RefreshButton_Click(object sender, RoutedEventArgs e) => FileList.Refresh();
 
+  private void RefreshAccelerator_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+  {
+    FileList.Refresh();
+    args.Handled = true;
+  }
+
   // ── Search box ────────────────────────────────────────────────────────────
 
   private void SearchBox_TextChanged(AutoSuggestBox sender,

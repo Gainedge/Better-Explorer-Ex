@@ -372,18 +372,23 @@ namespace BExplorer.Shell.Interop {
     public IntPtr dwItem2;
   }
 
-  [StructLayout(LayoutKind.Explicit, Size = 264)]
+  [StructLayout(LayoutKind.Explicit, Size = 272)]
   public struct STRRET {
     [FieldOffset(0)]
     public UInt32 uType;
-    [FieldOffset(4)]
+    [FieldOffset(8)]
     public IntPtr pOleStr;
-    [FieldOffset(4)]
+    [FieldOffset(8)]
     public IntPtr pStr;
-    [FieldOffset(4)]
-    public UInt32 uOffset;
-    [FieldOffset(4)]
+    [FieldOffset(8)]
+    private IntPtr _uOffset;
+    [FieldOffset(8)]
     public IntPtr cStr;
+
+    public UInt32 uOffset {
+      get => (UInt32)_uOffset.ToInt64();
+      set => _uOffset = new IntPtr(value);
+    }
   }
 
   public static class Shell32 {

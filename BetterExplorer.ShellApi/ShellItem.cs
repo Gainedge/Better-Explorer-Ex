@@ -127,6 +127,83 @@ public sealed class ShellItem : INotifyPropertyChanged
         set { _isDropTarget = value; OnPropertyChanged(); }
     }
 
+    // ── Drive-space fields (populated for ThisPC items only) ──────────────
+    private bool _isDrive;
+    private long _driveTotalBytes;
+    private long _driveUsedBytes;
+    private string _driveGroupType = string.Empty;
+
+    /// <summary>True when this item was enumerated from the Network shell namespace.
+    /// Every network device has a unique icon so the icon cache must key it per-item.</summary>
+    public bool IsNetworkItem { get; set; }
+
+    /// <summary>True when this item is a drive or removable storage shown in the This PC view.</summary>
+    public bool IsDrive {
+        get => _isDrive;
+        set {
+            _isDrive = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(DriveSpaceVisibility));
+        }
+    }
+
+    /// <summary>Total capacity of the drive in bytes (0 for non-drives).</summary>
+    public long DriveTotalBytes {
+        get => _driveTotalBytes;
+        set { _driveTotalBytes = value; OnPropertyChanged(); OnPropertyChanged(nameof(DriveUsedFraction)); OnPropertyChanged(nameof(DriveSpaceText)); }
+    }
+
+    /// <summary>Used space of the drive in bytes (0 for non-drives).</summary>
+    public long DriveUsedBytes {
+        get => _driveUsedBytes;
+        set { _driveUsedBytes = value; OnPropertyChanged(); OnPropertyChanged(nameof(DriveUsedFraction)); OnPropertyChanged(nameof(DriveSpaceText)); OnPropertyChanged(nameof(DriveBarForeground)); }
+    }
+
+    /// <summary>0.0–1.0 fraction used; drives with no capacity return 0.</summary>
+    public double DriveUsedFraction =>
+        _driveTotalBytes > 0 ? Math.Clamp((double)_driveUsedBytes / _driveTotalBytes, 0.0, 1.0) : 0.0;
+
+    /// <summary>Localised "X GB free of Y GB" string, empty for non-drives.</summary>
+    public string DriveSpaceText {
+        get {
+            if (_driveTotalBytes <= 0) return string.Empty;
+            long freeBytes = _driveTotalBytes - _driveUsedBytes;
+            return $"{FormatBytes(freeBytes)} free of {FormatBytes(_driveTotalBytes)}";
+        }
+    }
+
+    /// <summary>Accent colour for the drive bar — red when less than 10 % is free.</summary>
+    public Microsoft.UI.Xaml.Media.SolidColorBrush DriveBarForeground =>
+        DriveUsedFraction >= 0.9
+            ? new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Red)
+            : new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
+
+    /// <summary>Collapsed for non-drive items so the drive-bar row takes no space.</summary>
+    public Microsoft.UI.Xaml.Visibility DriveSpaceVisibility =>
+        _isDrive && _driveTotalBytes > 0
+            ? Microsoft.UI.Xaml.Visibility.Visible
+            : Microsoft.UI.Xaml.Visibility.Collapsed;
+
+    /// <summary>Shell drive-type label used for This PC group headers.</summary>
+    public string DriveGroupType {
+        get => _driveGroupType;
+        set { _driveGroupType = value; OnPropertyChanged(); }
+    }
+
+    private static string FormatBytes(long bytes) {
+        const long KB = 1_024L;
+        const long MB = KB * 1_024;
+        const long GB = MB * 1_024;
+        const long TB = GB * 1_024;
+        const long PB = TB * 1_024;
+        if (bytes >= PB) return $"{bytes / (double)PB:F2} PB";
+        if (bytes >= TB) return $"{bytes / (double)TB:F2} TB";
+        if (bytes >= GB) return $"{bytes / (double)GB:F2} GB";
+        if (bytes >= MB) return $"{bytes / (double)MB:F0} MB";
+        if (bytes >= KB) return $"{bytes / (double)KB:F0} KB";
+        return $"{bytes} B";
+    }
+
     private bool _isLabelHidden;
     /// <summary>True while the name-expansion popup is open for this item; hides the in-template label to avoid double text.</summary>
     public bool IsLabelHidden
@@ -170,6 +247,10 @@ public sealed class ShellItem : INotifyPropertyChanged
         _isCut = false;
         _hasRealThumbnail = false;
         _displayName = string.Empty;
+        _isDrive = false;
+        _driveTotalBytes = 0;
+        _driveUsedBytes = 0;
+        _driveGroupType = string.Empty;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>

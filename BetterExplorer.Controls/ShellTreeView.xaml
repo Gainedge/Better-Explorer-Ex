@@ -173,11 +173,15 @@
               <ColumnDefinition Width="*"  />
             </Grid.ColumnDefinitions>
 
-            <!-- Shell icon (loaded asynchronously from the shell) -->
-            <Image Grid.Column="0"
-                   Width="16" Height="16"
-                   Source="{x:Bind Icon, Mode=OneWay}"
-                   Stretch="UniformToFill" />
+            <!-- Shell icon with async-loading spinner overlay -->
+            <Grid Grid.Column="0" Width="16" Height="16">
+              <Image Source="{x:Bind Icon, Mode=OneWay}"
+                     Stretch="UniformToFill" />
+              <ProgressRing Width="14" Height="14"
+                            IsActive="{x:Bind IsLoading, Mode=OneWay}"
+                            Visibility="{x:Bind LoadingVisibility, Mode=OneWay}"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
 
             <!-- Display name -->
             <TextBlock Grid.Column="1"

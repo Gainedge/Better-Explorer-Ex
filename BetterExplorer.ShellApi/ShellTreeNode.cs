@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using BetterExplorer.ShellApi.Interop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media.Imaging;
 
@@ -19,12 +21,24 @@ public sealed class ShellTreeNode : INotifyPropertyChanged
     private string _name = string.Empty;
     private WriteableBitmap? _icon;
     private bool _isExpanded;
+    private bool _isLoading;
 
     public string Name
     {
         get => _name;
         set { _name = value; OnPropertyChanged(); }
     }
+
+    /// <summary>True while async children are being fetched (shows a spinner).</summary>
+    public bool IsLoading
+    {
+        get => _isLoading;
+        set { _isLoading = value; OnPropertyChanged(); OnPropertyChanged(nameof(LoadingVisibility)); }
+    }
+
+    /// <summary>Collapsed when not loading; used by the XAML template ProgressRing.</summary>
+    public Microsoft.UI.Xaml.Visibility LoadingVisibility =>
+        _isLoading ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
 
     /// <summary>Absolute file-system path. Null for virtual nodes (Quick Access root, Network).</summary>
     public string? FullPath { get; set; }
@@ -34,6 +48,27 @@ public sealed class ShellTreeNode : INotifyPropertyChanged
 
     /// <summary>True for top-level section headers (Quick Access, This PC, Network).</summary>
     public bool IsGroupHeader { get; set; }
+
+    /// <summary>
+    /// True for network server/workgroup nodes that expand to shares but are not
+    /// navigable themselves (similar to IsVirtual, but for the network branch).
+    /// </summary>
+    public bool IsNetworkContainer { get; set; }
+
+    /// <summary>
+    /// True for the Explorer-style category nodes under the Network root
+    /// (e.g. "Computers", "Media devices", "Infrastructure").
+    /// When expanded, the tree uses <see cref="NetworkGroupItems"/> directly
+    /// rather than making another network call.
+    /// </summary>
+    public bool IsNetworkCategoryGroup { get; set; }
+
+    /// <summary>
+    /// Pre-fetched items belonging to this category group.
+    /// Populated when the Network root is first enumerated so group expansion
+    /// is instant and avoids a redundant shell/WNet call.
+    /// </summary>
+    public List<NativeShell.NetworkResource>? NetworkGroupItems { get; set; }
 
     /// <summary>
     /// Set on virtual root nodes so the host can navigate via IShellFolder

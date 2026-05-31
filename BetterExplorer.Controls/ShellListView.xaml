@@ -329,6 +329,45 @@
       </StackPanel>
     </DataTemplate>
 
+    <!-- This PC drive tile (48 px icon + name + free/total progress bar) -->
+    <DataTemplate x:Key="DriveTilesTemplate" x:DataType="shellapi:ShellItem">
+      <StackPanel Orientation="Horizontal" Width="260" Spacing="8"
+                  Opacity="{x:Bind IconOpacity, Mode=OneWay}">
+        <Viewbox Width="48" Height="48" VerticalAlignment="Center"
+                 Stretch="Uniform" StretchDirection="DownOnly">
+          <Grid Width="48" Height="48">
+            <FontIcon Glyph="{x:Bind IconGlyph, Mode=OneWay, FallbackValue=&#xE8A5;}"
+                      FontSize="36"
+                      Visibility="{x:Bind IconFallbackVisibility, Mode=OneWay}"
+                      HorizontalAlignment="Center" VerticalAlignment="Center" />
+            <Image Source="{x:Bind Icon, Mode=OneWay}" Stretch="Uniform" />
+            <Image Source="{x:Bind OverlayIcon, Mode=OneWay}"
+                   Visibility="{x:Bind OverlayIconVisibility, Mode=OneWay}"
+                   Width="24" Height="24"
+                   HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Stretch="Uniform" IsHitTestVisible="False" />
+          </Grid>
+        </Viewbox>
+        <StackPanel VerticalAlignment="Center" Spacing="3" Width="196">
+          <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}"
+                     FontWeight="SemiBold"
+                     Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
+                     TextTrimming="CharacterEllipsis" MaxLines="1" />
+          <StackPanel Visibility="{x:Bind DriveSpaceVisibility, Mode=OneWay}" Spacing="2">
+            <ProgressBar Value="{x:Bind DriveUsedFraction, Mode=OneWay}"
+                         Minimum="0" Maximum="1"
+                         Height="8"
+                         Foreground="{x:Bind DriveBarForeground, Mode=OneWay}"
+                         CornerRadius="4" />
+            <TextBlock Text="{x:Bind DriveSpaceText, Mode=OneWay}"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextTrimming="CharacterEllipsis" MaxLines="1" />
+          </StackPanel>
+        </StackPanel>
+      </StackPanel>
+    </DataTemplate>
+
     <!-- ═══════════════════════════════════════════════
              Wrap-panel icon modes — item container style
         ════════════════════════════════════════════════ -->
@@ -445,6 +484,115 @@
                                 Padding="4"
                                 HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                 VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Tiles mode — item container style.
+         Reduced vertical padding so the 3-line text stack
+         (name + type + size) is not clipped within the row height. -->
+    <Style x:Key="TilesListViewItemStyle" TargetType="ListViewItem">
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Padding" Value="4,2,4,2" />
+      <Setter Property="Margin" Value="2" />
+      <Setter Property="UseSystemFocusVisuals" Value="False" />
+      <Setter Property="FocusVisualMargin" Value="0" />
+      <Setter Property="FocusVisualPrimaryThickness" Value="0" />
+      <Setter Property="FocusVisualSecondaryThickness" Value="0" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListViewItem">
+            <Grid x:Name="RootGrid"
+                              Control.IsTemplateFocusTarget="True"
+                              IsTabStop="False"
+                              CornerRadius="{ThemeResource ControlCornerRadius}"
+                              Padding="{TemplateBinding Padding}">
+              <VisualStateManager.VisualStateGroups>
+                <VisualStateGroup x:Name="CommonStates">
+                  <VisualState x:Name="Normal" />
+                  <VisualState x:Name="PointerOver">
+                    <VisualState.Setters>
+                      <Setter Target="PointerBorder.Background"
+                              Value="{ThemeResource ListViewItemBackgroundPointerOver}" />
+                    </VisualState.Setters>
+                  </VisualState>
+                  <VisualState x:Name="Pressed">
+                    <VisualState.Setters>
+                      <Setter Target="PointerBorder.Background"
+                              Value="{ThemeResource ListViewItemBackgroundPressed}" />
+                    </VisualState.Setters>
+                  </VisualState>
+                  <VisualState x:Name="PointerOverPressed">
+                    <VisualState.Setters>
+                      <Setter Target="PointerBorder.Background"
+                              Value="{ThemeResource ListViewItemBackgroundPressed}" />
+                    </VisualState.Setters>
+                  </VisualState>
+                  <VisualState x:Name="Disabled">
+                    <VisualState.Setters>
+                      <Setter Target="RootGrid.Opacity"
+                              Value="{ThemeResource ListViewItemDisabledThemeOpacity}" />
+                    </VisualState.Setters>
+                  </VisualState>
+                </VisualStateGroup>
+                <VisualStateGroup x:Name="SelectionStates">
+                  <VisualState x:Name="Unselected" />
+                  <VisualState x:Name="Selected">
+                    <VisualState.Setters>
+                      <Setter Target="SelectionBorder.Visibility" Value="Visible" />
+                    </VisualState.Setters>
+                  </VisualState>
+                  <VisualState x:Name="SelectedUnfocused">
+                    <VisualState.Setters>
+                      <Setter Target="SelectionBorder.Visibility" Value="Visible" />
+                    </VisualState.Setters>
+                  </VisualState>
+                </VisualStateGroup>
+                <VisualStateGroup x:Name="DropTargetStates">
+                  <VisualState x:Name="NotDropTarget" />
+                  <VisualState x:Name="DropTarget">
+                    <VisualState.Setters>
+                      <Setter Target="DropTargetBorder.Visibility" Value="Visible" />
+                    </VisualState.Setters>
+                  </VisualState>
+                </VisualStateGroup>
+                <VisualStateGroup x:Name="NameExpansionStates">
+                  <VisualState x:Name="NameCollapsed" />
+                  <VisualState x:Name="NameExpanded">
+                    <VisualState.Setters>
+                      <Setter Target="SelectionBorder.BorderThickness" Value="2,2,2,0" />
+                      <Setter Target="SelectionBorder.CornerRadius" Value="4,4,0,0" />
+                      <Setter Target="RootGrid.CornerRadius" Value="4,4,0,0" />
+                    </VisualState.Setters>
+                  </VisualState>
+                </VisualStateGroup>
+              </VisualStateManager.VisualStateGroups>
+
+              <Border x:Name="SelectionBorder"
+                      BorderThickness="2"
+                      BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                      Background="{ThemeResource ListViewItemBackgroundSelected}"
+                      CornerRadius="{ThemeResource ControlCornerRadius}"
+                      Visibility="Collapsed" />
+              <Border x:Name="DropTargetBorder"
+                      BorderThickness="2"
+                      BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                      Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                      CornerRadius="{ThemeResource ControlCornerRadius}"
+                      Visibility="Collapsed" />
+              <Border x:Name="PointerBorder"
+                      Background="Transparent"
+                      CornerRadius="{ThemeResource ControlCornerRadius}" />
+              <ContentPresenter
+                      x:Name="ContentPresenter"
+                      ContentTemplate="{TemplateBinding ContentTemplate}"
+                      Content="{TemplateBinding Content}"
+                      Padding="4"
+                      HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                      VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
             </Grid>
           </ControlTemplate>
         </Setter.Value>

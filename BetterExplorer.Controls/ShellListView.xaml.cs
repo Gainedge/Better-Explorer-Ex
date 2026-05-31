@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -313,6 +313,15 @@ public sealed partial class ShellListView : UserControl {
   private ShellViewMode _currentMode = ShellViewMode.Details;
   // Cached once on first use — avoids allocating 8 Setter objects on every navigation.
   private Style? _cachedListRowStyle;
+  // True while the current folder is This PC — switches the Tiles template and forces type grouping.
+  private bool _isThisPcView;
+  private const string ThisPcVirtualPath     = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+  // True while the current folder is the Network root — forces per-item icons, category grouping,
+  // and suppresses watcher-driven full refreshes (Network items don’t change after enumeration).
+  private bool _isNetworkView;
+  // The known-folder GUID that is currently displayed, or Guid.Empty for normal paths.
+  private Guid _currentKnownFolderId = Guid.Empty;
+  private const string NetworkVirtualPath    = "::{D20BEEC4-5CA8-4905-AE3B-BF251EA09B53}";
   // DPI scale factor read from XamlRoot.RasterizationScale (1.0 = 96 dpi, 1.5 = 144 dpi, etc.).
   // Used to request shell bitmaps at physical pixels so icons are never upscaled.
   private double _dpiScale = 1.0;
@@ -661,6 +670,29 @@ public sealed partial class ShellListView : UserControl {
       }
 
       // Fallback: debounce a full Refresh() for unhandled / no-path events.
+      // Skip for the Network view: its items are enumerated once and don’t change
+      // after load; the SHCNE_UPDATEDIR/ASSOCCHANGED bursts from SHCONTF_ENABLE_ASYNC
+      // arrivals are what cause the icon-corrupting flashes.
+      if (_isNetworkView) {
+        // Late-arriving network printers and devices come in as Create/UpdateDir
+        // notifications from SHCONTF_ENABLE_ASYNC.  Re-enumerate on those types
+        // only; other events (ASSOCCHANGED, UpdateItem, etc.) are still suppressed
+        // so the icon-flash bug is not re-introduced.
+        if (e.EventType is ShellChangeType.Create or ShellChangeType.MkDir
+                        or ShellChangeType.UpdateDir) {
+          if (_shellRefreshDebounce is null) {
+            _shellRefreshDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
+            _shellRefreshDebounce.Tick += (_, _) => {
+              _shellRefreshDebounce?.Stop();
+              _shellRefreshDebounce = null;
+              _ = MergeNetworkItemsAsync();
+            };
+          }
+          _shellRefreshDebounce.Stop();
+          _shellRefreshDebounce.Start();
+        }
+        return;
+      }
       if (_shellRefreshDebounce is null) {
         _shellRefreshDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _shellRefreshDebounce.Tick += (_, _) => {
@@ -926,14 +958,17 @@ public sealed partial class ShellListView : UserControl {
   public void Refresh() {
     if (string.IsNullOrEmpty(CurrentPath))
       return;
-    // Collapse the expansion popup immediately so it doesn't stay frozen at the
-    // old item position while the list reloads and items shift around.
     CollapseAllNameExpansions();
-    // Remember which items are currently selected so they can be restored.
     _pendingSelectPaths = ShellView.SelectedItems
         .OfType<ShellItem>()
         .Select(i => i.FullPath)
         .ToList();
+    // Known-folder views (Network, This PC) must be re-enumerated via
+    // NavigateToKnownFolder — LoadDirectory does not handle virtual namespaces.
+    if (_currentKnownFolderId != Guid.Empty) {
+      NavigateToKnownFolder(_currentKnownFolderId, forceReload: true);
+      return;
+    }
     LoadDirectory(CurrentPath);
   }
 
@@ -1282,11 +1317,12 @@ public sealed partial class ShellListView : UserControl {
     }
   }
 
-  public async void NavigateToKnownFolder(Guid folderId) {
+  public async void NavigateToKnownFolder(Guid folderId, bool forceReload = false) {
     var virtualPath = $"::{folderId:B}";
 
-    // Don't re-navigate to the folder already shown.
-    if (string.Equals(virtualPath, CurrentPath, StringComparison.OrdinalIgnoreCase))
+    // Don't re-navigate to the folder already shown, unless forced (e.g. Refresh).
+    if (!forceReload &&
+        string.Equals(virtualPath, CurrentPath, StringComparison.OrdinalIgnoreCase))
       return;
 
     var diagKf = new NavDiag(virtualPath);
@@ -1353,6 +1389,27 @@ public sealed partial class ShellListView : UserControl {
 
     var items = enumTask.Result;
 
+    // Detect This PC so we can apply the drive-tile template and type grouping.
+    bool isThisPc      = string.Equals(virtualPath, ThisPcVirtualPath, StringComparison.OrdinalIgnoreCase);
+    bool isNetworkRoot = string.Equals(virtualPath, NetworkVirtualPath, StringComparison.OrdinalIgnoreCase);
+    _isThisPcView  = isThisPc;
+    _isNetworkView = isNetworkRoot;
+    _currentKnownFolderId = folderId;
+    if (isThisPc) {
+      // Force Tiles view and group-by-type for This PC, overriding any saved settings.
+      _groupColumn = "DriveType";
+      _applyingFolderSettings = true;
+      try { ViewMode = ShellViewMode.Tiles; }
+      finally { _applyingFolderSettings = false; }
+      // ApplyViewMode may have already run before _isThisPcView was set (if ViewMode
+      // was already Tiles). Re-apply now to switch to DriveTilesTemplate.
+      ApplyViewMode(ShellViewMode.Tiles);
+    } else if (isNetworkRoot) {
+      // Force grouping by network category (Computers, Printers, Infrastructure…)
+      // overriding any saved settings, just like This PC forces DriveType grouping.
+      _groupColumn = "NetworkType";
+    }
+
     if (items.Count > 0) {
       // Read size AFTER ApplyFolderSettings has run (it may have changed ViewMode).
       var size = PhysicalSize(ThumbnailSizeForMode(ViewMode));
@@ -1414,6 +1471,50 @@ public sealed partial class ShellListView : UserControl {
     diagKf.Finish("(empty folder)");
   }
 
+  // Re-enumerates the Network folder and merges any newly-discovered items into the
+  // current list without clearing it.  Called from the SHCONTF_ENABLE_ASYNC debounce
+  // so late-arriving devices (WSD printers, slow UPnP items) appear without a full
+  // re-navigation that would hit the duplicate-path guard or flash existing icons.
+  private async Task MergeNetworkItemsAsync() {
+    if (!_isNetworkView) return;
+
+    var ct = _navCts.Token;
+    List<ShellItem> fresh;
+    try {
+      fresh = await Task.Run(
+          () => NativeShell.EnumerateKnownFolderChildren(NativeShell.FOLDERID_NetworkFolder), ct);
+    } catch { return; }
+    if (ct.IsCancellationRequested) return;
+
+    bool added = false;
+    var size = PhysicalSize(ThumbnailSizeForMode(ViewMode));
+
+    foreach (var item in fresh) {
+      if (Items.Any(i => string.Equals(i.FullPath, item.FullPath, StringComparison.OrdinalIgnoreCase)))
+        continue;
+
+      // Pre-stamp cached icon if available.
+      var ext = TypeIconKey(item);
+      if (_typeIconCache.TryGetValue((ext, size), out var icon))
+        item.Icon = icon;
+
+      var sorted = SortItems(Items.Concat([item]).ToList());
+      Items.Insert(sorted.IndexOf(item), item);
+      added = true;
+    }
+
+    if (added) {
+      ApplyGrouping();
+      UpdateStatusBar();
+      // Warm icons for the newly-inserted items only.
+      var newItems = fresh.Where(n =>
+          Items.Any(i => string.Equals(i.FullPath, n.FullPath, StringComparison.OrdinalIgnoreCase)
+                      && i.Icon == null)).ToList();
+      if (newItems.Count > 0)
+        _ = WarmAndPreloadParallelAsync(newItems, newItems, size, ct);
+    }
+  }
+
   public void ClearRAM() {
     var thread = new Thread(
         () => {
@@ -1433,6 +1534,10 @@ public sealed partial class ShellListView : UserControl {
   // ── Directory loading ────────────────────────────────────────────────────
 
   private async void LoadDirectory(string path) {
+    // Navigating to a normal filesystem path — no longer showing This PC or Network.
+    _isThisPcView         = false;
+    _isNetworkView        = false;
+    _currentKnownFolderId = Guid.Empty;
     // Cancel any active search so its results don't bleed into the new folder.
     if (_isSearchActive) {
       _isSearchActive = false;
@@ -1799,12 +1904,16 @@ public sealed partial class ShellListView : UserControl {
   private static bool IsPerItemFolder(ShellItem item) =>
       item.IsFolder && (
           // Virtual shell-namespace paths (e.g. ::{GUID}, ::{GUID}\sub)
+          // Every network-namespace item has a unique per-device icon; key per-item.
+          item.IsNetworkItem ||
           item.FullPath.StartsWith("::", StringComparison.Ordinal) ||
           // Drive roots: "C:\", "D:\", etc. (length == 3, last char is '\')
           (item.FullPath.Length == 3 && item.FullPath[1] == ':' && item.FullPath[2] == '\\') ||
-          // UNC roots: "\\server\share\" and bare "\\server\"
-          (item.FullPath.StartsWith("\\\\", StringComparison.Ordinal) &&
-           item.FullPath.IndexOf('\\', 2) == item.FullPath.LastIndexOf('\\')));
+          // UNC server/share roots: bare \\SERVER, \\SERVER\share, \\SERVER\share\
+          (item.FullPath.StartsWith("\\\\", StringComparison.Ordinal) && (
+               item.FullPath.IndexOf('\\', 2) == -1 ||                              // bare \\SERVER
+               item.FullPath.IndexOf('\\', 2) == item.FullPath.LastIndexOf('\\') || // \\SERVER\share
+               item.FullPath.IndexOf('\\', 2) == item.FullPath.Length - 1)));       // \\SERVER\share\
 
   // Returns a type-cache key for an item.
   // Per-item folders (drive roots, virtual shell paths) get a unique per-path key
@@ -1819,7 +1928,13 @@ public sealed partial class ShellListView : UserControl {
           ? IsPerItemFolder(item)
               ? ":folder:" + item.FullPath.TrimEnd('\\').ToLowerInvariant()
               : ":folder:"
-          : Path.GetExtension(item.FullPath).ToLowerInvariant();
+          // Non-folder UNC paths (\\SERVER, \\SERVER\share) have no meaningful file
+          // extension — each represents a distinct network device or share whose
+          // icon comes from the shell per-item, not from a type.  Give each its own
+          // cache key so they are fetched and stored individually.
+          : (item.IsNetworkItem || item.FullPath.StartsWith("\\\\", StringComparison.Ordinal))
+              ? ":net:" + item.FullPath.TrimEnd('\\').ToLowerInvariant()
+              : Path.GetExtension(item.FullPath).ToLowerInvariant();
 
   private void ApplyCachedIcons(List<ShellItem> items, uint size) {
     foreach (var item in items) {
@@ -2150,8 +2265,12 @@ public sealed partial class ShellListView : UserControl {
         _typeIconByExt.TryAdd(capWarmKeys[i], wb);
       }
     }
-    // Stamp type icons: only needed when we just warmed new icons into the cache.
-    // When the cache was already warm, items were pre-stamped during the off-thread sort.
+    // Stamp type icons onto items.
+    // Only stamp when needIconWarm is true (new icons were just warmed into the cache).
+    // On refresh the cache is already warm and the off-thread sort pre-stamp has already
+    // set item.Icon for every cache hit, so running ApplyCachedIcons again would
+    // overwrite correct per-item network icons with a shared key that maps to the
+    // wrong bitmap (e.g. generic folder icon for virtual network device paths).
     if (needIconWarm)
       ApplyCachedIcons(allItems, size);
 
@@ -2532,7 +2651,12 @@ public sealed partial class ShellListView : UserControl {
             // ── Non-thumbnail items: just need a type/per-file icon ──────────
             byte[]? px = null;
             int w = 0, h = 0;
-            if (isPerFile || isPerItemFolder || !_typeIconCache.ContainsKey((ext, size))) {
+            // Per-item virtual folders (network devices, SSDP/WSD paths) that are
+            // already in the cache must NOT be re-fetched: for virtual :: paths the
+            // shell may return a wrong/generic bitmap and overwrite the correct icon.
+            bool hasCachedPerItem = isPerItemFolder && _typeIconCache.ContainsKey((ext, size));
+            if (!hasCachedPerItem &&
+                (isPerFile || isPerItemFolder || !_typeIconCache.ContainsKey((ext, size)))) {
               (px, w, h, _) = NativeShell.GetShellImagePixelsSync(
                   item.FullPath, size, NativeShell.SIIGBF.IconOnly, ct);
             }
@@ -3260,7 +3384,7 @@ public sealed partial class ShellListView : UserControl {
       ShellViewMode.SmallIcons => "SmallIconsTemplate",
       ShellViewMode.List => "ListTemplate",
       ShellViewMode.Details => "DetailsTemplate",
-      ShellViewMode.Tiles => "TilesTemplate",
+      ShellViewMode.Tiles => _isThisPcView ? "DriveTilesTemplate" : "TilesTemplate",
       ShellViewMode.Content => "ContentTemplate",
       _ => "SmallIconsTemplate"
     };
@@ -3271,7 +3395,9 @@ public sealed partial class ShellListView : UserControl {
         or ShellViewMode.LargeIcons or ShellViewMode.MediumIcons
         or ShellViewMode.SmallIcons or ShellViewMode.Tiles;
 
-    ShellView.ItemContainerStyle = isWrapMode
+    ShellView.ItemContainerStyle = mode == ShellViewMode.Tiles
+        ? (Style)Resources["TilesListViewItemStyle"]
+        : isWrapMode
         ? (Style)Resources["WrapIconListViewItemStyle"]
         : (_cachedListRowStyle ??= new Style(typeof(ListViewItem)) {
             BasedOn = (Style)Application.Current.Resources["DefaultListViewItemStyle"],
@@ -3295,6 +3421,7 @@ public sealed partial class ShellListView : UserControl {
       ShellViewMode.LargeIcons => GetWrapPanel(128 + 8 + 57),
       ShellViewMode.MediumIcons => GetWrapPanel(96 + 8 + 57),
       ShellViewMode.SmallIcons => GetWrapPanel(48 + 8 + 57),
+      ShellViewMode.Tiles      => GetWrapPanel(80),
       _ => GetWrapPanel(0)
     };
     // Changing ItemsPanel can restore the default TransitionCollection from the panel's
@@ -3351,6 +3478,7 @@ public sealed partial class ShellListView : UserControl {
   private static ItemsPanelTemplate? _panelWrapLarge;
   private static ItemsPanelTemplate? _panelWrapMedium;
   private static ItemsPanelTemplate? _panelWrapSmall;
+  private static ItemsPanelTemplate? _panelWrapTiles;
   private static ItemsPanelTemplate? _panelStacking;
 
   private static ItemsPanelTemplate GetWrapPanel(double itemHeight) {
@@ -3360,6 +3488,7 @@ public sealed partial class ShellListView : UserControl {
     if (itemHeight >= 190) return _panelWrapLarge   ??= BuildWrapPanel(itemHeight);
     if (itemHeight >= 160) return _panelWrapMedium  ??= BuildWrapPanel(itemHeight);
     if (itemHeight >= 110) return _panelWrapSmall   ??= BuildWrapPanel(itemHeight);
+    if (itemHeight >  0)   return _panelWrapTiles   ??= BuildWrapPanel(itemHeight);
     return _panelWrapDefault ??= BuildWrapPanel(0);
   }
 
@@ -3687,15 +3816,19 @@ public sealed partial class ShellListView : UserControl {
               int f = a.IsFolder == b.IsFolder ? 0 : a.IsFolder ? -1 : 1;
               return f != 0 ? f : string.Compare(b.ItemType, a.ItemType, StringComparison.OrdinalIgnoreCase);
             },
-      _ => _sortAscending
-          ? (a, b) => {
-              int f = a.IsFolder == b.IsFolder ? 0 : a.IsFolder ? -1 : 1;
-              return f != 0 ? f : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
-            }
-          : (a, b) => {
-              int f = a.IsFolder == b.IsFolder ? 0 : a.IsFolder ? -1 : 1;
-              return f != 0 ? f : string.Compare(b.Name, a.Name, StringComparison.OrdinalIgnoreCase);
-            },
+      _ => _isThisPcView
+          ? _sortAscending
+              ? (a, b) => string.Compare(a.FullPath, b.FullPath, StringComparison.OrdinalIgnoreCase)
+              : (a, b) => string.Compare(b.FullPath, a.FullPath, StringComparison.OrdinalIgnoreCase)
+          : _sortAscending
+              ? (a, b) => {
+                  int f = a.IsFolder == b.IsFolder ? 0 : a.IsFolder ? -1 : 1;
+                  return f != 0 ? f : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+                }
+              : (a, b) => {
+                  int f = a.IsFolder == b.IsFolder ? 0 : a.IsFolder ? -1 : 1;
+                  return f != 0 ? f : string.Compare(b.Name, a.Name, StringComparison.OrdinalIgnoreCase);
+                },
     };
     list.Sort(cmp);
     return list;
@@ -3765,7 +3898,10 @@ public sealed partial class ShellListView : UserControl {
       if (settings.ViewMode != ViewMode)
         ViewMode = settings.ViewMode;
       // Apply group column (empty = no grouping).
-      _groupColumn = settings.GroupColumn ?? string.Empty;
+      // Do not override the forced grouping for special virtual folders
+      // (This PC uses DriveType, Network uses NetworkType).
+      if (!_isThisPcView && !_isNetworkView)
+        _groupColumn = settings.GroupColumn ?? string.Empty;
       afs.Mark("ViewMode");
     } finally {
       _applyingFolderSettings = false;
@@ -4873,11 +5009,13 @@ public sealed partial class ShellListView : UserControl {
 
   private string GetGroupLabel(ShellItem item) =>
     _groupColumn switch {
-      "Name" => GetNameGroupLabel(item.Name),
-      "Date" => GetDateGroupLabel(item.DateModified),
-      "Type" => string.IsNullOrWhiteSpace(item.ItemType) ? "Other" : item.ItemType,
-      "Size" => GetSizeGroupLabel(item.SizeBytes, item.IsFolder),
-      _      => GetNameGroupLabel(item.Name),
+      "Name"        => GetNameGroupLabel(item.Name),
+      "Date"        => GetDateGroupLabel(item.DateModified),
+      "Type"        => string.IsNullOrWhiteSpace(item.ItemType) ? "Other" : item.ItemType,
+      "Size"        => GetSizeGroupLabel(item.SizeBytes, item.IsFolder),
+      "DriveType"   => string.IsNullOrWhiteSpace(item.DriveGroupType) ? "Other devices" : item.DriveGroupType,
+      "NetworkType" => string.IsNullOrWhiteSpace(item.ItemType) ? "Other devices" : item.ItemType,
+      _             => GetNameGroupLabel(item.Name),
     };
 
   private static string GetNameGroupLabel(string name) {
@@ -4937,12 +5075,23 @@ public sealed partial class ShellListView : UserControl {
     "#", "A \u2013 F", "G \u2013 L", "M \u2013 R", "S \u2013 Z",
   ];
 
+  private static readonly string[] _driveTypeGroupOrder = [
+    "Devices and drives", "Network locations", "Other devices",
+  ];
+
+  // Mirrors the NetworkCategoryOrder defined in ShellTreeView — same Explorer ordering.
+  private static readonly string[] _networkTypeGroupOrder = [
+    "Media devices", "Computers", "Storage", "Printers", "Infrastructure", "Other devices", "Network",
+  ];
+
   private int GetGroupSortOrder(string groupLabel) {
     var order = _groupColumn switch {
-      "Date" => _dateGroupOrder,
-      "Size" => _sizeGroupOrder,
-      "Name" => _nameGroupOrder,
-      _      => _nameGroupOrder,
+      "Date"        => _dateGroupOrder,
+      "Size"        => _sizeGroupOrder,
+      "Name"        => _nameGroupOrder,
+      "DriveType"   => _driveTypeGroupOrder,
+      "NetworkType" => _networkTypeGroupOrder,
+      _             => _nameGroupOrder,
     };
     var idx = Array.IndexOf(order, groupLabel);
     return idx < 0 ? int.MaxValue : idx;

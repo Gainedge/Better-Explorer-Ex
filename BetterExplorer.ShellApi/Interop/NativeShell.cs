@@ -33,6 +33,15 @@ public static class NativeShell {
   public static readonly Guid FOLDERID_NetworkFolder = new("D20BEEC4-5CA8-4905-AE3B-BF251EA09B53");
   public static readonly Guid FOLDERID_Libraries = new("1B3EA5DC-B587-4786-B4EF-BD1DC332AEAE");
 
+  // Shell namespace CLSID for the Linux (WSL) virtual folder shown in Explorer's nav pane.
+  public static readonly Guid CLSID_LinuxFolder = new("B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6");
+
+  // Shell namespace for UPnP/WSD network devices (Media devices, Printers, Infrastructure, …).
+  // This is the virtual folder Windows Explorer merges with FOLDERID_NetworkFolder to produce
+  // the full "Network" tree including all device categories.
+  private static readonly Guid CLSID_NetworkDevicesFolder =
+      new("F02AA1B4-0C5E-45E3-B338-0E8C1A2F1E68");
+
   private static readonly Guid FOLDERID_Links =
       new("bfb9d5e0-c6a9-404c-b2b2-ae6db6af4968");
 
@@ -90,7 +99,8 @@ public static class NativeShell {
         [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
         IntPtr rgfReserved,
         [MarshalAs(UnmanagedType.Interface)] out object ppv);
-    void GetDisplayNameOf(IntPtr pidl, uint uFlags, out STRRET pName);
+    [PreserveSig]
+    int GetDisplayNameOf(IntPtr pidl, uint uFlags, out STRRET pName);
     void SetNameOf(IntPtr hwnd, IntPtr pidl,
         [MarshalAs(UnmanagedType.LPWStr)] string pszName,
         uint uFlags, out IntPtr ppidlOut);
@@ -408,12 +418,17 @@ public static class NativeShell {
     public string cAlternateFileName;
   }
 
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  // STRRET is a C union: sizeof = 4 (uType) + pad + max(sizeof(LPWSTR), sizeof(UINT), MAX_PATH).
+  // Use explicit layout so all three union members share the same offset.
+  // NOTE: byte[] cStr and uint uOffset cannot coexist with IntPtr pOleStr in an explicit-layout
+  // union under .NET Core (managed array = GC object field cannot overlap a non-object field).
+  // Since all callers pass the struct directly to StrRetToBufW (which handles WSTR/OFFSET/CSTR
+  // internally), we only need pOleStr accessible from C#.
+  // Size = 8 (uType + pad) + 260 (MAX_PATH for cStr, the largest union member) = 268, rounded to 272.
+  [StructLayout(LayoutKind.Explicit, Size = 272)]
   private struct STRRET {
-    public uint uType;
-    public IntPtr pOleStr;
-    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4)]
-    public byte[] padding;
+    [FieldOffset(0)] public uint   uType;     // STRRET_WSTR=0, STRRET_OFFSET=1, STRRET_CSTR=2
+    [FieldOffset(8)] public IntPtr pOleStr;   // STRRET_WSTR: CoTaskMem LPWSTR (also covers uOffset/cStr via StrRetToBufW)
   }
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -463,12 +478,16 @@ public static class NativeShell {
 
   // ── IShellFolder constants ────────────────────────────────────────────────
 
-  private const uint SHCONTF_FOLDERS = 0x0020;
-  private const uint SHCONTF_NONFOLDERS = 0x0040;
-  private const uint SHCONTF_FASTITEMS = 0x2000;
+  private const uint SHCONTF_FOLDERS        = 0x0020;
+  private const uint SHCONTF_NONFOLDERS     = 0x0040;
+  private const uint SHCONTF_NETPRINTERSRCH = 0x0200;  // include network printers
+  private const uint SHCONTF_SHAREABLE      = 0x0400;  // include shareable resources
+  private const uint SHCONTF_FASTITEMS      = 0x2000;
+  private const uint SHCONTF_ENABLE_ASYNC   = 0x8000;  // return partial list now; more via SHCNE_UPDATEDIR
   private const uint SFGAO_FILESYSTEM = 0x40000000;
   private const uint SFGAO_FOLDER = 0x20000000;
   private const uint SHGDN_FORPARSING = 0x8000;
+  private const int  CSIDL_NETWORK = 0x0012;
 
   // ── SHGetFileInfo constants ───────────────────────────────────────────────
 
@@ -479,6 +498,7 @@ public static class NativeShell {
   private const uint SHGFI_OVERLAYINDEX   = 0x40;
   private const uint SHGFI_PIDL           = 0x8;    // pszPath is an ITEMIDLIST (PIDL)
   private const uint SHGFI_USEFILEATTRIBUTES = 0x10;   // don't touch file; use dwFileAttributes
+  private const uint SHGFI_TYPENAME       = 0x400;  // fill szTypeName with friendly type string
   private const uint DI_NORMAL = 0x3;
 
   // System image list size identifiers for SHGetImageList.
@@ -523,8 +543,203 @@ public static class NativeShell {
   private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_DateModified => new() { fmtid = _pkeyStorageFmtId, pid = 14 };
   private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_ItemTypeText => new() { fmtid = _pkeyStorageFmtId, pid =  4 };
   private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_FileAttribs  => new() { fmtid = _pkeyStorageFmtId, pid = 13 };
+  // System.Network.DeviceType — {A3B29791-7713-4E1D-BB40-17DB85F01831} pid 100
+  // Explorer uses this uint property to group items in the Network folder:
+  //   1 = Computer  2 = Printer  3 = Media device  4 = Infrastructure  5 = Storage
+  private static readonly Guid _pkeyNetworkFmtId = new("A3B29791-7713-4E1D-BB40-17DB85F01831");
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_Network_DeviceType =>
+      new() { fmtid = _pkeyNetworkFmtId, pid = 100 };
+
+  private static string NetworkDeviceTypeToCategory(uint v) => v switch {
+    1 => "Computers",
+    2 => "Printers",
+    3 => "Media devices",
+    4 => "Infrastructure",
+    5 => "Storage",
+    _ => "Other devices",
+  };
+
+  // Maps the shell type-name string returned by SHGetFileInfo(SHGFI_TYPENAME) or
+  // PKEY_Device_CategoryGroup to the Explorer-style group header labels.
+  // Strings must stay in sync with:
+  //   ShellTreeView.xaml.cs  — NetworkCategoryOrder()
+  //   ShellListView.xaml.cs  — _networkTypeGroupOrder
+  public static string NormalizeNetworkCategory(string raw) {
+    if (string.IsNullOrWhiteSpace(raw)) return "Other devices";
+    var s = raw.Trim();
+
+    // Already-normalised labels pass through unchanged.
+    if (s is "Media devices" or "Computers" or "Storage" or "Printers"
+           or "Infrastructure" or "Other devices" or "Network")
+      return s;
+
+    // SHGetFileInfo(SHGFI_TYPENAME) returns these exact strings from the shell namespace.
+    // "Computer" → individual machine node  →  Computers
+    if (s.Equals("Computer", StringComparison.OrdinalIgnoreCase))
+      return "Computers";
+
+    // Workgroup / domain containers are network organisational nodes, not individual
+    // computers.  Explorer groups them separately when there are sub-workgroups visible.
+    if (s.Contains("Workgroup",       StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("Windows Network", StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("Network",         StringComparison.OrdinalIgnoreCase))
+      return "Network";
+
+    if (s.Contains("Printer", StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("Print",   StringComparison.OrdinalIgnoreCase))
+      return "Printers";
+
+    if (s.Contains("Media",    StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("Renderer", StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("Player",   StringComparison.OrdinalIgnoreCase))
+      return "Media devices";
+
+    if (s.Contains("Infrastr", StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("Router",   StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("Gateway",  StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("Switch",   StringComparison.OrdinalIgnoreCase))
+      return "Infrastructure";
+
+    if (s.Contains("Storage", StringComparison.OrdinalIgnoreCase) ||
+        s.Contains("NAS",     StringComparison.OrdinalIgnoreCase))
+      return "Storage";
+
+    return "Other devices";
+  }
+
+  // Returns the Explorer-style network group label for a shell item.
+  // Strategy:
+  //   1. SHGetPropertyStoreFromParsingName + PKEY_Network_DeviceType (uint).
+  //      Works for items whose property store is immediately available.
+  //   2. IShellItem2::GetPropertyStore(BestEffort) via SHCreateItemWithParent.
+  //      Used when GPS_DEFAULT returns VT_EMPTY (e.g. WSD/PnpX devices).
+  //   3. UPnP/SSDP path heuristic: the "uuid:upnp-<DeviceType>-..." segment that
+  //      appears in virtual SSDP paths encodes the UPnP device type directly.
+  //   4. Structural fallback for classic WNet nodes:
+  //      UNC "\\name" folders = Computers, other virtual folders = Network,
+  //      non-folder items (NETPRINTERSRCH) = Printers.
+  private static string GetNetworkItemCategory(
+      IShellFolder parentFolder, IntPtr childPidl,
+      string parsePath, bool isFolder) {
+
+    // Step 1 — property store via parsing name.
+    try {
+      if (SHGetPropertyStoreFromParsingName("shell:" + parsePath, IntPtr.Zero, GPS_DEFAULT,
+              typeof(IPropertyStore).GUID, out var store) == 0 && store != null) {
+        try {
+          using var pv = new PropVariant();
+          var pk = PKEY_Network_DeviceType;
+          if (store.GetValue(ref pk, pv) == HResult.S_OK && pv.Value is uint devType)
+            return NetworkDeviceTypeToCategory(devType);
+        } finally { Marshal.ReleaseComObject(store); }
+      }
+    } catch { }
+
+    // Step 2 — IShellItem2 via SHCreateItemWithParent + GPS_BESTEFFORT.
+    // This succeeds for WSD/PnpX devices whose slow property handler has
+    // the device type but is not returned by GPS_DEFAULT above.
+    try {
+      SHCreateItemWithParent(IntPtr.Zero, parentFolder, childPidl,
+          typeof(IShellItem2).GUID, out var si2);
+      if (si2 != null) {
+        try {
+          var iid = typeof(IPropertyStore).GUID;
+          if (si2.GetPropertyStore(GetPropertyStoreOptions.BestEffort, ref iid, out var store2) == 0
+              && store2 != null) {
+            try {
+              using var pv2 = new PropVariant();
+              var pk2 = PKEY_Network_DeviceType;
+              if (store2.GetValue(ref pk2, pv2) == HResult.S_OK && pv2.Value is uint devType2)
+                return NetworkDeviceTypeToCategory(devType2);
+            } finally { Marshal.ReleaseComObject(store2); }
+          }
+          // Last resort: read the item-type text and look for "printer" keyword.
+          var pkType = PKEY_ItemTypeText;
+          if (si2.GetString(ref pkType, out var typeText) == HResult.S_OK
+              && !string.IsNullOrEmpty(typeText)
+              && typeText.IndexOf("print", StringComparison.OrdinalIgnoreCase) >= 0)
+            return "Printers";
+        } finally { Marshal.ReleaseComObject(si2); }
+      }
+    } catch { }
+
+    // Step 3 — UPnP device-type encoded in the parsing path.
+    // SSDP virtual items have a segment like "uuid:upnp-<DeviceType>-<uuid>".
+    // The UPnP device type strings are defined by the UPnP Forum device schema.
+    var upnpCategory = GetCategoryFromUpnpPath(parsePath);
+    if (upnpCategory != null) return upnpCategory;
+
+    // Step 4 — structural fallback for classic WNet nodes.
+    if (isFolder)
+      return parsePath.StartsWith(@"\\", StringComparison.Ordinal) ? "Computers" : "Network";
+    return "Printers";
+  }
+
+  // Extracts the Explorer network category from a UPnP SSDP parsing path that contains
+  // a "uuid:upnp-<DeviceType>-<guid>" segment, e.g.:
+  //   ::{...}\Provider\Microsoft.Networking.SSDP//uuid:upnp-InternetGatewayDevice-...
+  // Returns null for paths that are not from a recognised UPnP/WSD provider.
+  private static string? GetCategoryFromUpnpPath(string parsePath) {
+    const string prefix = "uuid:upnp-";
+    int idx = parsePath.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+    if (idx < 0) {
+      // WSD (PnpX) devices: property store (step 2) already ran and failed to
+      // return a device type.  Most WSD devices without a resolvable type are
+      // computers; return "Computers" as the best guess.
+      if (parsePath.IndexOf("Microsoft.Networking.PnpX", StringComparison.OrdinalIgnoreCase) >= 0)
+        return "Computers";
+      if (parsePath.IndexOf("Microsoft.Networking.WSD", StringComparison.OrdinalIgnoreCase) >= 0)
+        return "Printers";
+      // Any other SSDP path without a recognised uuid:upnp- device type is an
+      // unknown device — avoid the WNet structural fallback (which would wrongly
+      // classify it as a computer or printer).
+      if (parsePath.IndexOf("Microsoft.Networking.SSDP", StringComparison.OrdinalIgnoreCase) >= 0)
+        return "Other devices";
+      return null;
+    }
+
+    // Extract the device type token between the prefix and the next '-' (the uuid separator).
+    int start = idx + prefix.Length;
+    int end   = parsePath.IndexOf('-', start);
+    string deviceType = end >= 0
+        ? parsePath.Substring(start, end - start)
+        : parsePath.Substring(start);
+
+    // Map UPnP Forum device type strings to Explorer group labels.
+    return deviceType.ToUpperInvariant() switch {
+      // Media
+      "MEDIARENDERER" or "MEDIASERVER" or "DIGITALMEDIARENDERER"
+        or "DIGITALMEDIASERVER" or "DIGITALMEDIAPLAYER"
+        => "Media devices",
+
+      // Printers
+      "PRINTDEVICE" or "PRINTER"
+        => "Printers",
+
+      // Network infrastructure (routers, gateways, access points)
+      "INTERNETGATEWAYDEVICE" or "WANDEVICE" or "WANCONNECTIONDEVICE"
+        or "ROUTER" or "WIRELESSACCESSPOINT" or "WIFIAP"
+        => "Infrastructure",
+
+      // Storage
+      "NETWORKATTACHEDSTORAGE" or "STORAGEDRIVE"
+        => "Storage",
+
+      // Everything else is Other devices
+      _ => "Other devices",
+    };
+  }
 
   // ── P/Invoke declarations ─────────────────────────────────────────────────
+
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+  private static extern int SHGetPropertyStoreFromParsingName(
+      string pszPath, IntPtr pbc, int flags,
+      [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out IPropertyStore ppv);
+
+  // GPS_DEFAULT — read-only, all properties, no slow/offline items.
+  private const int GPS_DEFAULT = 0;
 
   [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
   private static extern void SHCreateItemFromParsingName(
@@ -573,6 +788,15 @@ public static class NativeShell {
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
       [MarshalAs(UnmanagedType.Interface)] out IShellItem2 ppv);
 
+  // Creates an IShellItem2 from a parent IShellFolder + child PIDL — used in network enumeration.
+  [DllImport("shell32.dll", PreserveSig = false)]
+  private static extern void SHCreateItemWithParent(
+      IntPtr pidlParent,
+      [MarshalAs(UnmanagedType.Interface)] IShellFolder psfParent,
+      IntPtr pidl,
+      [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+      [MarshalAs(UnmanagedType.Interface)] out IShellItem2 ppv);
+
   // Converts any COM shell object to its absolute PIDL (needed for FindFolderFromIDList).
   [DllImport("shell32.dll", PreserveSig = false)]
   private static extern void SHGetIDListFromObject(
@@ -600,6 +824,19 @@ public static class NativeShell {
 
   [DllImport("ole32.dll")]
   private static extern void CoTaskMemFree(IntPtr pv);
+
+  [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+  private static extern int StrRetToBufW(ref STRRET pstr, IntPtr pidl, [Out] char[] pszBuf, uint cchBuf);
+
+  // Resolves all three STRRET union cases (WSTR/OFFSET/CSTR) into a managed string.
+  // Must be called before freeing childPidl.
+  private static string? StrRetToStr(ref STRRET strret, IntPtr pidl) {
+    const int MaxPath = 520;
+    var buf = new char[MaxPath];
+    return StrRetToBufW(ref strret, pidl, buf, (uint)buf.Length) == 0
+        ? new string(buf).TrimEnd('\0')
+        : null;
+  }
 
   [DllImport("ole32.dll")]
   private static extern int CoCreateInstance(
@@ -692,6 +929,10 @@ public static class NativeShell {
   [DllImport("shell32.dll", PreserveSig = true)]
   internal static extern int SHGetDesktopFolder(
       [MarshalAs(UnmanagedType.Interface)] out object ppshf);
+
+  [DllImport("shell32.dll", PreserveSig = true)]
+  private static extern int SHGetSpecialFolderLocation(
+      IntPtr hwndOwner, int nFolder, out IntPtr ppidl);
 
   [DllImport("shell32.dll", PreserveSig = true)]
   internal static extern int SHParseDisplayName(
@@ -1759,14 +2000,8 @@ public static class NativeShell {
                     var strretDisplay = default(STRRET);
                     folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strretParsing);
                     folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
-                    string? parsingName = strretParsing.uType == 0
-                        ? Marshal.PtrToStringUni(strretParsing.pOleStr) : null;
-                    if (strretParsing.uType == 0 && strretParsing.pOleStr != IntPtr.Zero)
-                      CoTaskMemFree(strretParsing.pOleStr);
-                    string? displayName = strretDisplay.uType == 0
-                        ? Marshal.PtrToStringUni(strretDisplay.pOleStr) : null;
-                    if (strretDisplay.uType == 0 && strretDisplay.pOleStr != IntPtr.Zero)
-                      CoTaskMemFree(strretDisplay.pOleStr);
+                    string? parsingName  = StrRetToStr(ref strretParsing, childPidl);
+                    string? displayName  = StrRetToStr(ref strretDisplay, childPidl);
                     if (!string.IsNullOrEmpty(parsingName) && !string.IsNullOrEmpty(displayName))
                       result.Add((displayName, parsingName));
                   } catch { } finally { CoTaskMemFree(childPidl); }
@@ -1873,6 +2108,17 @@ public static class NativeShell {
 
   public static List<ShellItem> EnumerateKnownFolderChildren(Guid folderId) {
     var result = new List<ShellItem>();
+
+    // Network folder needs special handling: use SHGetDesktopFolder +
+    // SHGetSpecialFolderLocation(CSIDL_NETWORK) so ALL categories are visible
+    // (UPnP, WSD, printers, infrastructure), not just SMB computers.
+    // The standard SFGAO_FILESYSTEM filter must also be skipped because network
+    // devices are virtual items with no filesystem path.
+    if (folderId == FOLDERID_NetworkFolder) {
+      EnumerateNetworkFolderAsShellItems(result);
+      return result;
+    }
+
     try {
       IShellItem folderItem = null;
       try {
@@ -1897,20 +2143,13 @@ public static class NativeShell {
                 try {
                   var strret = default(STRRET);
                   folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
-                  string? parsePath = strret.uType == 0
-                      ? Marshal.PtrToStringUni(strret.pOleStr) : null;
-                  if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
-                    CoTaskMemFree(strret.pOleStr);
-                  if (parsePath == null)
+                  string? parsePath = StrRetToStr(ref strret, childPidl);
+                  if (string.IsNullOrEmpty(parsePath))
                     continue;
 
                   var strretDisplay = default(STRRET);
                   folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
-                  string? displayName = strretDisplay.uType == 0
-                      ? Marshal.PtrToStringUni(strretDisplay.pOleStr)
-                      : Path.GetFileName(parsePath);
-                  if (strretDisplay.uType == 0 && strretDisplay.pOleStr != IntPtr.Zero)
-                    CoTaskMemFree(strretDisplay.pOleStr);
+                  string? displayName = StrRetToStr(ref strretDisplay, childPidl);
 
                   uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
                   folder.GetAttributesOf(1, [childPidl], ref attrs);
@@ -1923,11 +2162,17 @@ public static class NativeShell {
                   if (!isFolder && !isFs && !Directory.Exists(parsePath))
                     continue;
 
-                  result.Add(new ShellItem {
+                  var item = new ShellItem {
                     Name = displayName ?? Path.GetFileName(parsePath),
                     FullPath = parsePath,
                     IsFolder = isFolder,
-                  });
+                  };
+                  // ThisPC children are drives / special folders: always use IShellItem2
+                  // so display names like "Local Disk (C:)" are retrieved correctly.
+                  // FindFirstFileEx does not work on drive roots.
+                  EnrichFromIShellItem2(item, parsePath);
+                  EnrichDriveSpace(item, parsePath);
+                  result.Add(item);
                 } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
               }
             } finally { Marshal.ReleaseComObject(enumIdList); }
@@ -1938,8 +2183,70 @@ public static class NativeShell {
     return result;
   }
 
-  /// <summary>
-  /// Enumerates the direct children of any shell item reachable by <paramref name="parsingPath"/>.
+  // Enumerates the Network shell folder and converts each child into a ShellItem.
+  // Uses the SHGetDesktopFolder + CSIDL_NETWORK binding path (identical to
+  // EnumerateNetworkResources) so ALL categories come back.  The SFGAO_FILESYSTEM
+  // filter is intentionally omitted because network devices are virtual items.
+  private static void EnumerateNetworkFolderAsShellItems(List<ShellItem> result) {
+    IShellFolder? netFolder  = null;
+    IntPtr        networkPidl = IntPtr.Zero;
+    try {
+      if (SHGetDesktopFolder(out var desktopObj) != 0) return;
+      var desktop = (IShellFolder)desktopObj;
+      try {
+        if (SHGetSpecialFolderLocation(IntPtr.Zero, CSIDL_NETWORK, out networkPidl) != 0
+            || networkPidl == IntPtr.Zero) return;
+        desktop.BindToObject(networkPidl, IntPtr.Zero, IID_IShellFolder, out var netObj);
+        netFolder = (IShellFolder)netObj;
+      } finally { Marshal.ReleaseComObject(desktop); }
+    } catch { return; }
+    finally {
+      if (networkPidl != IntPtr.Zero) Marshal.FreeCoTaskMem(networkPidl);
+    }
+
+    if (netFolder == null) return;
+    try {
+      const uint flags = SHCONTF_FOLDERS | SHCONTF_NONFOLDERS
+                       | SHCONTF_NETPRINTERSRCH | SHCONTF_SHAREABLE
+                       | SHCONTF_ENABLE_ASYNC;
+      if (netFolder.EnumObjects(IntPtr.Zero, flags, out var enumIdList) != 0
+          || enumIdList == null) return;
+      try {
+        while (enumIdList.Next(1, out var childPidl, out _) == 0) {
+          try {
+            var strretParsing = default(STRRET);
+            netFolder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strretParsing);
+            string? parsePath = StrRetToStr(ref strretParsing, childPidl);
+            if (string.IsNullOrEmpty(parsePath)) continue;
+
+            var strretDisplay = default(STRRET);
+            netFolder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
+            string? displayName = StrRetToStr(ref strretDisplay, childPidl);
+            if (string.IsNullOrEmpty(displayName)) displayName = parsePath;
+
+            uint attrs = SFGAO_FOLDER;
+            netFolder.GetAttributesOf(1, [childPidl], ref attrs);
+            bool isFolder = (attrs & SFGAO_FOLDER) != 0;
+
+            string category = GetNetworkItemCategory(netFolder, childPidl, parsePath, isFolder);
+
+            var shellItem = new ShellItem {
+              Name          = displayName,
+              DisplayName   = displayName,
+              FullPath      = parsePath,
+              IsFolder      = isFolder,
+              ItemType      = category,
+              IsNetworkItem = true,
+            };
+            result.Add(shellItem);
+          } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
+        }
+      } finally { Marshal.ReleaseComObject(enumIdList); }
+    } catch { }
+    finally { Marshal.ReleaseComObject(netFolder); }
+  }
+
+
   /// Works for virtual paths like <c>::{GUID}\foo.library-ms</c> that cannot be handled
   /// by <see cref="EnumerateKnownFolderChildren"/> or <c>FindFirstFileEx</c>.
   /// </summary>
@@ -1959,20 +2266,13 @@ public static class NativeShell {
                 try {
                   var strret = default(STRRET);
                   folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
-                  string? parsePath = strret.uType == 0
-                      ? Marshal.PtrToStringUni(strret.pOleStr) : null;
-                  if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
-                    CoTaskMemFree(strret.pOleStr);
-                  if (parsePath == null)
+                  string? parsePath = StrRetToStr(ref strret, childPidl);
+                  if (string.IsNullOrEmpty(parsePath))
                     continue;
 
                   var strretDisplay = default(STRRET);
                   folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
-                  string? displayName = strretDisplay.uType == 0
-                      ? Marshal.PtrToStringUni(strretDisplay.pOleStr)
-                      : Path.GetFileName(parsePath);
-                  if (strretDisplay.uType == 0 && strretDisplay.pOleStr != IntPtr.Zero)
-                    CoTaskMemFree(strretDisplay.pOleStr);
+                  string? displayName = StrRetToStr(ref strretDisplay, childPidl);
 
                   uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
                   folder.GetAttributesOf(1, [childPidl], ref attrs);
@@ -1982,11 +2282,18 @@ public static class NativeShell {
                   if (!isFolder && !isFs && !Directory.Exists(parsePath))
                     continue;
 
-                  result.Add(new ShellItem {
+                  var item = new ShellItem {
                     Name = displayName ?? Path.GetFileName(parsePath),
                     FullPath = parsePath,
                     IsFolder = isFolder,
-                  });
+                  };
+                  // Library children are real filesystem paths — use FindFirstFileEx.
+                  // Only use IShellItem2 for virtual items that have no FS path.
+                  if (isFs)
+                    EnrichFromFindFirstFile(item, parsePath);
+                  else
+                    EnrichFromIShellItem2(item, parsePath);
+                  result.Add(item);
                 } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
               }
             } finally { Marshal.ReleaseComObject(enumIdList); }
@@ -1997,21 +2304,180 @@ public static class NativeShell {
     return result;
   }
 
+  /// <summary>
+  /// Fills metadata on <paramref name="item"/> using <c>FindFirstFileEx</c> — much
+  /// faster than <c>IShellItem2</c> for real filesystem paths because it avoids
+  /// one COM creation call + four property-store reads per item.
+  /// Falls back silently if the path is not accessible.
+  /// </summary>
+  private static void EnrichFromFindFirstFile(ShellItem item, string parsePath) {
+    if (string.IsNullOrEmpty(parsePath)) return;
+    try {
+      var hFind = FindFirstFileEx(parsePath,
+          FINDEX_INFO_BASIC, out var data, FINDEX_SEARCH_NAME, IntPtr.Zero, LARGE_FETCH);
+      if (hFind == INVALID_HANDLE_VALUE) return;
+      FindClose(hFind);
+
+      if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE) != 0) return;
+
+      item.DateModified = DateTime.FromFileTimeUtc(data.ftLastWriteTime).ToLocalTime();
+      item.IsHidden     = (data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+      // Ensure DisplayName mirrors the name already set from IShellFolder.
+      if (string.IsNullOrEmpty(item.DisplayName))
+        item.DisplayName = item.Name;
+
+      if (item.IsFolder) {
+        item.ItemType = "File folder";
+      } else {
+        long size = ((long)data.nFileSizeHigh << 32) | (uint)data.nFileSizeLow;
+        item.SizeBytes = size;
+        item.Size      = FormatSize(size);
+        item.ItemType  = GetItemTypeString(Path.GetExtension(parsePath));
+      }
+    } catch { }
+  }
+
+  /// <summary>
+  /// Fills <see cref="ShellItem.ItemType"/>, <see cref="ShellItem.DateModified"/>,
+  /// <see cref="ShellItem.Size"/>, and <see cref="ShellItem.SizeBytes"/> from the
+  /// shell property store via <c>IShellItem2</c>.  Safe to call for both real filesystem
+  /// paths and virtual/shell-namespace paths (ThisPC drives, Libraries, etc.).
+  /// Does nothing if the COM call fails.
+  /// </summary>
+  private static void EnrichFromIShellItem2(ShellItem item, string parsePath) {
+    try {
+      SHCreateItemFromParsingNameItem2(parsePath, IntPtr.Zero, IID_IShellItem2, out var si2);
+      if (si2 is null) return;
+
+      // Display name — only overwrite if the shell gives a richer name than the
+      // IShellFolder display name we already have (e.g. "Local Disk (C:)" vs "C:").
+      try {
+        if (si2.GetDisplayName(SIGDN.NORMALDISPLAY, out var shellName) == HResult.S_OK
+            && !string.IsNullOrEmpty(shellName)) {
+          item.Name = shellName;
+          item.DisplayName = shellName;
+        }
+      } catch { }
+
+      // Item type text ("File folder", "Local Disk", "System Folder", …)
+      try {
+        var pk = PKEY_ItemTypeText;
+        if (si2.GetString(ref pk, out var typeText) == HResult.S_OK
+            && !string.IsNullOrEmpty(typeText))
+          item.ItemType = typeText;
+      } catch { }
+
+      // Date modified
+      try {
+        var pk = PKEY_DateModified;
+        si2.GetFileTime(ref pk, out var ft);
+        long ticks = (((long)ft.dwHighDateTime) << 32) | (uint)ft.dwLowDateTime;
+        if (ticks > 0)
+          item.DateModified = DateTime.FromFileTimeUtc(ticks).ToLocalTime();
+      } catch { }
+
+      // Size (only meaningful for files)
+      if (!item.IsFolder) {
+        try {
+          var pk = PKEY_Size;
+          if (si2.GetUInt64(ref pk, out ulong sizeBytes) == HResult.S_OK && sizeBytes > 0) {
+            item.SizeBytes = (long)sizeBytes;
+            item.Size      = FormatSize((long)sizeBytes);
+          }
+        } catch { }
+      }
+    } catch { }
+  }
+
   // ── FindFirstFileEx directory enumeration ─────────────────────────────────
 
-  // Cache "EXT file" strings so repeated extensions don't heap-allocate a new string every item.
+  // Cache shell-friendly type strings ("PNG Image", "Text Document") keyed by extension.
+  // SHGetFileInfo with SHGFI_USEFILEATTRIBUTES|SHGFI_TYPENAME reads from the registry
+  // only (no file access), so it is safe to call on any thread and is fast per extension.
   private static readonly Dictionary<string, string> _extTypeStringCache =
       new(StringComparer.OrdinalIgnoreCase);
 
+  /// <summary>
+  /// Populates drive-space properties on <paramref name="item"/> when the item
+  /// maps to an accessible Windows drive root (e.g. "C:\").
+  /// No-ops and leaves the item untouched if the path is not a drive root or
+  /// the drive is not ready (removable media not inserted, etc.).
+  /// </summary>
+  private static void EnrichDriveSpace(ShellItem item, string parsePath) {
+    // Only roots like "C:\" qualify; virtual paths, UNC shares, etc. are handled below.
+    try {
+      // Normalise: accept "C:", "C:\", "\\server\share", etc.
+      var norm = parsePath?.TrimEnd('\\', '/');
+      if (string.IsNullOrEmpty(norm)) return;
+
+      DriveInfo? di = null;
+      DriveType driveType = DriveType.Unknown;
+
+      // Try to build a DriveInfo for a standard single-letter drive root.
+      if (norm.Length == 2 && norm[1] == ':') {
+        di = new DriveInfo(norm);
+        driveType = di.DriveType;
+      } else if (norm.Length == 3 && norm[1] == ':' && (norm[2] == '\\' || norm[2] == '/')) {
+        di = new DriveInfo(norm);
+        driveType = di.DriveType;
+      } else {
+        // Network paths or device paths — attempt to match via DriveInfo enumeration.
+        foreach (var d in DriveInfo.GetDrives()) {
+          if (string.Equals(d.RootDirectory.FullName.TrimEnd('\\'),
+                            norm, StringComparison.OrdinalIgnoreCase)) {
+            di = d;
+            driveType = d.DriveType;
+            break;
+          }
+        }
+      }
+
+      if (di == null) return;
+
+      // Classify for grouping header (mirrors Windows Explorer labels).
+      item.DriveGroupType = driveType switch {
+        DriveType.Removable or DriveType.CDRom => "Devices and drives",
+        DriveType.Network                       => "Network locations",
+        DriveType.Fixed                         => "Devices and drives",
+        _                                       => "Devices and drives",
+      };
+
+      item.IsDrive = true;
+
+      if (!di.IsReady) return; // removable media not inserted — leave space at 0
+
+      long total = di.TotalSize;
+      long free  = di.TotalFreeSpace;
+      item.DriveTotalBytes = total;
+      item.DriveUsedBytes  = total - free;
+    } catch { }
+  }
+
   public static string GetItemTypeStringPublic(string ext) => GetItemTypeString(ext);
   private static string GetItemTypeString(string ext) {
-    if (ext.Length <= 1)
+    if (string.IsNullOrEmpty(ext) || ext.Length <= 1)
       return "File";
     if (_extTypeStringCache.TryGetValue(ext, out var cached))
       return cached;
-    var s = ext[1..].ToUpperInvariant() + " file";
-    _extTypeStringCache[ext] = s;
-    return s;
+
+    // Ask the shell for the friendly type name. SHGFI_USEFILEATTRIBUTES means the
+    // file is never opened — only the extension drives the registry lookup.
+    string result;
+    try {
+      var dummy = "x" + ext; // e.g. "x.png"
+      var sfi   = new SHFILEINFO();
+      SHGetFileInfo(dummy, 0x80 /* FILE_ATTRIBUTE_NORMAL */, ref sfi,
+          (uint)Marshal.SizeOf<SHFILEINFO>(),
+          SHGFI_USEFILEATTRIBUTES | SHGFI_TYPENAME);
+      result = !string.IsNullOrWhiteSpace(sfi.szTypeName)
+          ? sfi.szTypeName
+          : ext[1..].ToUpperInvariant() + " file";
+    } catch {
+      result = ext[1..].ToUpperInvariant() + " file";
+    }
+
+    _extTypeStringCache[ext] = result;
+    return result;
   }
 
   public static (List<ShellItem> folders, List<ShellItem> files)
@@ -2293,10 +2759,7 @@ public static class NativeShell {
             try {
               var strret = default(STRRET);
               sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
-              string? fullPath = strret.uType == 0
-                  ? Marshal.PtrToStringUni(strret.pOleStr) : null;
-              if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
-                Marshal.FreeCoTaskMem(strret.pOleStr);
+              string? fullPath = StrRetToStr(ref strret, childPidl);
 
               if (string.IsNullOrEmpty(fullPath)) continue;
               string name = Path.GetFileName(fullPath);
@@ -2358,10 +2821,7 @@ public static class NativeShell {
             try {
               var strret = default(STRRET);
               sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
-              string? fullPath = strret.uType == 0
-                  ? Marshal.PtrToStringUni(strret.pOleStr) : null;
-              if (strret.uType == 0 && strret.pOleStr != IntPtr.Zero)
-                Marshal.FreeCoTaskMem(strret.pOleStr);
+              string? fullPath = StrRetToStr(ref strret, childPidl);
 
               if (string.IsNullOrEmpty(fullPath)) continue;
               string name = Path.GetFileName(fullPath);
@@ -2500,12 +2960,271 @@ public static class NativeShell {
 
   // ── FormatSize helper ─────────────────────────────────────────────────────
 
-  public static string FormatSize(long bytes) => bytes switch {
-    < 1024 => $"{bytes} B",
-    < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
-    < 1024 * 1024 * 1024 => $"{bytes / (1024.0 * 1024):F1} MB",
-    _ => $"{bytes / (1024.0 * 1024 * 1024):F1} GB"
-  };
+  // Windows Explorer always shows file sizes in KB, rounded up to the nearest KB,
+  // with a thousands separator — e.g. "1 KB", "12 KB", "1,234 KB".
+  // Zero-byte files show as "0 KB". Folders (bytes == -1 or 0) are left blank by the caller.
+  public static string FormatSize(long bytes) {
+    if (bytes <= 0) return "0 KB";
+    long kb = (bytes + 1023) / 1024;   // ceiling division → always at least 1 KB
+    return $"{kb:N0} KB";
+  }
+
+  // ── Network (shell namespace) ─────────────────────────────────────────────────────────────
+  //
+  // Real Windows Explorer enumerates the Network neighbourhood by walking the shell namespace
+  // rooted at FOLDERID_NetworkFolder via IShellFolder.  This gives ALL device categories
+  // (Computers, Media devices, Infrastructure, Printers, Other devices…) exactly as Explorer
+  // shows them — something WNetOpenEnum can never do because it only sees disk shares.
+  // WNet constants are kept only for the sub-level share enumeration under a specific server.
+
+  private const uint RESOURCETYPE_ANY        = 0x00000000;  // all resource types
+  private const uint RESOURCETYPE_DISK       = 0x00000001;
+  private const uint RESOURCETYPE_PRINT      = 0x00000002;
+  private const uint RESOURCEUSAGE_CONTAINER = 0x00000002;
+  private const uint SCOPE_GLOBALNET         = 0x00000002;
+  private const int  NET_NO_ERROR            = 0;
+  private const int  ERROR_NO_MORE_ITEMS     = 259;
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct NETRESOURCE {
+    public uint dwScope;
+    public uint dwType;
+    public uint dwDisplayType;
+    public uint dwUsage;
+    [MarshalAs(UnmanagedType.LPWStr)] public string? lpLocalName;
+    [MarshalAs(UnmanagedType.LPWStr)] public string? lpRemoteName;
+    [MarshalAs(UnmanagedType.LPWStr)] public string? lpComment;
+    [MarshalAs(UnmanagedType.LPWStr)] public string? lpProvider;
+  }
+
+  [DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+  private static extern int WNetOpenEnum(
+      uint dwScope, uint dwType, uint dwUsage,
+      ref NETRESOURCE lpNetResource, out IntPtr lphEnum);
+
+  // Overload that accepts a null (IntPtr.Zero) network resource for top-level enumeration.
+  [DllImport("mpr.dll", CharSet = CharSet.Unicode, EntryPoint = "WNetOpenEnumW")]
+  private static extern int WNetOpenEnumNull(
+      uint dwScope, uint dwType, uint dwUsage,
+      IntPtr lpNetResource, out IntPtr lphEnum);
+
+  [DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+  private static extern int WNetEnumResource(
+      IntPtr hEnum, ref uint lpcCount, IntPtr lpBuffer, ref uint lpBufferSize);
+
+  [DllImport("mpr.dll")]
+  private static extern int WNetCloseEnum(IntPtr hEnum);
+
+  // dwDisplayType values (mpr.h RESOURCEDISPLAYTYPE_*).
+  private const uint RESOURCEDISPLAYTYPE_NETWORK   = 0x00;
+  private const uint RESOURCEDISPLAYTYPE_DOMAIN    = 0x01;
+  private const uint RESOURCEDISPLAYTYPE_SERVER    = 0x02;
+  private const uint RESOURCEDISPLAYTYPE_SHARE     = 0x03;
+  private const uint RESOURCEDISPLAYTYPE_FILE      = 0x04;
+  private const uint RESOURCEDISPLAYTYPE_GROUP     = 0x05;
+  private const uint RESOURCEDISPLAYTYPE_NDSCONTAINER = 0x06;
+  private const uint RESOURCEDISPLAYTYPE_TREE      = 0x07;
+  private const uint RESOURCEDISPLAYTYPE_DIRECTORY = 0x09;
+
+  /// <summary>Result item from a network neighbourhood enumeration.</summary>
+  public sealed class NetworkResource {
+    public required string RemoteName   { get; set; }
+    public required string DisplayName  { get; set; }
+    /// <summary>Shell-friendly device category, e.g. "Computer", "Media device".</summary>
+    public required string Category     { get; set; }
+    /// <summary>True = this node can be expanded (server / workgroup / device group).</summary>
+    public bool IsContainer { get; set; }
+    /// <summary>True = this is a navigable disk share (UNC path).</summary>
+    public bool IsShare     { get; set; }
+  }
+
+  /// <summary>
+  /// Enumerates the Network neighbourhood using the same approach as the original
+  /// BExplorer.Shell library: <c>SHGetDesktopFolder</c> +
+  /// <c>SHGetSpecialFolderLocation(CSIDL_NETWORK)</c> +
+  /// <c>IShellFolder.BindToObject</c> + <c>EnumObjects</c> with
+  /// <c>NETPRINTERSRCH | SHAREABLE</c> flags.
+  ///
+  /// Top-level (<paramref name="parentParsingPath"/> == null):
+  ///   Returns every direct child: workgroups, UPnP device groups, media devices,
+  ///   printers, infrastructure nodes, etc. — exactly as Explorer shows them.
+  ///
+  /// Sub-container (non-null <paramref name="parentParsingPath"/>):
+  ///   Returns the direct children of that shell parsing path.
+  ///
+  /// <b>Must be called on a background thread.</b>
+  /// </summary>
+  public static List<NetworkResource> EnumerateNetworkResources(
+      string? parentParsingPath = null) {
+
+    var result = new List<NetworkResource>();
+
+    if (parentParsingPath == null) {
+      // BExplorer-proven path:
+      //   SHGetDesktopFolder()                        → IShellFolder (desktop root)
+      //   SHGetSpecialFolderLocation(CSIDL_NETWORK)   → PIDL for Network
+      //   desktop.BindToObject(networkPidl)            → IShellFolder for Network
+      //   EnumObjects with FOLDERS|NONFOLDERS|NETPRINTERSRCH|SHAREABLE
+      IShellFolder? netFolder  = null;
+      IntPtr        networkPidl = IntPtr.Zero;
+      try {
+        if (SHGetDesktopFolder(out var desktopObj) == 0) {
+          var desktop = (IShellFolder)desktopObj;
+          try {
+            if (SHGetSpecialFolderLocation(IntPtr.Zero, CSIDL_NETWORK, out networkPidl) == 0
+                && networkPidl != IntPtr.Zero) {
+              desktop.BindToObject(networkPidl, IntPtr.Zero, IID_IShellFolder, out var netObj);
+              netFolder = (IShellFolder)netObj;
+            }
+          } finally { Marshal.ReleaseComObject(desktop); }
+        }
+      } catch { }
+      finally {
+        if (networkPidl != IntPtr.Zero) Marshal.FreeCoTaskMem(networkPidl);
+      }
+
+      if (netFolder != null) {
+        try { EnumerateNetworkFolderChildren(netFolder, result); }
+        finally { Marshal.ReleaseComObject(netFolder); }
+      }
+
+    } else {
+      // Sub-container: bind via desktop ParseDisplayName, then enumerate children.
+      IShellFolder? subFolder  = null;
+      IntPtr        childPidl2 = IntPtr.Zero;
+      try {
+        if (SHGetDesktopFolder(out var desktopObj) == 0) {
+          var desktop = (IShellFolder)desktopObj;
+          try {
+            uint eaten = 0, dAttrs = 0;
+            desktop.ParseDisplayName(IntPtr.Zero, IntPtr.Zero,
+                parentParsingPath, out eaten, out childPidl2, ref dAttrs);
+            if (childPidl2 != IntPtr.Zero) {
+              desktop.BindToObject(childPidl2, IntPtr.Zero, IID_IShellFolder, out var subObj);
+              subFolder = (IShellFolder)subObj;
+            }
+          } finally { Marshal.ReleaseComObject(desktop); }
+        }
+      } catch { }
+      finally {
+        if (childPidl2 != IntPtr.Zero) Marshal.FreeCoTaskMem(childPidl2);
+      }
+
+      if (subFolder != null) {
+        try { EnumerateNetworkFolderChildren(subFolder, result); }
+        finally { Marshal.ReleaseComObject(subFolder); }
+      } else {
+        // Last resort for plain UNC server paths: WNet share enumeration.
+        result.AddRange(EnumerateServerShares(parentParsingPath));
+      }
+    }
+
+    return result;
+  }
+
+  // Enumerates the immediate children of a shell IShellFolder and converts each to a
+  // NetworkResource.  Uses NETPRINTERSRCH|SHAREABLE so printers, UPnP devices, media
+  // devices, infrastructure nodes etc. are included — not just computers.
+  // Does NOT recurse: Explorer shows workgroups/device-groups as expandable nodes.
+  private static void EnumerateNetworkFolderChildren(
+      IShellFolder folder, List<NetworkResource> result) {
+
+    const uint enumFlags = SHCONTF_FOLDERS | SHCONTF_NONFOLDERS
+                         | SHCONTF_NETPRINTERSRCH | SHCONTF_SHAREABLE
+                         | SHCONTF_ENABLE_ASYNC; // items may arrive later via shell notifications
+
+    if (folder.EnumObjects(IntPtr.Zero, enumFlags, out var enumIdList) != 0
+        || enumIdList == null) return;
+    try {
+      while (enumIdList.Next(1, out var childPidl, out _) == 0) {
+        try {
+          // Parsing name — used as the unique identifier / navigation path.
+          var strretParsing = default(STRRET);
+          folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strretParsing);
+          string? parseName = StrRetToStr(ref strretParsing, childPidl);
+          if (string.IsNullOrEmpty(parseName)) continue;
+
+          // Display name — what the user sees.
+          var strretDisplay = default(STRRET);
+          folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
+          string? displayName = StrRetToStr(ref strretDisplay, childPidl);
+          if (string.IsNullOrEmpty(displayName)) displayName = parseName;
+
+          // Folder flag — containers are expandable (workgroup, device group…).
+          uint attrs = SFGAO_FOLDER;
+          folder.GetAttributesOf(1, [childPidl], ref attrs);
+          bool isFolder = (attrs & SFGAO_FOLDER) != 0;
+
+          string category = GetNetworkItemCategory(folder, childPidl, parseName, isFolder);
+
+          bool isShare = !isFolder
+                      && (parseName.StartsWith(@"\\", StringComparison.Ordinal)
+                          || parseName.StartsWith("//", StringComparison.Ordinal));
+
+          result.Add(new NetworkResource {
+            RemoteName  = parseName,
+            DisplayName = displayName,
+            Category    = category,
+            IsContainer = isFolder,
+            IsShare     = isShare,
+          });
+        } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
+      }
+    } finally { Marshal.ReleaseComObject(enumIdList); }
+  }
+
+  /// <summary>
+  /// Enumerates disk shares directly under a server using WNetEnumResource.
+  /// Used when the user expands a server node that has no shell sub-namespace
+  /// (i.e. its children are UNC shares, not further shell containers).
+  /// <b>Must be called on a background thread.</b>
+  /// </summary>
+  public static List<NetworkResource> EnumerateServerShares(string serverRemoteName) {
+    var    result = new List<NetworkResource>();
+    IntPtr hEnum  = IntPtr.Zero;
+
+    var nr = new NETRESOURCE {
+      dwScope      = 0x00000002, // RESOURCE_GLOBALNET
+      dwType       = RESOURCETYPE_DISK,
+      dwUsage      = RESOURCEUSAGE_CONTAINER,
+      lpRemoteName = serverRemoteName,
+    };
+    int err = WNetOpenEnum(SCOPE_GLOBALNET, RESOURCETYPE_DISK, 0, ref nr, out hEnum);
+    if (err != NET_NO_ERROR || hEnum == IntPtr.Zero) return result;
+
+    try {
+      const uint bufSize = 16384;
+      IntPtr     buf     = Marshal.AllocHGlobal((int)bufSize);
+      try {
+        while (true) {
+          uint count   = 0xFFFFFFFF;
+          uint bufUsed = bufSize;
+          err = WNetEnumResource(hEnum, ref count, buf, ref bufUsed);
+          if (err == ERROR_NO_MORE_ITEMS) break;
+          if (err != NET_NO_ERROR)        break;
+          if (count == 0)                 break;
+
+          int    stride = Marshal.SizeOf<NETRESOURCE>();
+          IntPtr ptr    = buf;
+          for (uint i = 0; i < count; i++, ptr = IntPtr.Add(ptr, stride)) {
+            var r = Marshal.PtrToStructure<NETRESOURCE>(ptr);
+            if (string.IsNullOrEmpty(r.lpRemoteName)) continue;
+            var baseName = r.lpRemoteName.TrimStart('\\');
+            var disp     = !string.IsNullOrWhiteSpace(r.lpComment)
+                ? $"{baseName} ({r.lpComment})" : baseName;
+            result.Add(new NetworkResource {
+              RemoteName  = r.lpRemoteName,
+              DisplayName = disp,
+              Category    = "Network Share",
+              IsContainer = false,
+              IsShare     = true,
+            });
+          }
+        }
+      } finally { Marshal.FreeHGlobal(buf); }
+    } finally { WNetCloseEnum(hEnum); }
+    return result;
+  }
 
   // ── IFileOperation helper ─────────────────────────────────────────────────
 
@@ -3273,6 +3992,30 @@ public static class NativeShell {
     encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
         rotatedWidth, rotatedHeight, 96, 96, pixels);
     await encoder.FlushAsync();
+  }
+
+  // ── WSL / Linux ─────────────────────────────────────────────────────────────
+
+  /// <summary>
+  /// Returns the display names of all installed WSL distributions by reading
+  /// <c>HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Lxss</c>.
+  /// Returns an empty list when WSL is not installed or no distros are registered.
+  /// </summary>
+  public static List<string> EnumerateWslDistributions() {
+    var result = new List<string>();
+    try {
+      using var lxss = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+          @"SOFTWARE\Microsoft\Windows\CurrentVersion\Lxss");
+      if (lxss == null) return result;
+
+      foreach (var subName in lxss.GetSubKeyNames()) {
+        using var sub = lxss.OpenSubKey(subName);
+        if (sub?.GetValue("DistributionName") is string name && !string.IsNullOrEmpty(name))
+          result.Add(name);
+      }
+    }
+    catch { /* registry not accessible */ }
+    return result;
   }
 
 }

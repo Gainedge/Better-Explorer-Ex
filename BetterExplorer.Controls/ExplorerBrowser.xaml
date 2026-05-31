@@ -9,6 +9,10 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
+  <UserControl.KeyboardAccelerators>
+    <KeyboardAccelerator Key="F5" Invoked="RefreshAccelerator_Invoked" />
+  </UserControl.KeyboardAccelerators>
+
   <UserControl.Resources>
     <ResourceDictionary>
       <ResourceDictionary.ThemeDictionaries>

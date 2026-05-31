@@ -47,6 +47,16 @@ public sealed partial class ShellTreeView : UserControl
     private bool   _rootsReady;
     private string? _pendingSyncPath;
     private Task?  _librariesLoadTask;
+    private Task?  _networkLoadTask;
+
+    // Watcher kept alive while the Network root node is expanded so that
+    // UPnP/WSD devices arriving asynchronously via shell notifications are picked up.
+    private ShellChangeWatcher? _networkWatcher;
+    private ShellTreeNode?      _networkNode;
+    private CancellationTokenSource? _networkRefreshCts;
+
+    private ShellTreeNode? _linuxNode;
+    private Task?          _linuxLoadTask;
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -55,7 +65,7 @@ public sealed partial class ShellTreeView : UserControl
         InitializeComponent();
         NavTree.ItemsSource = Roots;
         NavTree.Expanding  += NavTree_Expanding;
-        Loaded += async (_, _) =>
+        Loaded   += async (_, _) =>
         {
             _iconScale = XamlRoot?.RasterizationScale ?? 1.0;
             await PopulateRootsAsync();
@@ -67,6 +77,7 @@ public sealed partial class ShellTreeView : UserControl
                 SyncToPath(p);
             }
         };
+        Unloaded += (_, _) => StopNetworkWatcher();
     }
 
     // ── x:Bind helper converters ──────────────────────────────────────────────
@@ -91,7 +102,8 @@ public sealed partial class ShellTreeView : UserControl
             IsFolder      = false,
         };
         Roots.Add(qa);
-        _ = LoadChildrenAsync(qa, ct);
+        await LoadChildrenAsync(qa, ct);
+        qa.IsExpanded = true;
         LoadKnownFolderIcon(qa, NativeShell.FOLDERID_QuickAccess, "::qa", iconSize);
 
         // ── OneDrive ──────────────────────────────────────────────────────────
@@ -143,20 +155,45 @@ public sealed partial class ShellTreeView : UserControl
         Roots.Add(lib);
         LoadIDListKnownFolderIcon(lib, NativeShell.FOLDERID_Libraries, "::lib", iconSize);
         _librariesLoadTask = LoadLibrariesAsync(lib, iconSize, ct);
+        await _librariesLoadTask;
+        lib.IsExpanded = true;
 
         // ── Network ───────────────────────────────────────────────────────────
         var net = new ShellTreeNode
         {
-            Name          = "Network",
-            FullPath      = null,
-            IsVirtual     = true,
-            IsGroupHeader = true,
-            IsFolder      = false,
-            TopMargin     = new Thickness(0, 8, 0, 0),
+            Name            = "Network",
+            FullPath        = null,
+            IsVirtual       = true,
+            IsGroupHeader   = true,
+            IsFolder        = false,
+            KnownFolderGuid = NativeShell.FOLDERID_NetworkFolder,
+            TopMargin       = new Thickness(0, 8, 0, 0),
         };
+        // A dummy child makes the chevron appear immediately; the real load
+        // starts lazily when the user expands the node.
         net.Children.Add(ShellTreeNode.Dummy);
         Roots.Add(net);
         LoadIDListKnownFolderIcon(net, NativeShell.FOLDERID_NetworkFolder, "::net", iconSize);
+
+        // ── Linux (WSL) ────────────────────────────────────────────────────────
+        var distros = await Task.Run(NativeShell.EnumerateWslDistributions, ct);
+        if (distros.Count > 0)
+        {
+            var linux = new ShellTreeNode
+            {
+                Name            = "Linux",
+                FullPath        = null,
+                IsVirtual       = true,
+                IsGroupHeader   = true,
+                IsFolder        = false,
+                KnownFolderGuid = NativeShell.CLSID_LinuxFolder,
+                TopMargin       = new Thickness(0, 8, 0, 0),
+            };
+            linux.Children.Add(ShellTreeNode.Dummy);
+            Roots.Add(linux);
+            _linuxNode = linux;
+            LoadKnownFolderIcon(linux, NativeShell.CLSID_LinuxFolder, "::linux", iconSize);
+        }
     }
 
     // ── Quick Access children ─────────────────────────────────────────────────
@@ -239,6 +276,187 @@ public sealed partial class ShellTreeView : UserControl
         }
     }
 
+    // ── Network discovery ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Loads children of <paramref name="parent"/> from the shell Network namespace,
+    /// grouped by device category exactly as Windows Explorer shows them.
+    /// <list type="bullet">
+    /// <item>Network root (→ category groups: Computers, Media devices, …)</item>
+    /// <item>Category group (→ device/server nodes from the shell sub-tree)</item>
+    /// <item>Device/server node (→ disk shares via WNet)</item>
+    /// </list>
+    /// </summary>
+    private async Task LoadNetworkAsync(
+        ShellTreeNode parent, string? shellPath, bool isServerNode, CancellationToken ct)
+    {
+        var iconSize = (uint)Math.Ceiling(16 * _iconScale);
+        parent.IsLoading = true;
+        try
+        {
+            if (isServerNode)
+            {
+                // Leaf server/device — enumerate disk shares via WNet.
+                var shares = await Task.Run(
+                    () => NativeShell.EnumerateServerShares(parent.FullPath!), ct);
+                if (ct.IsCancellationRequested) return;
+                foreach (var share in shares)
+                {
+                    var node = new ShellTreeNode
+                    {
+                        Name     = share.DisplayName,
+                        FullPath = share.RemoteName,
+                        IsFolder = true,
+                    };
+                    parent.Children.Add(node);
+                    LoadNodeIcon(node, share.RemoteName, iconSize);
+                }
+            }
+            else
+            {
+                // Shell-namespace enumeration: Network root or category-group expansion.
+                var resources = await Task.Run(
+                    () => NativeShell.EnumerateNetworkResources(shellPath), ct);
+                if (ct.IsCancellationRequested) return;
+
+                if (shellPath == null)
+                {
+                    // Network root — containers (workgroups/domains/device groups) go directly
+                    // as expandable nodes; leaf devices are grouped by category.
+                    var containers = resources.Where(r => r.IsContainer).ToList();
+                    var leaves     = resources.Where(r => !r.IsContainer).ToList();
+
+                    // Add expandable container nodes first (WORKGROUP, domain, etc.)
+                    foreach (var res in containers.OrderBy(r => r.DisplayName,
+                                 StringComparer.CurrentCultureIgnoreCase))
+                        AddNetworkItemNode(parent, res, iconSize);
+
+                    // Group any non-container leaf devices by category.
+                    if (leaves.Count > 0)
+                    {
+                        var groups = leaves
+                            .GroupBy(r => r.Category)
+                            .OrderBy(g => NetworkCategoryOrder(g.Key))
+                            .ThenBy(g => g.Key, StringComparer.CurrentCultureIgnoreCase);
+
+                        foreach (var grp in groups)
+                        {
+                            var items = grp.ToList();
+                            if (items.Count == 0) continue;
+
+                            if (items.Count == 1)
+                            {
+                                // Single item in this category — add it directly (no wrapper).
+                                AddNetworkItemNode(parent, items[0], iconSize);
+                            }
+                            else
+                            {
+                                // Multiple items: create a collapsible category-group node.
+                                var groupNode = new ShellTreeNode
+                                {
+                                    Name                   = grp.Key,
+                                    IsVirtual              = true,
+                                    IsNetworkCategoryGroup = true,
+                                    FullPath               = null,
+                                    NetworkGroupItems      = items,
+                                };
+                                groupNode.Children.Add(ShellTreeNode.Dummy);
+                                parent.Children.Add(groupNode);
+                                LoadIDListKnownFolderIcon(
+                                    groupNode, NativeShell.FOLDERID_NetworkFolder, "::netgrp", iconSize);
+                            }
+                        }
+                    }
+                }
+                else if (parent.IsNetworkCategoryGroup && parent.NetworkGroupItems != null)
+                {
+                    // Category-group expansion — items were already fetched; just add nodes.
+                    foreach (var res in parent.NetworkGroupItems)
+                        AddNetworkItemNode(parent, res, iconSize);
+                }
+                else
+                {
+                    // Sub-container expansion via a shell parsing path (workgroup, device group).
+                    foreach (var res in resources)
+                        AddNetworkItemNode(parent, res, iconSize);
+                }
+            }
+        }
+        catch { /* silently ignore — network may be unavailable */ }
+        finally
+        {
+            parent.IsLoading = false;
+        }
+    }
+
+    private void AddNetworkItemNode(
+        ShellTreeNode parent, NativeShell.NetworkResource res, uint iconSize)
+    {
+        var node = new ShellTreeNode
+        {
+            Name               = res.DisplayName,
+            FullPath           = res.RemoteName,
+            IsFolder           = res.IsShare,
+            IsVirtual          = res.IsContainer,
+            IsNetworkContainer = res.IsContainer,
+        };
+        if (res.IsContainer)
+            node.Children.Add(ShellTreeNode.Dummy);
+        parent.Children.Add(node);
+
+        if (res.IsContainer)
+            LoadIDListKnownFolderIcon(node, NativeShell.FOLDERID_NetworkFolder, "::net", iconSize);
+        else
+            LoadNodeIcon(node, res.RemoteName, iconSize);
+    }
+
+    // Returns a sort key that matches real Explorer's Network category ordering:
+    // Media devices → Computers → Storage → Printers → Infrastructure → Other devices.
+    private static int NetworkCategoryOrder(string category) => category switch {
+        "Media devices"  => 0,
+        "Computers"      => 1,
+        "Storage"        => 2,
+        "Printers"       => 3,
+        "Infrastructure" => 4,
+        "Other devices"  => 5,
+        _                => 99,
+    };
+
+    // ── Linux (WSL) distros ───────────────────────────────────────────────────
+
+    private async Task LoadLinuxDistrosAsync(ShellTreeNode parent, CancellationToken ct)
+    {
+        var iconSize = (uint)Math.Ceiling(16 * _iconScale);
+        parent.IsLoading = true;
+        try
+        {
+            var distros = await Task.Run(NativeShell.EnumerateWslDistributions, ct);
+            if (ct.IsCancellationRequested) return;
+
+            foreach (var name in distros)
+            {
+                // \\wsl.localhost\<DistroName> is the canonical UNC path for WSL2 distros.
+                var uncPath = @"\\wsl.localhost\" + name;
+                var node = new ShellTreeNode
+                {
+                    Name     = name,
+                    FullPath = uncPath,
+                    IsFolder = true,
+                };
+                // Always add a dummy child so the expander arrow appears,
+                // matching Explorer's behaviour (distro may not be running yet).
+                node.Children.Add(ShellTreeNode.Dummy);
+                parent.Children.Add(node);
+                LoadNodeIcon(node, uncPath, iconSize);
+            }
+        }
+        catch { /* silently ignore */ }
+        finally
+        {
+            parent.IsLoading = false;
+        }
+    }
+
     // ── Lazy expand ───────────────────────────────────────────────────────────
 
     /// <summary>
@@ -267,8 +485,110 @@ public sealed partial class ShellTreeView : UserControl
         if (args.Item is not ShellTreeNode node) return;
         if (!node.HasDummyChild) return;
         node.Children.Clear();
+
+        // Network root: enumerate all shell Network categories asynchronously,
+        // then keep a ShellChangeWatcher alive so UPnP/WSD devices that arrive
+        // later via shell notifications are automatically added.
+        if (node.KnownFolderGuid == NativeShell.FOLDERID_NetworkFolder)
+        {
+            _networkNode      = node;
+            _networkLoadTask  = LoadNetworkAsync(
+                node, shellPath: null, isServerNode: false, CancellationToken.None);
+            StartNetworkWatcher(node);
+            return;
+        }
+
+        // Linux root: enumerate WSL distributions lazily on first expand.
+        if (node.KnownFolderGuid == NativeShell.CLSID_LinuxFolder)
+        {
+            _linuxLoadTask = LoadLinuxDistrosAsync(node, CancellationToken.None);
+            return;
+        }
+
+        // Category-group node: items were pre-fetched — use the fast path.
+        if (node.IsNetworkCategoryGroup)
+        {
+            _ = LoadNetworkAsync(
+                node, shellPath: null, isServerNode: false, CancellationToken.None);
+            return;
+        }
+
+        // Network container node: workgroup/domain → enumerate its members via shell;
+        // actual server (UNC path) → enumerate its shares via WNet.
+        if (node.IsNetworkContainer)
+        {
+            string? path = node.FullPath;
+            bool isServer = path != null
+                         && (path.StartsWith(@"\\", StringComparison.Ordinal)
+                             || path.StartsWith("//", StringComparison.Ordinal));
+            _ = LoadNetworkAsync(
+                node, shellPath: path, isServerNode: isServer, CancellationToken.None);
+            return;
+        }
+
         _ = LoadSubfoldersAsync(node, CancellationToken.None);
     }
+
+    // ── Network shell-change watcher ──────────────────────────────────────────
+
+    // The Network shell folder (CLSID path for SHChangeNotifyRegister).
+    private const string NetworkShellPath = "::{208D2C60-3AEA-1069-A2D7-08002B30309D}";
+
+    private void StartNetworkWatcher(ShellTreeNode networkRoot)
+    {
+        StopNetworkWatcher();
+        var w = new ShellChangeWatcher(NetworkShellPath);
+        w.Changed += OnNetworkWatcherChanged;
+        _networkWatcher = w;
+        w.Start();
+    }
+
+    private void StopNetworkWatcher()
+    {
+        _networkRefreshCts?.Cancel();
+        _networkRefreshCts = null;
+
+        if (_networkWatcher is { } w)
+        {
+            w.Changed -= OnNetworkWatcherChanged;
+            w.Dispose();
+            _networkWatcher = null;
+        }
+    }
+
+    private void OnNetworkWatcherChanged(object? sender, ShellChangeEventArgs e)
+    {
+        // We care about any event that means a device has appeared or disappeared.
+        const ShellChangeType relevant =
+            ShellChangeType.MkDir       | ShellChangeType.RmDir      |
+            ShellChangeType.Create      | ShellChangeType.Delete      |
+            ShellChangeType.NetShare    | ShellChangeType.NetUnshare  |
+            ShellChangeType.DriveAdd    | ShellChangeType.DriveRemoved|
+            ShellChangeType.UpdateDir   | ShellChangeType.UpdateItem;
+
+        if ((e.EventType & relevant) == 0) return;
+
+        // Debounce: cancel any pending refresh and schedule a new one after 500 ms
+        // so that a burst of UPnP announcements becomes a single refresh.
+        var prev = _networkRefreshCts;
+        prev?.Cancel();
+        var cts = new CancellationTokenSource();
+        _networkRefreshCts = cts;
+
+        _ = Task.Delay(500, cts.Token).ContinueWith(_ =>
+        {
+            if (cts.IsCancellationRequested) return;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_networkNode is not { } root) return;
+                // Clear existing nodes; LoadNetworkAsync will repopulate.
+                root.Children.Clear();
+                _networkLoadTask = LoadNetworkAsync(
+                    root, shellPath: null, isServerNode: false, CancellationToken.None);
+            });
+        }, TaskScheduler.Default);
+    }
+
     private async Task LoadSubfoldersAsync(ShellTreeNode parent, CancellationToken ct)
     {
         if (parent.FullPath == null) return;
@@ -312,7 +632,7 @@ public sealed partial class ShellTreeView : UserControl
         if (_suppressItemInvoked) return;
         if (args.InvokedItem is not ShellTreeNode node) return;
 
-        if (node.KnownFolderGuid.HasValue)
+        if (node.KnownFolderGuid.HasValue && !node.IsNetworkContainer)
             KnownFolderSelected?.Invoke(this, node.KnownFolderGuid.Value);
         else if (!node.IsVirtual && node.FullPath is string path)
             FolderSelected?.Invoke(this, path);
@@ -444,6 +764,20 @@ public sealed partial class ShellTreeView : UserControl
         // Build the ordered list of path components we need to walk, e.g.
         // "C:\Users\Joe\Documents" → ["C:\", "C:\Users", "C:\Users\Joe", "C:\Users\Joe\Documents"]
         var segments = GetPathAncestors(path);
+
+        // For WSL paths (\\wsl.localhost\... or \\wsl$\...) ensure the Linux root's
+        // distro nodes are loaded before the ancestor walk tries to find them.
+        if (path.StartsWith(@"\\wsl", StringComparison.OrdinalIgnoreCase) && _linuxNode != null)
+        {
+            if (_linuxNode.HasDummyChild)
+            {
+                _linuxNode.Children.Clear();
+                _linuxLoadTask = LoadLinuxDistrosAsync(_linuxNode, CancellationToken.None);
+            }
+            if (_linuxLoadTask != null)
+                await _linuxLoadTask;
+            _linuxNode.IsExpanded = true;
+        }
 
         foreach (var root in Roots)
         {
