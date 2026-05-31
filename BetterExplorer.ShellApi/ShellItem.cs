@@ -8,6 +8,7 @@ namespace BetterExplorer.ShellApi;
 public sealed class ShellItem : INotifyPropertyChanged
 {
     private string _name = string.Empty;
+    private string _displayName = string.Empty;
     private string _fullPath = string.Empty;
     private string _itemType = string.Empty;
     private string _size = string.Empty;
@@ -23,6 +24,16 @@ public sealed class ShellItem : INotifyPropertyChanged
     {
         get => _name;
         set { _name = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>
+    /// The name shown in the UI.  Equals <see cref="Name"/> when file extensions are visible,
+    /// or the name without extension when they are hidden.  Set by the host control.
+    /// </summary>
+    public string DisplayName
+    {
+        get => _displayName;
+        set { _displayName = value; OnPropertyChanged(); }
     }
 
     public string FullPath
@@ -158,6 +169,7 @@ public sealed class ShellItem : INotifyPropertyChanged
         _isSelected = false;
         _isCut = false;
         _hasRealThumbnail = false;
+        _displayName = string.Empty;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>

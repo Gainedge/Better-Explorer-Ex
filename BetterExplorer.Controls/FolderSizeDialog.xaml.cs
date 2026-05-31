@@ -109,10 +109,12 @@ namespace BetterExplorer.Controls
                 long looseFiles = 0;
                 try
                 {
-                    foreach (var f in Directory.EnumerateFiles(_rootPath))
-                        looseFiles += new FileInfo(f).Length;
+                    foreach (var fi in new DirectoryInfo(_rootPath).EnumerateFiles())
+                    {
+                        try { looseFiles += fi.Length; } catch { }
+                    }
                 }
-                catch { /* ignore */ }
+                catch { /* no read access to root */ }
 
                 // Kick off parallel dir scans
                 var tasks = new List<Task>();
@@ -120,6 +122,15 @@ namespace BetterExplorer.Controls
                 foreach (var dir in dirs)
                 {
                     if (ct.IsCancellationRequested) break;
+
+                    // Skip reparse points (junctions/symlinks) at the root level
+                    try
+                    {
+                        if ((new DirectoryInfo(dir).Attributes & FileAttributes.ReparsePoint) != 0)
+                            continue;
+                    }
+                    catch { continue; }
+
                     var entry = new FolderSizeEntry
                     {
                         Name  = System.IO.Path.GetFileName(dir),
@@ -187,15 +198,38 @@ namespace BetterExplorer.Controls
         private static long RecurseDirectory(string path, CancellationToken ct)
         {
             long total = 0;
-            try
+            var stack = new Stack<string>();
+            stack.Push(path);
+
+            while (stack.Count > 0)
             {
-                foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                if (ct.IsCancellationRequested) break;
+                var current = stack.Pop();
+
+                // Sum files in this directory (DirectoryInfo.EnumerateFiles already has Length)
+                try
                 {
-                    if (ct.IsCancellationRequested) break;
-                    try { total += new FileInfo(f).Length; } catch { }
+                    foreach (var fi in new DirectoryInfo(current).EnumerateFiles())
+                    {
+                        try { total += fi.Length; } catch { }
+                    }
                 }
+                catch (UnauthorizedAccessException) { continue; }
+                catch (IOException)                 { continue; }
+
+                // Push subdirectories; skip reparse points (junctions/symlinks) to avoid loops
+                try
+                {
+                    foreach (var sub in new DirectoryInfo(current).EnumerateDirectories())
+                    {
+                        if ((sub.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                        stack.Push(sub.FullName);
+                    }
+                }
+                catch (UnauthorizedAccessException) { }
+                catch (IOException)                 { }
             }
-            catch { }
+
             return total;
         }
 

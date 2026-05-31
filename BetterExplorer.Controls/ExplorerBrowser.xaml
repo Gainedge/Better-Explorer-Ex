@@ -1326,6 +1326,36 @@
                     </StackPanel>
                   </RadioButton>
                 </StackPanel>
+                <!-- Show/hide options -->
+                <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" Margin="0,4,0,0" />
+                <Grid Margin="10,4,10,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <ToggleSwitch x:Name="ShowHiddenFilesSwitch"
+                                Grid.Column="0"
+                                IsOn="False"
+                                OnContent="" OffContent=""
+                                Toggled="ShowHiddenFilesSwitch_Toggled"
+                                MinWidth="0" Margin="0,0,8,0" />
+                  <TextBlock Grid.Column="1" Text="Show hidden files"
+                             VerticalAlignment="Center" />
+                </Grid>
+                <Grid Margin="10,-4,10,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <ToggleSwitch x:Name="ShowFileExtensionsSwitch"
+                                Grid.Column="0"
+                                IsOn="True"
+                                OnContent="" OffContent=""
+                                Toggled="ShowFileExtensionsSwitch_Toggled"
+                                MinWidth="0" Margin="0,0,8,0" />
+                  <TextBlock Grid.Column="1" Text="Show file extensions"
+                             VerticalAlignment="Center" />
+                </Grid>
               </StackPanel>
             </Flyout>
           </SplitButton.Flyout>

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -17,6 +17,17 @@ namespace BetterExplorer.Controls;
 public sealed partial class ShellTreeView : UserControl
 {
     // ── Public API ────────────────────────────────────────────────────────────
+
+    public static readonly DependencyProperty ShowHiddenFoldersProperty =
+        DependencyProperty.Register(
+            nameof(ShowHiddenFolders), typeof(bool), typeof(ShellTreeView),
+            new PropertyMetadata(false));
+
+    /// <summary>When true, hidden subfolders are visible in the navigation tree.</summary>
+    public bool ShowHiddenFolders {
+        get => (bool)GetValue(ShowHiddenFoldersProperty);
+        set => SetValue(ShowHiddenFoldersProperty, value);
+    }
 
     /// <summary>Raised when the user selects a navigable folder node.</summary>
     public event EventHandler<string>? FolderSelected;
@@ -231,17 +242,18 @@ public sealed partial class ShellTreeView : UserControl
     // ── Lazy expand ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns true if <paramref name="path"/> contains at least one non-hidden,
-    /// non-reparse-point subdirectory (same filter used by <see cref="LoadSubfoldersAsync"/>).
+    /// Returns true if <paramref name="path"/> contains at least one non-reparse-point
+    /// subdirectory that passes the current hidden-folder filter.
     /// </summary>
-    private static bool HasSubfolders(string path)
+    private bool HasSubfolders(string path)
     {
+        bool showHidden = ShowHiddenFolders;
         try
         {
             foreach (var dir in Directory.EnumerateDirectories(path))
             {
                 var attrs = File.GetAttributes(dir);
-                if ((attrs & System.IO.FileAttributes.Hidden) != 0) continue;
+                if (!showHidden && (attrs & System.IO.FileAttributes.Hidden) != 0) continue;
                 if ((attrs & System.IO.FileAttributes.ReparsePoint) != 0) continue;
                 return true;
             }
@@ -262,6 +274,7 @@ public sealed partial class ShellTreeView : UserControl
         if (parent.FullPath == null) return;
         var iconSize = (uint)Math.Ceiling(16 * _iconScale);
 
+        bool showHidden = ShowHiddenFolders;
         var subfolders = await Task.Run(() =>
         {
             var list = new System.Collections.Generic.List<(string Name, string Path)>();
@@ -270,7 +283,7 @@ public sealed partial class ShellTreeView : UserControl
                 foreach (var dir in Directory.EnumerateDirectories(parent.FullPath))
                 {
                     var attrs = File.GetAttributes(dir);
-                    if ((attrs & System.IO.FileAttributes.Hidden) != 0) continue;
+                    if (!showHidden && (attrs & System.IO.FileAttributes.Hidden) != 0) continue;
                     if ((attrs & System.IO.FileAttributes.ReparsePoint) != 0) continue;
                     list.Add((Path.GetFileName(dir), dir));
                 }

@@ -127,7 +127,7 @@
         <Canvas Grid.Row="1" Width="276" Height="57" HorizontalAlignment="Left"
                         Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="276"
-                               Text="{x:Bind Name, Mode=OneWay}"
+                               Text="{x:Bind DisplayName, Mode=OneWay}"
                                TextWrapping="Wrap" TextAlignment="Center"
                                MaxLines="2" TextTrimming="CharacterEllipsis" />
         </Canvas>
@@ -136,7 +136,7 @@
 
     <!-- ═══════════════════════════════════════════════
              Large Icons  (128 px)
-        ════════════════════════════════════════════════ -->
+    ════════════════════════════════════════════════ -->
     <DataTemplate x:Key="LargeIconsTemplate" x:DataType="shellapi:ShellItem">
       <Grid Width="148" Opacity="{x:Bind IconOpacity, Mode=OneWay}">
         <Grid.RowDefinitions>
@@ -162,7 +162,7 @@
         <Canvas Grid.Row="1" Width="148" Height="57" HorizontalAlignment="Left"
                         Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="148"
-                               Text="{x:Bind Name, Mode=OneWay}"
+                               Text="{x:Bind DisplayName, Mode=OneWay}"
                                TextWrapping="Wrap" TextAlignment="Center"
                                MaxLines="2" TextTrimming="CharacterEllipsis" />
         </Canvas>
@@ -197,7 +197,7 @@
         <Canvas Grid.Row="1" Width="116" Height="57" HorizontalAlignment="Left"
                 Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="116"
-                               Text="{x:Bind Name, Mode=OneWay}"
+                               Text="{x:Bind DisplayName, Mode=OneWay}"
                                TextWrapping="Wrap" TextAlignment="Center"
                                MaxLines="2" TextTrimming="CharacterEllipsis" />
         </Canvas>
@@ -232,7 +232,7 @@
         <Canvas Grid.Row="1" Width="80"
             Visibility="{x:Bind LabelVisibility, Mode=OneWay}">
           <TextBlock Canvas.Top="4" Width="80"
-                           Text="{x:Bind Name, Mode=OneWay}"
+                           Text="{x:Bind DisplayName, Mode=OneWay}"
                            TextWrapping="Wrap" TextAlignment="Center"
                            MaxLines="2" TextTrimming="CharacterEllipsis" />
         </Canvas>
@@ -276,7 +276,7 @@
                    Stretch="Uniform" IsHitTestVisible="False" />
           </Grid>
         </Viewbox>
-        <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center"
+        <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" VerticalAlignment="Center"
                                        Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                        TextTrimming="CharacterEllipsis" MaxLines="1" />
       </StackPanel>
@@ -316,7 +316,7 @@
           </Grid>
         </Viewbox>
         <StackPanel VerticalAlignment="Center" Spacing="2">
-          <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontWeight="SemiBold"
+          <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" FontWeight="SemiBold"
                                Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" Width="190" />
           <TextBlock Text="{x:Bind ItemType, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
@@ -476,7 +476,7 @@
           </Grid>
         </Viewbox>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
-          <TextBlock Text="{x:Bind Name, Mode=OneWay}" FontWeight="SemiBold"
+          <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" FontWeight="SemiBold"
                                Visibility="{x:Bind LabelVisibility, Mode=OneWay}"
                                TextTrimming="CharacterEllipsis" MaxLines="1" />
           <TextBlock Text="{x:Bind DateModifiedString, Mode=OneWay}"

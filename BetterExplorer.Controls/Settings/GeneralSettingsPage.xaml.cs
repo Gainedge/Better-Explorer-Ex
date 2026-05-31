@@ -43,12 +43,24 @@ public sealed partial class GeneralSettingsPage : Page
         else
             FileOpSystem.IsChecked = true;
 
+        // Restore persisted view-option settings without triggering a save.
+        ShowHiddenFilesToggle.IsOn  = SettingsPage.ShowHiddenFiles;
+        ShowExtensionsToggle.IsOn   = SettingsPage.ShowFileExtensions;
+
         _initialized = true;
     }
 
-    private void OnShowHiddenFilesToggled(object sender, RoutedEventArgs e) { }
+    private void OnShowHiddenFilesToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_initialized) return;
+        ApplicationData.Current.LocalSettings.Values[SettingsPage.ShowHiddenFilesKey] = ShowHiddenFilesToggle.IsOn;
+    }
 
-    private void OnShowExtensionsToggled(object sender, RoutedEventArgs e) { }
+    private void OnShowExtensionsToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_initialized) return;
+        ApplicationData.Current.LocalSettings.Values[SettingsPage.ShowFileExtensionsKey] = ShowExtensionsToggle.IsOn;
+    }
 
     private void OnSearchEngineChecked(object sender, RoutedEventArgs e)
     {

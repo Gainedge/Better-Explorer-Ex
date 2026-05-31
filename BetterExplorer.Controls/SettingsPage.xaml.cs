@@ -11,6 +11,12 @@ public sealed partial class SettingsPage : UserControl
     public const string ThemeSettingKey  = "App.Theme";
     public const string FileOpHandlerKey = "App.FileOpHandler";
     public const string SearchEngineKey  = "App.SearchEngine";
+    // General (Settings page) view defaults
+    public const string ShowHiddenFilesKey       = "App.ShowHiddenFiles";
+    public const string ShowFileExtensionsKey    = "App.ShowFileExtensions";
+    // Per-browser overrides — independent from the General defaults above
+    public const string BrowserShowHiddenFilesKey    = "App.Browser.ShowHiddenFiles";
+    public const string BrowserShowFileExtensionsKey = "App.Browser.ShowFileExtensions";
 
     // ── Events consumed by MainWindow ────────────────────────────────────────
     public static event Action<ElementTheme>? ThemeChangeRequested;
@@ -79,6 +85,30 @@ public sealed partial class SettingsPage : UserControl
                 return ApplicationData.Current.LocalSettings.Values
                     .TryGetValue(SearchEngineKey, out var v) ? v as string ?? "WindowsSearch" : "WindowsSearch";
             } catch { return "WindowsSearch"; }
+        }
+    }
+
+    /// <summary>Returns the persisted show-hidden-files setting (default false).</summary>
+    public static bool ShowHiddenFiles
+    {
+        get
+        {
+            try {
+                return ApplicationData.Current.LocalSettings.Values
+                    .TryGetValue(ShowHiddenFilesKey, out var v) && v is bool b ? b : false;
+            } catch { return false; }
+        }
+    }
+
+    /// <summary>Returns the persisted show-file-extensions setting (default true).</summary>
+    public static bool ShowFileExtensions
+    {
+        get
+        {
+            try {
+                return ApplicationData.Current.LocalSettings.Values
+                    .TryGetValue(ShowFileExtensionsKey, out var v) ? (v is bool b ? b : true) : true;
+            } catch { return true; }
         }
     }
 }

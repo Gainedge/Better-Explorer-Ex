@@ -151,6 +151,7 @@ public sealed partial class DetailsRowControl : UserControl
 
             case nameof(ShellItem.LabelVisibility):
             case nameof(ShellItem.Name):
+            case nameof(ShellItem.DisplayName):
                 UpdateNameText();
                 break;
 
@@ -261,7 +262,7 @@ public sealed partial class DetailsRowControl : UserControl
             TextTrimming      = TextTrimming.CharacterEllipsis,
             MaxLines          = 1,
         };
-        SetBinding(label, TextBlock.TextProperty,       item, nameof(ShellItem.Name));
+        SetBinding(label, TextBlock.TextProperty,       item, nameof(ShellItem.DisplayName));
         SetBinding(label, UIElement.VisibilityProperty, item, nameof(ShellItem.LabelVisibility));
         Grid.SetColumn(label, 1);
         grid.Children.Add(label);
@@ -360,7 +361,7 @@ public sealed partial class DetailsRowControl : UserControl
             {
                 if (gc is TextBlock tb)
                 {
-                    tb.Text       = Item.Name;
+                    tb.Text       = Item.DisplayName;
                     tb.Visibility = Item.LabelVisibility;
                 }
             }

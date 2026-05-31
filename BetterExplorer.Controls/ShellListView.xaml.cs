@@ -50,7 +50,25 @@ public sealed partial class ShellListView : UserControl {
           nameof(CurrentPath), typeof(string), typeof(ShellListView),
           new PropertyMetadata(string.Empty));
 
-  // ── Public surface ───────────────────────────────────────────────────────
+  public static readonly DependencyProperty ShowHiddenFilesProperty =
+      DependencyProperty.Register(
+          nameof(ShowHiddenFiles), typeof(bool), typeof(ShellListView),
+          new PropertyMetadata(false, OnShowHiddenFilesChanged));
+
+  public static readonly DependencyProperty ShowFileExtensionsProperty =
+      DependencyProperty.Register(
+          nameof(ShowFileExtensions), typeof(bool), typeof(ShellListView),
+          new PropertyMetadata(true, OnShowFileExtensionsChanged));
+
+  private static void OnShowHiddenFilesChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) {
+    if (d is ShellListView lv) lv.ApplyHiddenFilesFilter();
+  }
+
+  private static void OnShowFileExtensionsChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) {
+    if (d is ShellListView lv) lv.ApplyDisplayNames();
+  }
+
+  // ── Public surface ──────────────────────────────────────────────────────
 
   public ShellViewMode ViewMode {
     get => (ShellViewMode)GetValue(ViewModeProperty);
@@ -70,6 +88,16 @@ public sealed partial class ShellListView : UserControl {
   public string CurrentPath {
     get => (string)GetValue(CurrentPathProperty);
     private set => SetValue(CurrentPathProperty, value);
+  }
+
+  public bool ShowHiddenFiles {
+    get => (bool)GetValue(ShowHiddenFilesProperty);
+    set => SetValue(ShowHiddenFilesProperty, value);
+  }
+
+  public bool ShowFileExtensions {
+    get => (bool)GetValue(ShowFileExtensionsProperty);
+    set => SetValue(ShowFileExtensionsProperty, value);
   }
 
   public RangeObservableCollection<ShellItem> Items { get; } = new();
@@ -658,6 +686,10 @@ public sealed partial class ShellListView : UserControl {
       var item = NativeShell.GetSingleItemMetadata(e.FullPath);
       if (item is null)
         return;
+      // Respect the show-hidden toggle for watcher-created items.
+      if (!ShowHiddenFiles && item.IsHidden)
+        return;
+      item.DisplayName = BuildDisplayName(item);
       var merged = Items.ToList();
       merged.Add(item);
       merged = SortItems(merged);
@@ -709,6 +741,7 @@ public sealed partial class ShellListView : UserControl {
       bool wasFolder = item.IsFolder;
       item.Name     = e.Name ?? Path.GetFileName(e.FullPath);
       item.FullPath = e.FullPath;
+      item.DisplayName = BuildDisplayName(item);
       if (_changeDebounce.TryGetValue(e.OldFullPath, out var oldCts)) {
         oldCts.Cancel();
         oldCts.Dispose();
@@ -902,6 +935,42 @@ public sealed partial class ShellListView : UserControl {
         .Select(i => i.FullPath)
         .ToList();
     LoadDirectory(CurrentPath);
+  }
+
+  // ── Show-hidden / show-extensions helpers ──────────────────────────────
+
+  /// <summary>
+  /// Removes or re-inserts hidden items from the live <see cref="Items"/> list
+  /// without triggering a full directory reload.
+  /// </summary>
+  private void ApplyHiddenFilesFilter() {
+    if (string.IsNullOrEmpty(CurrentPath)) return;
+    if (ShowHiddenFiles) {
+      // Re-run a full load so hidden items that were excluded are fetched again.
+      Refresh();
+    } else {
+      // Remove currently visible hidden items in-place.
+      var toRemove = Items.Where(i => i.IsHidden).ToList();
+      foreach (var item in toRemove) Items.Remove(item);
+      ApplyGrouping();
+      UpdateStatusBar();
+    }
+  }
+
+  /// <summary>
+  /// Updates <see cref="ShellItem.DisplayName"/> for every item in
+  /// <see cref="Items"/> to show or hide the file extension.
+  /// </summary>
+  private void ApplyDisplayNames() {
+    foreach (var item in Items)
+      item.DisplayName = BuildDisplayName(item);
+  }
+
+  /// <summary>Returns the display label for <paramref name="item"/> respecting the current extension-visibility setting.</summary>
+  private string BuildDisplayName(ShellItem item) {
+    if (item.IsFolder || ShowFileExtensions)
+      return item.Name;
+    return Path.GetFileNameWithoutExtension(item.Name);
   }
 
   /// <summary>
@@ -1491,6 +1560,10 @@ public sealed partial class ShellListView : UserControl {
 
       diag.Mark("PreWarm+PreThumb (virtual)");
 
+      // ── Apply hidden-file filter and DisplayName before showing items ───────
+      if (!ShowHiddenFiles) kfItems = kfItems.Where(i => !i.IsHidden).ToList();
+      foreach (var item in kfItems) item.DisplayName = BuildDisplayName(item);
+
       // ── Show items immediately, then warm caches in the background ────────
       Items.AddRange(kfItems);
       ApplyGrouping();
@@ -1595,6 +1668,10 @@ public sealed partial class ShellListView : UserControl {
     diag.Mark("PreStampThumbs");
 
     // ── Show ALL items at once ─────────────────────────────────────────────
+    // Apply hidden-file filter and DisplayName before showing items
+    if (!ShowHiddenFiles) allItems = allItems.Where(i => !i.IsHidden).ToList();
+    foreach (var item in allItems) item.DisplayName = BuildDisplayName(item);
+
     Items.AddRange(allItems);
     ApplyGrouping();
     CurrentPath = path;
