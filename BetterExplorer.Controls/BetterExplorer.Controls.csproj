@@ -59,6 +59,8 @@
     <PackageReference Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.2.251219" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.5" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <PackageReference Include="WinSCP" Version="6.3.5" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\BetterExplorer.ShellApi\BetterExplorer.ShellApi.csproj" />
@@ -75,7 +77,21 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
+    <Page Update="FtpBrowserPage.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+  </ItemGroup>
+  <ItemGroup>
     <Page Update="DetailsRowControl.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Update="FtpSiteManagerDialog.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Update="FtpSiteEditDialog.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>

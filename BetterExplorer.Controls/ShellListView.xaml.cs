@@ -260,11 +260,18 @@ public sealed partial class ShellListView : UserControl {
       new BlockingCollection<ShellItem>(512);
   private const int OverlayConcurrency = 2;
 
+  // Dedicated fast-path queue for per-item folder icon fetches (Details / List mode).
+  // Kept separate from _thumbQueue so small IconOnly calls are never queued behind
+  // slow thumbnail work (image/video ResizeToFit fetches).
+  private BlockingCollection<(ShellItem Item, uint Size)> _iconQueue =
+      new BlockingCollection<(ShellItem, uint)>(512);
+  private const int IconConcurrency = 4;
+
   // Per-overlay bitmap cache. The pixel array from NativeShell._overlayPixelCache is reused
   // by reference for the same overlay slot, so we key on object identity to deduplicate bitmaps.
   private static readonly Dictionary<int, WriteableBitmap?> _overlayBitmapCache = new();
 
-  private const int TypeIconCacheMaxSize = 400;
+  private const int TypeIconCacheMaxSize = 2000;
   private static readonly Dictionary<(string Ext, uint Size), WriteableBitmap> _typeIconCache = new();
   // Secondary index: ext → any cached icon (for FindAnyCachedIcon fast-path).
   private static readonly Dictionary<string, WriteableBitmap> _typeIconByExt = new(StringComparer.OrdinalIgnoreCase);
@@ -897,7 +904,12 @@ public sealed partial class ShellListView : UserControl {
 
     // Validate existence off the UI thread — Directory.Exists can block 50-200 ms
     // on network paths, mapped drives, or spinning disks.
-    if (!await Task.Run(() => Directory.Exists(path)))
+    // UNC paths (\\server or \\server\share) are exempt: Directory.Exists returns
+    // false for bare server roots (\\server) even when the server is reachable, and
+    // network latency makes the check unreliable. LoadDirectory handles enumeration
+    // failures gracefully, so we skip the guard for any \\ path.
+    bool isUncPath = path.StartsWith(@"\\", StringComparison.Ordinal);
+    if (!isUncPath && !await Task.Run(() => Directory.Exists(path)))
       return;
 
     _pendingNavigatePath = path;
@@ -943,6 +955,10 @@ public sealed partial class ShellListView : UserControl {
       NavigateToKnownFolder(knownFolderGuid);
     }
   }
+
+  private static bool IsWslPath(string path) =>
+      path.StartsWith(@"\\wsl.localhost\", StringComparison.OrdinalIgnoreCase) ||
+      path.StartsWith(@"\\wsl$\",          StringComparison.OrdinalIgnoreCase);
 
   /// <summary>Returns true when <paramref name="child"/> is a direct or indirect
   /// descendant of <paramref name="parent"/>.</summary>
@@ -1391,10 +1407,15 @@ public sealed partial class ShellListView : UserControl {
 
     // Detect This PC so we can apply the drive-tile template and type grouping.
     bool isThisPc      = string.Equals(virtualPath, ThisPcVirtualPath, StringComparison.OrdinalIgnoreCase);
-    bool isNetworkRoot = string.Equals(virtualPath, NetworkVirtualPath, StringComparison.OrdinalIgnoreCase);
+    bool isNetworkRoot = string.Equals(virtualPath, NetworkVirtualPath, StringComparison.OrdinalIgnoreCase)
+                      || folderId == NativeShell.CLSID_NetworkPlaces;
     _isThisPcView  = isThisPc;
     _isNetworkView = isNetworkRoot;
     _currentKnownFolderId = folderId;
+    // Reset any grouping carried over from a previous view. The blocks below
+    // re-apply forced grouping for This PC and Network; all other known folders
+    // (including the Linux root) remain ungrouped unless their DB setting says otherwise.
+    _groupColumn = string.Empty;
     if (isThisPc) {
       // Force Tiles view and group-by-type for This PC, overriding any saved settings.
       _groupColumn = "DriveType";
@@ -1538,6 +1559,10 @@ public sealed partial class ShellListView : UserControl {
     _isThisPcView         = false;
     _isNetworkView        = false;
     _currentKnownFolderId = Guid.Empty;
+    // Reset any forced grouping (e.g. DriveType from This PC) so it doesn't bleed
+    // into the new folder. ApplyFolderSettings will restore whatever was saved for
+    // this path (or leave it empty if there is no saved setting).
+    _groupColumn = string.Empty;
     // Cancel any active search so its results don't bleed into the new folder.
     if (_isSearchActive) {
       _isSearchActive = false;
@@ -1567,11 +1592,12 @@ public sealed partial class ShellListView : UserControl {
     // are also started here.
     Task<(List<ShellItem> folders, List<ShellItem> files)>? preEnumTask = null;
     Task? preSettingsTask = null;
-    if (!path.StartsWith("::", StringComparison.Ordinal)) {
+    bool isUncPath = path.StartsWith(@"\\", StringComparison.Ordinal);
+    if (!path.StartsWith("::", StringComparison.Ordinal) && !isUncPath) {
       preSettingsTask = ApplyFolderSettings(path);
       preEnumTask     = Task.Run(() => NativeShell.EnumerateWithFindFirstFileEx(path, ct), ct);
     }
-    // (Virtual paths need the stripped GUID, handled after cleanup below.)
+    // (Virtual paths and UNC paths need shell enumeration, handled after cleanup below.)
 
     BusyChanged?.Invoke(this, true);
 
@@ -1695,6 +1721,124 @@ public sealed partial class ShellListView : UserControl {
       return;
     }
 
+    // UNC paths (\\server, \\server\share, \\wsl.localhost\distro, …) cannot be
+    // enumerated by FindFirstFileEx on server roots and need the shell IShellFolder
+    // API instead.  Route them through the same pipeline as virtual (::) paths.
+    if (isUncPath) {
+      // Try to enumerate; if access is denied prompt for credentials then retry once.
+      List<ShellItem>? uncItems = null;
+      for (int attempt = 0; attempt < 2; attempt++) {
+        var uncSettingsTask = attempt == 0 ? ApplyFolderSettings(path) : Task.CompletedTask;
+        var uncEnumTask     = Task.Run(() => NativeShell.EnumerateShellItemChildrenByPath(path), ct);
+        Exception? uncEx = null;
+        try {
+          await Task.WhenAll(uncSettingsTask, uncEnumTask);
+          uncItems = uncEnumTask.Result;
+        } catch (OperationCanceledException) { return; }
+          catch (UnauthorizedAccessException ex) { uncEx = ex; }
+          catch (AggregateException ag) when (ag.InnerException is UnauthorizedAccessException uae) { uncEx = uae; }
+          catch { break; }
+
+        if (uncEx != null) {
+          // Show the standard Windows credential dialog on the UI thread.
+          bool credOk = false;
+          try {
+            var credTcs = new TaskCompletionSource<bool>();
+              DispatcherQueue.TryEnqueue(() => {
+                try { credTcs.SetResult(NativeShell.PromptForNetworkCredentials(path, IntPtr.Zero)); }
+                catch (Exception ex) { credTcs.SetException(ex); }
+              });
+              credOk = await credTcs.Task;
+          } catch { }
+          if (!credOk) {
+            // User cancelled — restore idle state and leave the list as-is.
+            BusyChanged?.Invoke(this, false);
+            return;
+          }
+          continue; // retry enumeration with the new credentials
+        }
+        break; // success
+      }
+
+      if (uncItems == null) {
+        BusyChanged?.Invoke(this, false);
+        return;
+      }
+      if (IsStale()) return;
+
+      // WSL paths must never be grouped.
+      if (IsWslPath(path)) _groupColumn = string.Empty;
+
+      diag.Mark("Settings+Enum (UNC)");
+
+      uint uncSize = PhysicalSize(ThumbnailSizeForMode(ViewMode));
+      var uncIconSnap = new Dictionary<(string Ext, uint Size), WriteableBitmap>(_typeIconCache);
+
+      List<ShellItem> uncSorted;
+      try {
+        uncSorted = await Task.Run(() => {
+          var sorted = SortItems(uncItems);
+          foreach (var item in sorted) {
+            if (item.HasRealThumbnail || item.Icon != null) continue;
+            var ext = TypeIconKey(item);
+            if (uncIconSnap.TryGetValue((ext, uncSize), out var icon))
+              item.Icon = icon;
+          }
+          return sorted;
+        }, ct);
+      } catch (OperationCanceledException) { return; }
+      if (IsStale()) return;
+
+      diag.Mark("Sort+PreStamp (UNC)");
+
+      int uncViewportPre = Math.Min(uncSorted.Count, EstimateViewportItemCount(ViewMode));
+      var uncSlicePre = uncViewportPre == uncSorted.Count ? uncSorted : uncSorted.GetRange(0, uncViewportPre);
+      try {
+        await Task.WhenAll(
+            WarmTypeIconCacheAsync(uncSorted, uncSize, ct),
+            PreloadCachedThumbnailsAsync(uncSlicePre, uncSize, ct));
+      } catch (OperationCanceledException) { return; }
+      if (IsStale()) return;
+      ApplyCachedIcons(uncSorted, uncSize);
+      if (!IsIconOnlyMode(ViewMode)) {
+        foreach (var item in uncSorted) {
+          if (item.HasRealThumbnail) continue;
+          if (_thumbCache.TryGetValue((item.FullPath, uncSize), out var cached)) {
+            item.Icon = cached;
+            item.HasRealThumbnail = true;
+          }
+        }
+      }
+
+      diag.Mark("PreWarm+PreThumb (UNC)");
+
+      if (!ShowHiddenFiles) uncSorted = uncSorted.Where(i => !i.IsHidden).ToList();
+      foreach (var item in uncSorted) item.DisplayName = BuildDisplayName(item);
+
+      Items.AddRange(uncSorted);
+      ApplyGrouping();
+      CurrentPath = path;
+      _pendingNavigatePath = null;
+      CanGoBack    = _backStack.Count > 0;
+      CanGoForward = _forwardStack.Count > 0;
+      BusyChanged?.Invoke(this, false);
+      PathChanged?.Invoke(this, path);
+      UpdateSortIndicators();
+      ApplyPendingSelection();
+      UpdateStatusBar(0);
+      StartFolderWatcher(path);
+
+      diag.Mark("AddRange+UI (UNC)");
+
+      int uncViewport = Math.Min(uncSorted.Count, EstimateViewportItemCount(ViewMode));
+      var uncSlice = uncViewport == uncSorted.Count ? uncSorted : uncSorted.GetRange(0, uncViewport);
+      try {
+        await WarmAndPreloadParallelAsync(uncSorted, uncSlice, uncSize, ct);
+      } catch (OperationCanceledException) { }
+      diag.Finish("WarmAndPreload (UNC)");
+      return;
+    }
+
     // Filesystem path: await the tasks we already started before cleanup.
     List<ShellItem> folders = [];
     List<ShellItem> files   = [];
@@ -1704,6 +1848,12 @@ public sealed partial class ShellListView : UserControl {
     } catch (OperationCanceledException) { return; } catch (UnauthorizedAccessException) { } catch (IOException) { }
 
     if (IsStale()) return;
+
+    // WSL/Linux paths must never be force-grouped, even if a stale saved setting
+    // exists in the DB. ApplyFolderSettings may have restored a non-empty group
+    // column for \\wsl.localhost\* or \\wsl$\* paths — override it here.
+    if (IsWslPath(path))
+      _groupColumn = string.Empty;
 
     diag.Mark("Settings+Enum");
 
@@ -1916,18 +2066,14 @@ public sealed partial class ShellListView : UserControl {
                item.FullPath.IndexOf('\\', 2) == item.FullPath.Length - 1)));       // \\SERVER\share\
 
   // Returns a type-cache key for an item.
-  // Per-item folders (drive roots, virtual shell paths) get a unique per-path key
-  // because their icons differ per item. Regular folders share a single generic key
-  // since the placeholder icon is the same generic folder icon; the thumbnail worker
-  // always fetches the correct per-folder icon (custom desktop.ini, content preview)
-  // independently, so sharing the placeholder key is safe and prevents unbounded
-  // cache growth as the user navigates through many directories.
+  // All folders get a unique per-path key so their individual shell icons (custom
+  // desktop.ini icons, drive icons, virtual-namespace icons) are warmed up and
+  // stamped immediately without waiting for the thumbnail queue. The cache is
+  // bounded by TypeIconCacheMaxSize with LRU eviction, so growth is safe.
   // Non-folder files share a key by extension (safe: type icon is the same for all .txt, etc.)
   private static string TypeIconKey(ShellItem item) =>
       item.IsFolder
-          ? IsPerItemFolder(item)
-              ? ":folder:" + item.FullPath.TrimEnd('\\').ToLowerInvariant()
-              : ":folder:"
+          ? ":folder:" + item.FullPath.TrimEnd('\\').ToLowerInvariant()
           // Non-folder UNC paths (\\SERVER, \\SERVER\share) have no meaningful file
           // extension — each represents a distinct network device or share whose
           // icon comes from the shell per-item, not from a type.  Give each its own
@@ -2546,11 +2692,20 @@ public sealed partial class ShellListView : UserControl {
     var ext = TypeIconKey(item);
     var ct = _thumbCts.Token;
 
-    // Stamp a type-icon placeholder so the item is never blank while the
-    // real thumbnail is still loading. Always refresh from cache on mode change
-    // (guarded by HasRealThumbnail so real thumbnails are never downgraded).
+    // Per-item folders (drives, virtual-path folders) must NOT go through the
+    // ResizeToFit thumbnail path — they need IconOnly fetching.
+    bool isPerItemFolder = IsPerItemFolder(item);
+    // Regular folders may have a custom icon (desktop.ini).  They share the
+    // generic ":folder:" type-key, so we track their icons per-path in _thumbCache.
+    bool isFolderPerItem = item.IsFolder && !isPerItemFolder;
+
+    // Stamp a placeholder so the item is never blank while loading.
+    // For regular folders, prefer the per-path _thumbCache (already-resolved custom
+    // icon) over the generic type-icon, to avoid a generic→custom flash on scroll-back.
     if (!item.HasRealThumbnail) {
-      if (_typeIconCache.TryGetValue((ext, size), out var typeIcon))
+      if (isFolderPerItem && _thumbCache.TryGetValue((item.FullPath, size), out var cachedFolderIcon))
+        item.Icon = cachedFolderIcon;
+      else if (_typeIconCache.TryGetValue((ext, size), out var typeIcon))
         item.Icon = typeIcon;
       // else: leave Icon as-is (null or stale); worker will fetch the correct size
     }
@@ -2572,14 +2727,15 @@ public sealed partial class ShellListView : UserControl {
     if (item.HasRealThumbnail)
       return;
 
-    // Per-item folders (drives, virtual-path folders) must NOT go through the
-    // ResizeToFit thumbnail path — they need IconOnly fetching.
-    bool isPerItemFolder = IsPerItemFolder(item);
     bool canUpgrade = !IsIconOnlyMode(ViewMode) && !isPerItemFolder &&
                       (item.IsFolder || _thumbnailExts.Contains(ext));
     bool isPerFile = _perFileIconExts.Contains(ext);
 
-    if (canUpgrade || isPerFile || item.Icon == null)
+    // isFolderPerItem goes to the dedicated fast icon queue so it is never blocked
+    // behind slow thumbnail (ResizeToFit) work in _thumbQueue.
+    if (isFolderPerItem)
+      _iconQueue.TryAdd((item, size));
+    else if (canUpgrade || isPerFile || item.Icon == null)
       _thumbQueue.TryAdd((item, size, 0));
   }
 
@@ -2594,8 +2750,10 @@ public sealed partial class ShellListView : UserControl {
     // rather than waiting on the old CTS.  No cancellation registrations accumulate.
     var oldThumbQueue   = _thumbQueue;
     var oldOverlayQueue = _overlayQueue;
+    var oldIconQueue    = _iconQueue;
     _thumbQueue   = new BlockingCollection<(ShellItem, uint, int)>(512);
     _overlayQueue = new BlockingCollection<ShellItem>(512);
+    _iconQueue    = new BlockingCollection<(ShellItem, uint)>(512);
 
     // Cancel BEFORE completing addition so any thread that races past the Take check
     // will still see ct.IsCancellationRequested == true.
@@ -2603,14 +2761,17 @@ public sealed partial class ShellListView : UserControl {
     // CompleteAdding wakes threads blocked in Take; they exit cleanly on the next loop.
     oldThumbQueue.CompleteAdding();
     oldOverlayQueue.CompleteAdding();
+    oldIconQueue.CompleteAdding();
     _ = Task.Run(() => {
       try { oldThumbCts.Dispose(); }     catch { }
       try { oldThumbQueue.Dispose(); }   catch { }
       try { oldOverlayQueue.Dispose(); } catch { }
+      try { oldIconQueue.Dispose(); }    catch { }
     });
 
     var thumbQueue   = _thumbQueue;
     var overlayQueue = _overlayQueue;
+    var iconQueue    = _iconQueue;
     var ct           = _thumbCts.Token;
     var dq           = DispatcherQueue;
 
@@ -2625,6 +2786,13 @@ public sealed partial class ShellListView : UserControl {
       var t = new Thread(() => ProcessOverlayQueue(overlayQueue, dq, ct)) {
         IsBackground = true,
         Name         = $"OverlayWorker-{i}"
+      };
+      t.Start();
+    }
+    for (var i = 0; i < IconConcurrency; i++) {
+      var t = new Thread(() => ProcessIconQueue(iconQueue, dq, ct)) {
+        IsBackground = true,
+        Name         = $"IconWorker-{i}"
       };
       t.Start();
     }
@@ -2651,12 +2819,9 @@ public sealed partial class ShellListView : UserControl {
             // ── Non-thumbnail items: just need a type/per-file icon ──────────
             byte[]? px = null;
             int w = 0, h = 0;
-            // Per-item virtual folders (network devices, SSDP/WSD paths) that are
-            // already in the cache must NOT be re-fetched: for virtual :: paths the
-            // shell may return a wrong/generic bitmap and overwrite the correct icon.
-            bool hasCachedPerItem = isPerItemFolder && _typeIconCache.ContainsKey((ext, size));
-            if (!hasCachedPerItem &&
-                (isPerFile || isPerItemFolder || !_typeIconCache.ContainsKey((ext, size)))) {
+            // Skip the shell fetch if the icon is already in cache — avoids redundant
+            // COM calls for items warmed up by WarmTypeIconCacheAsync.
+            if (!_typeIconCache.ContainsKey((ext, size)) || isPerFile) {
               (px, w, h, _) = NativeShell.GetShellImagePixelsSync(
                   item.FullPath, size, NativeShell.SIIGBF.IconOnly, ct);
             }
@@ -2818,6 +2983,48 @@ public sealed partial class ShellListView : UserControl {
   // Runs on a background thread — no async machinery, no cancellation registrations.
   // All COM/GDI work stays on this thread; only the final bitmap assignment
   // is dispatched at Low priority to avoid interfering with layout passes.
+
+  // Fast-path worker: handles per-item folder icon fetches (IconOnly, small size).
+  // Runs on dedicated threads so it is never blocked by slow thumbnail work.
+  private void ProcessIconQueue(
+      BlockingCollection<(ShellItem Item, uint Size)> queue,
+      DispatcherQueue dq, CancellationToken ct) {
+    try {
+      foreach (var (item, size) in queue.GetConsumingEnumerable(ct)) {
+        if (ct.IsCancellationRequested) break;
+        if (item.HasRealThumbnail) continue;
+
+        try {
+          // Cache hit: dispatch immediately without a shell call.
+          if (_thumbCache.TryGetValue((item.FullPath, size), out var hit)) {
+            var capHit = hit;
+            dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
+              if (!item.HasRealThumbnail) item.Icon = capHit;
+            });
+            continue;
+          }
+
+          var (px, w, h, _) = NativeShell.GetShellImagePixelsSync(
+              item.FullPath, size, NativeShell.SIIGBF.IconOnly, ct);
+
+          if (ct.IsCancellationRequested) continue;
+
+          if (px != null) {
+            var capPx = px; var capW = w; var capH = h;
+            var capPath = item.FullPath; var capSize = size;
+            dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
+              if (ct.IsCancellationRequested) return;
+              var wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
+              if (wb == null) return;
+              _thumbCache[(capPath, capSize)] = wb;
+              if (!item.HasRealThumbnail) item.Icon = wb;
+            });
+          }
+        } catch (OperationCanceledException) { break; } catch { }
+      }
+    } catch (OperationCanceledException) {
+    } catch (InvalidOperationException) { }
+  }
 
   private void ProcessOverlayQueue(
       BlockingCollection<ShellItem> queue, DispatcherQueue dq, CancellationToken ct) {
@@ -4749,16 +4956,23 @@ public sealed partial class ShellListView : UserControl {
       DataPackageView? view;
       try { view = Windows.ApplicationModel.DataTransfer.Clipboard.GetContent(); } catch { return; }
 
-      if (!view.Contains(StandardDataFormats.StorageItems))
-        return;
+      if (view.Contains(StandardDataFormats.StorageItems)) {
+        IReadOnlyList<IStorageItem> storageItems;
+        try { storageItems = await view.GetStorageItemsAsync(); } catch { return; }
+        if (storageItems.Count == 0)
+          return;
 
-      IReadOnlyList<IStorageItem> storageItems;
-      try { storageItems = await view.GetStorageItemsAsync(); } catch { return; }
-      if (storageItems.Count == 0)
-        return;
-
-      sourcePaths = storageItems.Select(i => i.Path).ToList();
-      move = view.RequestedOperation == DataPackageOperation.Move;
+        sourcePaths = storageItems.Select(i => i.Path).ToList();
+        move = view.RequestedOperation == DataPackageOperation.Move;
+      } else {
+        // WinRT cannot read shell IDataObject from Explorer — fall back to
+        // reading CF_HDROP directly from the Win32 clipboard.
+        var win32 = NativeShell.TryGetClipboardShellPaths();
+        if (win32 is null || win32.Value.Paths.Count == 0)
+          return;
+        sourcePaths = win32.Value.Paths;
+        move = win32.Value.IsCut;
+      }
     }
 
     if (SettingsPage.FileOpHandler == "TeraCopy") {

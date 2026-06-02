@@ -36,6 +36,11 @@ public static class NativeShell {
   // Shell namespace CLSID for the Linux (WSL) virtual folder shown in Explorer's nav pane.
   public static readonly Guid CLSID_LinuxFolder = new("B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6");
 
+  // CLSID of the Network Places shell namespace object.  This is the parsing-name GUID
+  // that SHCreateItemFromParsingName / SIGDN_DESKTOPABSOLUTEPARSING returns for the
+  // Network folder — different from FOLDERID_NetworkFolder but represents the same view.
+  public static readonly Guid CLSID_NetworkPlaces = new("F02C1A0D-BE21-4350-88B0-7367FC96EF3C");
+
   // Shell namespace for UPnP/WSD network devices (Media devices, Printers, Infrastructure, …).
   // This is the virtual folder Windows Explorer merges with FOLDERID_NetworkFolder to produce
   // the full "Network" tree including all device categories.
@@ -825,6 +830,8 @@ public static class NativeShell {
   [DllImport("ole32.dll")]
   private static extern void CoTaskMemFree(IntPtr pv);
 
+  // WNetAddConnection2 / WNetCancelConnection2 — declared here, struct/constants below near WNetOpenEnum.
+
   [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
   private static extern int StrRetToBufW(ref STRRET pstr, IntPtr pidl, [Out] char[] pszBuf, uint cchBuf);
 
@@ -854,6 +861,70 @@ public static class NativeShell {
 
   [DllImport("uxtheme.dll", EntryPoint = "#136", SetLastError = false)]
   private static extern void FlushMenuThemes();
+
+  // ── Win32 clipboard (CF_HDROP fallback for Explorer-copied files) ──────────
+
+  [DllImport("user32.dll")] private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+  [DllImport("user32.dll")] private static extern bool CloseClipboard();
+  [DllImport("user32.dll")] private static extern IntPtr GetClipboardData(uint uFormat);
+  [DllImport("user32.dll")] private static extern uint RegisterClipboardFormat(string lpszFormat);
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+  private static extern uint DragQueryFile(IntPtr hDrop, uint iFile, System.Text.StringBuilder? lpszFile, uint cch);
+  [DllImport("kernel32.dll")] private static extern IntPtr GlobalLock(IntPtr hMem);
+  [DllImport("kernel32.dll")] private static extern bool GlobalUnlock(IntPtr hMem);
+
+  private const uint CF_HDROP = 15;
+  private const uint DROPEFFECT_MOVE = 2;
+
+  /// <summary>
+  /// Reads file paths from the Win32 clipboard (CF_HDROP) and detects cut/copy
+  /// via the Preferred DropEffect format.  Returns null when CF_HDROP is absent.
+  /// </summary>
+  public static (List<string> Paths, bool IsCut)? TryGetClipboardShellPaths() {
+    if (!OpenClipboard(IntPtr.Zero))
+      return null;
+    try {
+      var hDrop = GetClipboardData(CF_HDROP);
+      if (hDrop == IntPtr.Zero)
+        return null;
+
+      var ptr = GlobalLock(hDrop);
+      if (ptr == IntPtr.Zero)
+        return null;
+      GlobalUnlock(hDrop);
+
+      uint count = DragQueryFile(hDrop, 0xFFFFFFFF, null, 0);
+      if (count == 0)
+        return null;
+
+      var paths = new List<string>((int)count);
+      var buf = new System.Text.StringBuilder(260);
+      for (uint i = 0; i < count; i++) {
+        buf.Clear();
+        uint len = DragQueryFile(hDrop, i, buf, (uint)buf.Capacity);
+        if (len > 0)
+          paths.Add(buf.ToString());
+      }
+
+      bool isCut = false;
+      uint fmtDrop = RegisterClipboardFormat("Preferred DropEffect");
+      if (fmtDrop != 0) {
+        var hEffect = GetClipboardData(fmtDrop);
+        if (hEffect != IntPtr.Zero) {
+          var pEffect = GlobalLock(hEffect);
+          if (pEffect != IntPtr.Zero) {
+            uint effect = (uint)Marshal.ReadInt32(pEffect);
+            GlobalUnlock(hEffect);
+            isCut = (effect & DROPEFFECT_MOVE) != 0;
+          }
+        }
+      }
+
+      return (paths, isCut);
+    } finally {
+      CloseClipboard();
+    }
+  }
 
   [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
   [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdi);
@@ -2114,7 +2185,7 @@ public static class NativeShell {
     // (UPnP, WSD, printers, infrastructure), not just SMB computers.
     // The standard SFGAO_FILESYSTEM filter must also be skipped because network
     // devices are virtual items with no filesystem path.
-    if (folderId == FOLDERID_NetworkFolder) {
+    if (folderId == FOLDERID_NetworkFolder || folderId == CLSID_NetworkPlaces) {
       EnumerateNetworkFolderAsShellItems(result);
       return result;
     }
@@ -2247,6 +2318,43 @@ public static class NativeShell {
   }
 
 
+  /// <summary>
+  /// Shows the standard Windows credential dialog for a UNC path that requires
+  /// authentication, then establishes the connection.
+  /// </summary>
+  /// <param name="uncPath">UNC path such as <c>\\server</c> or <c>\\server\share</c>.</param>
+  /// <param name="hwnd">Owner window handle; pass <see cref="IntPtr.Zero"/> for no owner.</param>
+  /// <returns>
+  /// <c>true</c> if credentials were entered and the connection was established;
+  /// <c>false</c> if the user cancelled the dialog.
+  /// </returns>
+  /// <exception cref="System.ComponentModel.Win32Exception">
+  /// Thrown when the connection attempt fails for a reason other than user cancellation.
+  /// </exception>
+  public static bool PromptForNetworkCredentials(string uncPath, IntPtr hwnd) {
+    // Normalise: keep only \\server or \\server\share (strip trailing slashes/sub-paths).
+    var parts = uncPath.TrimStart('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
+    string target = parts.Length >= 2
+        ? $@"\\{parts[0]}\{parts[1]}"  // \\server\share
+        : $@"\\{parts[0]}";             // \\server
+
+    var nr = new NETRESOURCE {
+      dwType      = RESOURCETYPE_DISK,
+      lpRemoteName = target,
+    };
+
+    int err = WNetAddConnection2(ref nr, null, null,
+                                 CONNECT_INTERACTIVE | CONNECT_PROMPT);
+    if (err == ERROR_CANCELLED)
+      return false;
+    if (err != 0)
+      throw new System.ComponentModel.Win32Exception(err);
+    return true;
+  }
+
+  /// <summary>
+  /// Enumerates the immediate children of a shell folder identified by its parsing path.
+  /// Throws <see cref="UnauthorizedAccessException"/> when the path requires credentials.
   /// Works for virtual paths like <c>::{GUID}\foo.library-ms</c> that cannot be handled
   /// by <see cref="EnumerateKnownFolderChildren"/> or <c>FindFirstFileEx</c>.
   /// </summary>
@@ -2294,21 +2402,28 @@ public static class NativeShell {
                   else
                     EnrichFromIShellItem2(item, parsePath);
                   result.Add(item);
-                } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
-              }
-            } finally { Marshal.ReleaseComObject(enumIdList); }
-          }
-        } finally { Marshal.ReleaseComObject(folder); }
-      } finally { Marshal.ReleaseComObject(folderItem); }
-    } catch { }
-    return result;
-  }
+                               } catch { } finally { Marshal.FreeCoTaskMem(childPidl); }
+                            }
+                          } finally { Marshal.ReleaseComObject(enumIdList); }
+                        }
+                      } finally { Marshal.ReleaseComObject(folder); }
+                    } finally { Marshal.ReleaseComObject(folderItem); }
+                  } catch (UnauthorizedAccessException) {
+                    throw;   // let the caller show the credential dialog
+                  } catch (Exception ex) when (
+                      (uint)(ex.HResult) == 0x80070005 ||  // E_ACCESSDENIED
+                      (uint)(ex.HResult) == 0x8007052E ||  // ERROR_LOGON_FAILURE
+                      (uint)(ex.HResult) == 0x80070035) {  // ERROR_BAD_NETPATH (not yet connected)
+                    throw new UnauthorizedAccessException(parsingPath, ex);
+                  } catch { }
+                  return result;
+                }
 
-  /// <summary>
-  /// Fills metadata on <paramref name="item"/> using <c>FindFirstFileEx</c> — much
-  /// faster than <c>IShellItem2</c> for real filesystem paths because it avoids
-  /// one COM creation call + four property-store reads per item.
-  /// Falls back silently if the path is not accessible.
+                /// <summary>
+                /// Fills metadata on <paramref name="item"/> using <c>FindFirstFileEx</c> — much
+                /// faster than <c>IShellItem2</c> for real filesystem paths because it avoids
+                /// one COM creation call + four property-store reads per item.
+                /// Falls back silently if the path is not accessible.
   /// </summary>
   private static void EnrichFromFindFirstFile(ShellItem item, string parsePath) {
     if (string.IsNullOrEmpty(parsePath)) return;
@@ -2480,8 +2595,7 @@ public static class NativeShell {
     return result;
   }
 
-  public static (List<ShellItem> folders, List<ShellItem> files)
-      EnumerateWithFindFirstFileEx(string path, CancellationToken ct) {
+  public static (List<ShellItem> folders, List<ShellItem> files) EnumerateWithFindFirstFileEx(string path, CancellationToken ct) {
     List<ShellItem> folders = [], files = [];
     var hFind = FindFirstFileEx(Path.Combine(path, "*"),
         FINDEX_INFO_BASIC, out var data, FINDEX_SEARCH_NAME, IntPtr.Zero, LARGE_FETCH);
@@ -2984,6 +3098,9 @@ public static class NativeShell {
   private const uint SCOPE_GLOBALNET         = 0x00000002;
   private const int  NET_NO_ERROR            = 0;
   private const int  ERROR_NO_MORE_ITEMS     = 259;
+  private const uint CONNECT_INTERACTIVE     = 0x00000008;
+  private const uint CONNECT_PROMPT          = 0x00000010;
+  private const int  ERROR_CANCELLED         = 1223;
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   private struct NETRESOURCE {
@@ -3014,6 +3131,19 @@ public static class NativeShell {
 
   [DllImport("mpr.dll")]
   private static extern int WNetCloseEnum(IntPtr hEnum);
+
+  [DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+  private static extern int WNetAddConnection2(
+      ref NETRESOURCE lpNetResource,
+      string?         lpPassword,
+      string?         lpUserName,
+      uint            dwFlags);
+
+  [DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+  private static extern int WNetCancelConnection2(
+      string lpName,
+      uint   dwFlags,
+      bool   fForce);
 
   // dwDisplayType values (mpr.h RESOURCEDISPLAYTYPE_*).
   private const uint RESOURCEDISPLAYTYPE_NETWORK   = 0x00;

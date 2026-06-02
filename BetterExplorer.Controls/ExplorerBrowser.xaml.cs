@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using BetterExplorer.ShellApi;
@@ -57,6 +58,10 @@ public sealed partial class ExplorerBrowser : UserControl {
   private readonly DispatcherTimer _searchDebounce = new() { Interval = TimeSpan.FromMilliseconds(400) };
   private string _pendingSearchText = string.Empty;
   private bool _applyingViewOptions;
+  // Set by the breadcrumb bar commit path; consumed in OnPathChanged to move
+  // focus to the list view AFTER SearchBox.IsEnabled has been updated (which
+  // otherwise steals focus from any earlier programmatic Focus() call).
+  private bool _focusListViewAfterNav;
 
   // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -156,6 +161,11 @@ public sealed partial class ExplorerBrowser : UserControl {
     UpdateToolbarButtonStates();
     DriveToolsSection.Visibility =
         NativeShell.IsDriveRoot(path) ? Visibility.Visible : Visibility.Collapsed;
+
+    if (_focusListViewAfterNav) {
+      _focusListViewAfterNav = false;
+      FileList.FocusListView();
+    }
   }
 
   /// <summary>
@@ -179,13 +189,6 @@ public sealed partial class ExplorerBrowser : UserControl {
   public void Deactivate() => FileList.NotifyDeactivated();
 
   private void OnBreadcrumbPathRequested(object? sender, string path) {
-    // Move focus directly onto the inner ListView so that any still-bubbling
-    // keyboard events (Enter KeyUp from the breadcrumb AutoSuggestBox) are
-    // absorbed by the list view instead of activating toolbar buttons such
-    // as the ViewButton SplitButton (which would cycle the view mode).
-    // Using FocusListView() also ensures selected items show the full accent
-    // highlight (Selected state) rather than the dimmer SelectedUnfocused state.
-    FileList.FocusListView();
 
     if (path.StartsWith("::{", StringComparison.Ordinal) && path.EndsWith("}")) {
       // Virtual folder path: ::{GUID-WITH-BRACES}
@@ -200,11 +203,174 @@ public sealed partial class ExplorerBrowser : UserControl {
     FileList.Navigate(path);
   }
 
-  private void OnTreeFolderSelected(object? sender, string path) =>
-      FileList.Navigate(path);
+  private void OnBreadcrumbListViewFocusRequested(object? sender, EventArgs e) {
+    // Don't call FocusListView() here — OnPathChanged (fired by the navigation
+    // that was just committed) runs AFTER this event and contains
+    // SearchBox.IsEnabled which steals focus. Set the flag instead so
+    // OnPathChanged claims focus as its very last action.
+    _focusListViewAfterNav = true;
+  }
 
-  private void OnTreeKnownFolderSelected(object? sender, Guid folderId) =>
+  private void OnTreeFolderSelected(object? sender, string path)
+  {
+      ShowFtpPanel(false);
+      FileList.Navigate(path);
+  }
+
+  private void OnTreeKnownFolderSelected(object? sender, Guid folderId)
+  {
+      ShowFtpPanel(false);
       FileList.NavigateToKnownFolder(folderId);
+  }
+
+  private async void OnTreeFtpSiteSelected(object? sender, FtpSiteEntry site)
+  {
+      ShowFtpPanel(true);
+      await FtpPanel.ConnectAsync(site);
+  }
+
+  private bool _ftpActive = false;
+
+  private void ShowFtpPanel(bool show)
+  {
+      if (show == _ftpActive) return;
+      _ftpActive = show;
+
+      FtpPanel.Visibility = show ? Visibility.Visible  : Visibility.Collapsed;
+      FileList.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
+
+      if (show)
+      {
+          FtpPanel.Disconnected += OnFtpDisconnected;
+          SwapToolbarForFtp(true);
+      }
+      else
+      {
+          FtpPanel.Disconnected -= OnFtpDisconnected;
+          SwapToolbarForFtp(false);
+      }
+  }
+
+  private void OnFtpDisconnected(object? sender, EventArgs e)
+  {
+      ShowFtpPanel(false);
+  }
+
+  // ── Toolbar FTP mode swap ─────────────────────────────────────────────────
+
+  // Saved normal sort/group items so we can restore them.
+  private List<MenuFlyoutItemBase>? _savedSortByItems;
+  private List<MenuFlyoutItemBase>? _savedGroupByItems;
+
+  private void SwapToolbarForFtp(bool ftpMode)
+  {
+      // Locate the "Sort by" and "Group by" sub-menus inside SortFlyout.
+      MenuFlyoutSubItem? sortByMenu  = null;
+      MenuFlyoutSubItem? groupByMenu = null;
+      foreach (var item in SortFlyout.Items)
+      {
+          if (item is MenuFlyoutSubItem sub)
+          {
+              if (sortByMenu  == null) sortByMenu  = sub;
+              else                     groupByMenu = sub;
+          }
+      }
+      if (sortByMenu == null || groupByMenu == null) return;
+
+      if (ftpMode)
+      {
+          // Save originals and replace with FTP columns.
+          _savedSortByItems  = [.. sortByMenu.Items];
+          _savedGroupByItems = [.. groupByMenu.Items];
+
+          sortByMenu.Items.Clear();
+          sortByMenu.Items.Add(MakeFtpSortItem("Name",     "FtpSortName",     FtpSortColumn.Name));
+          sortByMenu.Items.Add(MakeFtpSortItem("Size",     "FtpSortSize",     FtpSortColumn.Size));
+          sortByMenu.Items.Add(MakeFtpSortItem("Modified", "FtpSortModified", FtpSortColumn.Modified));
+          sortByMenu.Items.Add(MakeFtpSortItem("Type",     "FtpSortType",     FtpSortColumn.Type));
+
+          groupByMenu.Items.Clear();
+          groupByMenu.Items.Add(MakeFtpGroupItem("None", ""));
+          groupByMenu.Items.Add(MakeFtpGroupItem("Type", "Type"));
+
+          // Set initial checkmarks to match FtpPanel state.
+          UpdateFtpSortCheckmarks();
+          UpdateFtpGroupCheckmarks();
+      }
+      else if (_savedSortByItems != null && _savedGroupByItems != null)
+      {
+          // Restore normal items.
+          sortByMenu.Items.Clear();
+          foreach (var i in _savedSortByItems)  sortByMenu.Items.Add(i);
+
+          groupByMenu.Items.Clear();
+          foreach (var i in _savedGroupByItems) groupByMenu.Items.Add(i);
+
+          _savedSortByItems  = null;
+          _savedGroupByItems = null;
+
+          // Restore local sort checkmarks.
+          UpdateSortCheckmarks(FileList.SortColumn, FileList.SortAscending);
+          UpdateGroupCheckmarks(FileList.GroupColumn);
+      }
+  }
+
+  private RadioMenuFlyoutItem MakeFtpSortItem(string text, string name, FtpSortColumn col)
+  {
+      var item = new RadioMenuFlyoutItem { Text = text, GroupName = "FtpSortColumn", Tag = col };
+      item.Click += (s, _) =>
+      {
+          if (s is RadioMenuFlyoutItem r && r.Tag is FtpSortColumn c)
+          {
+              FtpPanel.ApplySort(c, FtpPanel.SortAscending);
+              UpdateFtpSortCheckmarks();
+          }
+      };
+      return item;
+  }
+
+  private RadioMenuFlyoutItem MakeFtpGroupItem(string text, string colTag)
+  {
+      var item = new RadioMenuFlyoutItem { Text = text, GroupName = "FtpGroupColumn", Tag = colTag };
+      item.Click += (s, _) =>
+      {
+          if (s is RadioMenuFlyoutItem r && r.Tag is string col)
+          {
+              FtpPanel.ApplyGroupBy(string.IsNullOrEmpty(col) ? null : col);
+              UpdateFtpGroupCheckmarks();
+          }
+      };
+      return item;
+  }
+
+  private void UpdateFtpSortCheckmarks()
+  {
+      var sortBy = GetFtpSubMenu(0);
+      if (sortBy == null) return;
+      foreach (var item in sortBy.Items)
+          if (item is RadioMenuFlyoutItem r && r.Tag is FtpSortColumn col)
+              r.IsChecked = col == FtpPanel.SortColumn;
+  }
+
+  private void UpdateFtpGroupCheckmarks()
+  {
+      var groupBy = GetFtpSubMenu(1);
+      if (groupBy == null) return;
+      foreach (var item in groupBy.Items)
+          if (item is RadioMenuFlyoutItem r && r.Tag is string col)
+              r.IsChecked = string.IsNullOrEmpty(col)
+                  ? string.IsNullOrEmpty(FtpPanel.GroupColumn)
+                  : col == FtpPanel.GroupColumn;
+  }
+
+  private MenuFlyoutSubItem? GetFtpSubMenu(int index)
+  {
+      int found = 0;
+      foreach (var item in SortFlyout.Items)
+          if (item is MenuFlyoutSubItem sub)
+              if (found++ == index) return sub;
+      return null;
+  }
 
   private void BackButton_Click(object sender, RoutedEventArgs e) => FileList.GoBack();
   private void ForwardButton_Click(object sender, RoutedEventArgs e) => FileList.GoForward();
@@ -312,15 +478,38 @@ public sealed partial class ExplorerBrowser : UserControl {
         ShellViewMode.Content,
     ];
 
+  private static readonly FtpViewMode[] _ftpViewCycle =
+  [
+      FtpViewMode.Icons,
+      FtpViewMode.List,
+      FtpViewMode.Details,
+  ];
+
   private void ViewButton_Click(SplitButton sender, SplitButtonClickEventArgs e) {
+    if (_ftpActive)
+    {
+      var idx  = Array.IndexOf(_ftpViewCycle, FtpPanel.ViewMode);
+      var next = _ftpViewCycle[(idx + 1) % _ftpViewCycle.Length];
+      FtpPanel.ApplyViewMode(next);
+      return;
+    }
     var current = FileList.ViewMode;
-    var idx = Array.IndexOf(_viewCycle, current);
-    var next = _viewCycle[(idx + 1) % _viewCycle.Length];
-    FileList.ViewMode = next;
-    UpdateViewModeCheckmarks(next);
+    var i2 = Array.IndexOf(_viewCycle, current);
+    var n2 = _viewCycle[(i2 + 1) % _viewCycle.Length];
+    FileList.ViewMode = n2;
+    UpdateViewModeCheckmarks(n2);
   }
 
   private void ViewMenuItem_Click(object sender, RoutedEventArgs e) {
+    if (_ftpActive)
+    {
+      if (sender is RadioButton { Tag: string ftpTag } && Enum.TryParse<FtpViewMode>(ftpTag, out var fmode))
+      {
+        FtpPanel.ApplyViewMode(fmode);
+        ViewButton.Flyout?.Hide();
+      }
+      return;
+    }
     if (sender is RadioButton { Tag: string tag }
         && Enum.TryParse<ShellViewMode>(tag, out var mode)) {
       FileList.ViewMode = mode;
@@ -376,7 +565,12 @@ public sealed partial class ExplorerBrowser : UserControl {
 
   private void SortDirectionMenuItem_Click(object sender, RoutedEventArgs e) {
     if (sender is RadioMenuFlyoutItem item && item.Tag is string tag)
-      FileList.ApplySort(FileList.SortColumn, tag == "Ascending");
+    {
+      if (_ftpActive)
+        FtpPanel.ApplySort(FtpPanel.SortColumn, tag == "Ascending");
+      else
+        FileList.ApplySort(FileList.SortColumn, tag == "Ascending");
+    }
   }
 
   private void OnGroupChanged(object? sender, EventArgs e) =>

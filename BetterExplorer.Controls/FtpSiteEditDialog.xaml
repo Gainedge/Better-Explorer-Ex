@@ -1,0 +1,84 @@
+<ContentDialog
+    x:Class="BetterExplorer.Controls.FtpSiteEditDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:BetterExplorer.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    PrimaryButtonText="Save"
+    CloseButtonText="Cancel"
+    DefaultButton="Primary"
+    MinWidth="440">
+
+  <ScrollViewer VerticalScrollMode="Auto">
+    <StackPanel Spacing="12" Padding="0,4,0,0">
+
+      <!-- Display name -->
+      <StackPanel Spacing="4">
+        <TextBlock Text="Display name" FontWeight="SemiBold" />
+        <TextBox x:Name="DisplayNameBox" PlaceholderText="My FTP Server" />
+      </StackPanel>
+
+      <!-- Protocol + host + port row -->
+      <StackPanel Spacing="4">
+        <TextBlock Text="Protocol" FontWeight="SemiBold" />
+        <ComboBox x:Name="ProtocolBox" HorizontalAlignment="Stretch">
+          <ComboBoxItem Content="FTP"  Tag="0" />
+          <ComboBoxItem Content="FTPS" Tag="1" />
+          <ComboBoxItem Content="SFTP" Tag="2" />
+          <ComboBoxItem Content="SCP"  Tag="3" />
+        </ComboBox>
+      </StackPanel>
+
+      <Grid ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="90" />
+        </Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Spacing="4">
+          <TextBlock Text="Host / IP address" FontWeight="SemiBold" />
+          <TextBox x:Name="HostBox" PlaceholderText="ftp.example.com" />
+        </StackPanel>
+        <StackPanel Grid.Column="1" Spacing="4">
+          <TextBlock Text="Port" FontWeight="SemiBold" />
+          <NumberBox x:Name="PortBox"
+                     Minimum="1" Maximum="65535"
+                     SpinButtonPlacementMode="Inline"
+                     Value="21" />
+        </StackPanel>
+      </Grid>
+
+      <!-- Credentials -->
+      <StackPanel Spacing="4">
+        <TextBlock Text="Username" FontWeight="SemiBold" />
+        <TextBox x:Name="UsernameBox" PlaceholderText="anonymous" />
+      </StackPanel>
+
+      <StackPanel Spacing="4">
+        <TextBlock Text="Password" FontWeight="SemiBold" />
+        <PasswordBox x:Name="PasswordBox" />
+      </StackPanel>
+
+      <!-- Remote path -->
+      <StackPanel Spacing="4">
+        <TextBlock Text="Initial remote directory" FontWeight="SemiBold" />
+        <TextBox x:Name="RemotePathBox" PlaceholderText="/" />
+      </StackPanel>
+
+      <!-- Advanced / security -->
+      <Expander Header="Security options" HorizontalAlignment="Stretch">
+        <StackPanel Spacing="8" Padding="0,8,0,0">
+          <CheckBox x:Name="AcceptAnyKeyBox"
+                    Content="Accept any host key (insecure – use for testing only)" />
+          <StackPanel Spacing="4">
+            <TextBlock Text="Host key fingerprint (SHA-256)" FontWeight="SemiBold" />
+            <TextBox x:Name="FingerprintBox"
+                     PlaceholderText="ssh-rsa 2048 xx:xx:…  (leave blank to skip pinning)" />
+          </StackPanel>
+        </StackPanel>
+      </Expander>
+
+    </StackPanel>
+  </ScrollViewer>
+</ContentDialog>

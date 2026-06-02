@@ -41,6 +41,12 @@ public sealed partial class ShellBreadcrumbBar : UserControl
     /// <summary>Raised when the user navigates to a file-system path.</summary>
     public event EventHandler<string>? PathRequested;
 
+    /// <summary>
+    /// Raised just before edit mode closes after a commit, so the host can
+    /// move focus to the list view before WinUI picks the next tab-stop.
+    /// </summary>
+    public event EventHandler? ListViewFocusRequested;
+
     // ── State ─────────────────────────────────────────────────────────────────
 
     private string _currentPath = string.Empty;
@@ -51,6 +57,10 @@ public sealed partial class ShellBreadcrumbBar : UserControl
     // Small icon cache (path → bitmap)
     private readonly Dictionary<string, WriteableBitmap?> _iconCache =
         new(StringComparer.OrdinalIgnoreCase);
+
+    // Cancels any in-flight suggestion enumeration when the user keeps typing.
+    private System.Threading.CancellationTokenSource _suggestCts =
+        new System.Threading.CancellationTokenSource();
 
     // ── Quick-access root entries ─────────────────────────────────────────────
 
@@ -502,7 +512,7 @@ public sealed partial class ShellBreadcrumbBar : UserControl
             root.AddHandler(PointerPressedEvent, _outsideClickHandler, handledEventsToo: true);
     }
 
-    private void LeaveEditMode()
+    private void LeaveEditMode(bool focusListView = false)
     {
         SuggestPopup.IsOpen = false;
         SuggestList.ItemsSource = null;
@@ -512,6 +522,9 @@ public sealed partial class ShellBreadcrumbBar : UserControl
 
         EditPanel.Visibility      = Visibility.Collapsed;
         BreadcrumbView.Visibility = Visibility.Visible;
+
+        if (focusListView)
+            ListViewFocusRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private readonly PointerEventHandler _outsideClickHandler;
@@ -532,49 +545,107 @@ public sealed partial class ShellBreadcrumbBar : UserControl
 
     // ── TextBox + Popup suggestion callbacks ──────────────────────────────────
 
-    private void OnEditBoxTextChanged(object sender, TextChangedEventArgs args)
+    private async void OnEditBoxTextChanged(object sender, TextChangedEventArgs args)
     {
-        var typed = EditBox.Text;
-        var suggestions = new List<string>();
+        // Cancel any previous in-flight enumeration immediately so rapid keystrokes
+        // never queue up blocking I/O on the thread pool.
+        var oldCts = _suggestCts;
+        _suggestCts = new System.Threading.CancellationTokenSource();
+        var ct = _suggestCts.Token;
+        oldCts.Cancel();
+        oldCts.Dispose();
 
-        suggestions.AddRange(
+        var typed = EditBox.Text;
+
+        // History matches are synchronous and instant — show them right away.
+        var suggestions = new List<string>(
             _history.Where(h => h.StartsWith(typed, StringComparison.OrdinalIgnoreCase)));
 
-        var dirPart = typed;
-        if (!Directory.Exists(dirPart))
-            dirPart = Path.GetDirectoryName(typed) ?? string.Empty;
+        // Debounce: wait 150 ms before hitting the filesystem so we don't fire
+        // a blocking I/O call for every single keystroke (especially costly on UNC paths).
+        try { await Task.Delay(150, ct); }
+        catch (OperationCanceledException) { return; }
 
-        if (Directory.Exists(dirPart))
+        if (ct.IsCancellationRequested) return;
+
+        // All filesystem work runs off the UI thread so the app never freezes.
+        // A linked timeout CTS ensures the thread-pool work is abandoned after
+        // 2 s even if Directory.Exists / EnumerateDirectories blocks on a slow
+        // network path (cancellation tokens are not observed by Win32 I/O calls,
+        // so we abandon rather than cancel those calls).
+        List<string> fsSuggestions;
+        using var timeoutCts = new System.Threading.CancellationTokenSource(
+            TimeSpan.FromSeconds(2));
+        using var linkedCts  = System.Threading.CancellationTokenSource
+            .CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var linkedToken = linkedCts.Token;
+        try
         {
-            try
+            fsSuggestions = await Task.Run(() =>
             {
-                var leaf = typed.Length > dirPart.Length
-                    ? typed[dirPart.Length..].TrimStart('\\', '/')
-                    : string.Empty;
+                if (linkedToken.IsCancellationRequested) return [];
 
-                foreach (var sub in Directory.EnumerateDirectories(dirPart))
+                var result = new List<string>();
+                try
                 {
-                    if (leaf.Length == 0 ||
-                        Path.GetFileName(sub).StartsWith(leaf, StringComparison.OrdinalIgnoreCase))
+                    var dirPart = typed;
+
+                    // Guard 1: never call Directory.Exists on a bare UNC server root
+                    // (\\server with no share) — it blocks for up to 30 s on unreachable hosts.
+                    // We need at least \\server\share before any I/O is safe.
+                    bool IsUnsafeUnc(string p)
                     {
-                        if (!suggestions.Contains(sub, StringComparer.OrdinalIgnoreCase))
-                            suggestions.Add(sub);
-                        if (suggestions.Count >= 12) break;
+                        if (!p.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+                        var parts = p.TrimStart('\\').Split('\\',
+                            StringSplitOptions.RemoveEmptyEntries);
+                        return parts.Length < 2;
+                    }
+
+                    if (IsUnsafeUnc(dirPart)) return result;
+
+                    if (!Directory.Exists(dirPart))
+                    {
+                        dirPart = Path.GetDirectoryName(typed) ?? string.Empty;
+                        if (string.IsNullOrEmpty(dirPart) || IsUnsafeUnc(dirPart))
+                            return result;
+                    }
+
+                    if (!Directory.Exists(dirPart)) return result;
+
+                    var leaf = typed.Length > dirPart.Length
+                        ? typed[dirPart.Length..].TrimStart('\\', '/')
+                        : string.Empty;
+
+                    foreach (var sub in Directory.EnumerateDirectories(dirPart))
+                    {
+                        if (linkedToken.IsCancellationRequested) break;
+                        if (leaf.Length == 0 ||
+                            Path.GetFileName(sub).StartsWith(leaf, StringComparison.OrdinalIgnoreCase))
+                        {
+                            result.Add(sub);
+                            if (result.Count >= 12) break;
+                        }
                     }
                 }
-            }
-            catch { }
+                catch { }
+                return result;
+            }, linkedToken);
         }
+        catch (OperationCanceledException) { return; }
+
+        if (ct.IsCancellationRequested) return;
+
+        foreach (var s in fsSuggestions)
+            if (!suggestions.Contains(s, StringComparer.OrdinalIgnoreCase))
+                suggestions.Add(s);
 
         SuggestList.ItemsSource = suggestions;
-
         if (suggestions.Count > 0)
         {
-            // Position popup directly below this control.
-            SuggestList.MinWidth  = ActualWidth;
+            SuggestList.MinWidth          = ActualWidth;
             SuggestPopup.HorizontalOffset = 0;
             SuggestPopup.VerticalOffset   = ActualHeight;
-            SuggestPopup.IsOpen = true;
+            SuggestPopup.IsOpen           = true;
         }
         else
         {
@@ -644,7 +715,7 @@ public sealed partial class ShellBreadcrumbBar : UserControl
         if (string.IsNullOrEmpty(path)) { LeaveEditMode(); return; }
         AddToHistory(path);
         Navigate(path);
-        LeaveEditMode();
+        LeaveEditMode(focusListView: true);
     }
 
     // ── History management ────────────────────────────────────────────────────

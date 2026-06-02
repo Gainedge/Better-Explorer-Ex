@@ -9,6 +9,7 @@ using BetterExplorer.ShellApi;
 using BetterExplorer.ShellApi.Interop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Foundation;
 
@@ -194,6 +195,9 @@ public sealed partial class ShellTreeView : UserControl
             _linuxNode = linux;
             LoadKnownFolderIcon(linux, NativeShell.CLSID_LinuxFolder, "::linux", iconSize);
         }
+
+        // ── FTP Sites ──────────────────────────────────────────────────────
+        AddFtpSitesRoot();
     }
 
     // ── Quick Access children ─────────────────────────────────────────────────
@@ -486,6 +490,13 @@ public sealed partial class ShellTreeView : UserControl
         if (!node.HasDummyChild) return;
         node.Children.Clear();
 
+        // FTP Sites root: children are managed by RefreshFtpSiteNodesAsync.
+        if (node.IsFtpRoot)
+        {
+            _ = RefreshFtpSiteNodesAsync();
+            return;
+        }
+
         // Network root: enumerate all shell Network categories asynchronously,
         // then keep a ShellChangeWatcher alive so UPnP/WSD devices that arrive
         // later via shell notifications are automatically added.
@@ -631,6 +642,18 @@ public sealed partial class ShellTreeView : UserControl
     {
         if (_suppressItemInvoked) return;
         if (args.InvokedItem is not ShellTreeNode node) return;
+
+        if (node.IsFtpSite && node.Tag is FtpSiteEntry site)
+        {
+            FtpSiteSelected?.Invoke(this, site);
+            return;
+        }
+
+        if (node.IsFtpRoot)
+        {
+            // Clicking the FTP root just expands/collapses — no navigation.
+            return;
+        }
 
         if (node.KnownFolderGuid.HasValue && !node.IsNetworkContainer)
             KnownFolderSelected?.Invoke(this, node.KnownFolderGuid.Value);
@@ -1230,5 +1253,102 @@ public sealed partial class ShellTreeView : UserControl
         if (wb == null) return;
         lock (_iconCacheLock) _iconCache.TryAdd(sizedKey, wb);
         node.Icon = wb;
+    }
+
+    // ── FTP Sites ────────────────────────────────────────────────────────────
+
+    /// <summary>Raised when the user clicks a saved FTP/SFTP/SCP site node.</summary>
+    public event EventHandler<FtpSiteEntry>? FtpSiteSelected;
+
+    private ShellTreeNode? _ftpRootNode;
+
+    private void AddFtpSitesRoot()
+    {
+        var ftp = new ShellTreeNode
+        {
+            Name          = "FTP Sites",
+            FullPath      = null,
+            IsVirtual     = true,
+            IsGroupHeader = true,
+            IsFolder      = false,
+            IsFtpRoot     = true,
+            TopMargin     = new Thickness(0, 8, 0, 0),
+        };
+        // Always show a dummy child so the chevron appears immediately.
+        ftp.Children.Add(ShellTreeNode.Dummy);
+        _ftpRootNode = ftp;
+        Roots.Add(ftp);
+
+        // Use the standard network/FTP icon as fallback.
+        LoadIDListKnownFolderIcon(ftp, NativeShell.FOLDERID_NetworkFolder, "::ftp", (uint)Math.Ceiling(16 * _iconScale));
+        _ = RefreshFtpSiteNodesAsync();
+    }
+
+    /// <summary>
+    /// (Re)loads all FTP site child nodes from the database.
+    /// Safe to call from any thread; marshals to the UI thread automatically.
+    /// </summary>
+    public async Task RefreshFtpSiteNodesAsync()
+    {
+        if (_ftpRootNode == null) return;
+        var iconSize = (uint)Math.Ceiling(16 * _iconScale);
+        var sites = await Task.Run(() => FtpSiteDb.Instance.LoadAll());
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _ftpRootNode.Children.Clear();
+            foreach (var site in sites)
+            {
+                var node = new ShellTreeNode
+                {
+                    Name      = site.DisplayName,
+                    FullPath  = null,
+                    IsVirtual = true,
+                    IsFolder  = false,
+                    IsFtpSite = true,
+                    Tag       = site,
+                };
+                _ftpRootNode.Children.Add(node);
+                LoadIDListKnownFolderIcon(node, NativeShell.FOLDERID_NetworkFolder, $"::ftpsite@{iconSize}", iconSize);
+            }
+            if (_ftpRootNode.Children.Count == 0)
+                _ftpRootNode.Children.Add(ShellTreeNode.Dummy); // keep chevron when empty
+        });
+    }
+
+    // ── FTP right-click context menu ─────────────────────────────────────────
+
+    private void NavTree_RightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        // Walk up the visual tree to find the tapped ShellTreeNode.
+        var element = e.OriginalSource as DependencyObject;
+        ShellTreeNode? node = null;
+        while (element != null)
+        {
+            if (element is FrameworkElement fe && fe.DataContext is ShellTreeNode n)
+            {
+                node = n;
+                break;
+            }
+            element = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element);
+        }
+
+        if (node == null || !node.IsFtpRoot) return;
+
+        var flyout = new MenuFlyout();
+        var manageItem = new MenuFlyoutItem { Text = "Manage FTP Sites…", Icon = new SymbolIcon(Symbol.Setting) };
+        manageItem.Click += async (_, _) => await ShowManageFtpSitesDialogAsync();
+        flyout.Items.Add(manageItem);
+        flyout.ShowAt((FrameworkElement)sender, e.GetPosition((UIElement)sender));
+        e.Handled = true;
+    }
+
+    private async Task ShowManageFtpSitesDialogAsync()
+    {
+        var win = new FtpSiteManagerDialog();
+        win.Activate();
+        // Wait for the window to be closed before refreshing the tree nodes.
+        await win.WhenClosed;
+        await RefreshFtpSiteNodesAsync();
     }
 }

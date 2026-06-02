@@ -492,7 +492,8 @@
         CornerRadius="4">
         <local:ShellBreadcrumbBar x:Name="AddressBar"
                                    VerticalAlignment="Stretch"
-                                   PathRequested="OnBreadcrumbPathRequested" />
+                                   PathRequested="OnBreadcrumbPathRequested"
+                                   ListViewFocusRequested="OnBreadcrumbListViewFocusRequested" />
       </Border>
 
       <!-- Search box: default AutoSuggestBox appearance but with the blue focused bottom border removed -->
@@ -1379,7 +1380,8 @@
         <local:ShellTreeView x:Name="NavTreeView"
                                     Grid.Column="0"
                                     FolderSelected="OnTreeFolderSelected"
-                                    KnownFolderSelected="OnTreeKnownFolderSelected" />
+                                    KnownFolderSelected="OnTreeKnownFolderSelected"
+                                    FtpSiteSelected="OnTreeFtpSiteSelected" />
 
         <local:SplitterBorder Grid.Column="1"
                       Width="5"
@@ -1396,6 +1398,11 @@
         <local:ShellListView x:Name="FileList"
                                     Grid.Column="2"
                                     ViewMode="SmallIcons" />
+
+        <!-- FTP browser overlay — visible only when an FTP site is selected -->
+        <local:FtpBrowserPage x:Name="FtpPanel"
+                              Grid.Column="2"
+                              Visibility="Collapsed" />
       </Grid>
     </Border>
   </Grid>

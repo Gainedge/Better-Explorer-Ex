@@ -76,6 +76,19 @@ public sealed class ShellTreeNode : INotifyPropertyChanged
     /// </summary>
     public Guid? KnownFolderGuid { get; set; }
 
+    /// <summary>True when this node represents the FTP Sites virtual root.</summary>
+    public bool IsFtpRoot { get; set; }
+
+    /// <summary>True when this node represents a single saved FTP/SFTP/SCP site.</summary>
+    public bool IsFtpSite { get; set; }
+
+    /// <summary>
+    /// Arbitrary tag payload.  For FTP site nodes this holds the
+    /// <c>BetterExplorer.Controls.FtpSiteEntry</c> instance without
+    /// introducing a circular project reference.
+    /// </summary>
+    public object? Tag { get; set; }
+
     /// <summary>True when this node represents a folder that can be navigated.</summary>
     public bool IsFolder { get; set; }
 
