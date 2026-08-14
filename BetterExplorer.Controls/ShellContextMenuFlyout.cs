@@ -85,6 +85,58 @@ internal static class ShellContextMenuFlyout {
     return style;
   }
 
+  // ── UI warm-up ────────────────────────────────────────────────────────────
+
+  private static bool _uiWarmedUp;
+
+  /// <summary>
+  /// Forces WinUI to JIT and template-realize <see cref="CommandBarFlyout"/>,
+  /// <see cref="AppBarButton"/>, <see cref="FontIcon"/> (which also triggers the
+  /// one-time Segoe MDL2 Assets font-file load), <see cref="ImageIcon"/> +
+  /// <see cref="WriteableBitmap"/>, and the <see cref="MenuFlyout"/>/
+  /// <see cref="MenuFlyoutItem"/> cascading-submenu chain once, off the critical
+  /// path, so the very first real right-click flyout doesn't pay that one-time
+  /// control-realization cost. First-control-of-a-type realization in WinUI 3 is
+  /// a well-known source of one-off UI latency, separate from (and in addition
+  /// to) the shell-extension warm-up done by <see cref="ShellContextMenuService.WarmUpAsync"/>.
+  /// The warm-up flyout is opened and immediately hidden again in the same
+  /// callback, so at most a single frame is ever composited.
+  /// Call once, early, after <paramref name="anchor"/> is loaded (e.g. from
+  /// <c>ShellListView.Loaded</c>).
+  /// </summary>
+  public static void WarmUpUi(FrameworkElement anchor) {
+    if (_uiWarmedUp || anchor.XamlRoot is null) return;
+    _uiWarmedUp = true;
+    try {
+      var flyout = new CommandBarFlyout { AlwaysExpanded = true };
+
+      flyout.PrimaryCommands.Add(MakePrimaryButton("", string.Empty, _ => { }));
+
+      var dummyBmp = NativeShell.PixelsToBitmapSync(new byte[4], 1, 1);
+      if (dummyBmp is not null) {
+        flyout.PrimaryCommands.Add(new AppBarButton {
+          Width = 40,
+          Icon  = new ImageIcon { Source = dummyBmp, Width = 16, Height = 16 },
+        });
+      }
+
+      var subBtn = new AppBarButton { Label = string.Empty };
+      var subFlyout = new MenuFlyout();
+      subFlyout.Items.Add(new MenuFlyoutItem { Text = string.Empty });
+      subFlyout.Items.Add(new MenuFlyoutSeparator());
+      subBtn.Flyout = subFlyout;
+      flyout.SecondaryCommands.Add(new AppBarSeparator());
+      flyout.SecondaryCommands.Add(subBtn);
+
+      flyout.Opened += (_, _) => flyout.Hide();
+      flyout.ShowAt(anchor, new FlyoutShowOptions {
+        Position  = new Windows.Foundation.Point(0, 0),
+        ShowMode  = FlyoutShowMode.Standard,
+        Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft,
+      });
+    } catch { }
+  }
+
   // ── Entry point ──────────────────────────────────────────────────────────
 
   public static async Task ShowAsync(
@@ -122,7 +174,16 @@ internal static class ShellContextMenuFlyout {
       if (!isFolder) {
         flyout.PrimaryCommands.Add(MakePrimaryButton(
             "\uE7AC", "Open with",
-            _ => { flyout.Hide(); _ = session?.InvokeVerbAsync("openwith", hwnd); }));
+            _ => {
+              flyout.Hide();
+              var capturedSes = session;
+              session = null; // prevent flyout.Closed from disposing it out from under the invoke
+              _ = Task.Run(async () => {
+                try { await (capturedSes?.InvokeVerbAsync("openas", hwnd) ?? Task.CompletedTask); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[ShellContextMenu] InvokeVerb(openas) failed: {ex}"); }
+                finally { capturedSes?.Dispose(); }
+              });
+            }));
       }
     }
 

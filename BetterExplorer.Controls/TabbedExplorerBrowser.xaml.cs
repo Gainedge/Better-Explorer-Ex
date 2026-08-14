@@ -88,7 +88,7 @@ public sealed partial class TabbedExplorerBrowser : UserControl {
               // watcher, toolbar state) has actually run.
               var tcs = lastTabReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
               AddNewTab(path: paths[i], loadContent: true, selectOnAdd: false,
-                  onContentReady: () => tcs.SetResult());
+                  onContentReady: () => tcs.TrySetResult());
             } else {
               AddNewTab(path: paths[i], loadContent: false, selectOnAdd: false);
             }
@@ -105,7 +105,7 @@ public sealed partial class TabbedExplorerBrowser : UserControl {
     // See RunContinuationsAsynchronously comment above — same reasoning applies here.
     var readyTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     AddNewTab(path: null, loadContent: true, selectOnAdd: false,
-        onContentReady: () => readyTcs.SetResult());
+        onContentReady: () => readyTcs.TrySetResult());
     await readyTcs.Task;
     await RevealTabsAsync();
   }
@@ -248,8 +248,15 @@ public sealed partial class TabbedExplorerBrowser : UserControl {
         // background icon/thumbnail warming finish), which caused the loading
         // overlay to hide before the tab was actually fully rendered/navigated.
         EventHandler<string>? onReady = null;
+        bool onReadyFired = false;
         onReady = (_, _) => {
           browser.NavigationCompleted -= onReady;
+          // Defensive: NavigationCompleted should only fire once for the initial
+          // load this handler was registered for, but guard against any spurious
+          // re-entrant/duplicate raise so onContentReady (typically a
+          // TaskCompletionSource.SetResult) is never invoked more than once.
+          if (onReadyFired) return;
+          onReadyFired = true;
           onContentReady();
         };
         browser.NavigationCompleted += onReady;

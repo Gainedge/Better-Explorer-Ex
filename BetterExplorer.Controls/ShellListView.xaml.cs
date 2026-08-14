@@ -341,6 +341,9 @@ public sealed partial class ShellListView : UserControl {
   private bool _sortAscending = true;
   private string _groupColumn = string.Empty;  // empty = no grouping
   private ShellViewMode _currentMode = ShellViewMode.Details;
+  // Volatile flag read by background thumbnail workers to decide IconOnly vs.
+  // ThumbnailOnly.  Updated on the UI thread whenever ViewMode changes.
+  private volatile bool _workerIconOnly = true;
   // Cached once on first use — avoids allocating 8 Setter objects on every navigation.
   private Style? _cachedListRowStyle;
   // True while the current folder is This PC — switches the Tiles template and forces type grouping.
@@ -441,9 +444,18 @@ public sealed partial class ShellListView : UserControl {
       Navigate(@"C:\");
 
     // Pre-load shell extension DLLs in the background so the first right-click is
-    // fast. This does a real (throw-away) QueryContextMenu on the Desktop folder
-    // and on notepad.exe, covering both folder-background and per-file handlers.
+    // fast. This does a real (throw-away) QueryContextMenu + full menu build
+    // (icons, verbs, submenus) on the Desktop background, a file, and a folder,
+    // covering background/per-file/per-folder handlers alike.
     _ = ShellContextMenuService.WarmUpAsync();
+
+    // Also warm up the WinUI side: the first-ever CommandBarFlyout / AppBarButton /
+    // FontIcon (Segoe MDL2 font load) / ImageIcon / cascading MenuFlyout of the app
+    // pays a one-time control-realization cost independent of the shell-side work
+    // above. Deferred to Low priority so it runs after the initial folder paint
+    // instead of competing with it.
+    DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low,
+        () => ShellContextMenuFlyout.WarmUpUi(DragSelectGrid));
 
     // Add the rename popup to the visual tree so it inherits theme resources.
     if (!DragSelectGrid.Children.Contains(_renamePopup))
@@ -1095,13 +1107,29 @@ public sealed partial class ShellListView : UserControl {
       }
     }
 
+    // Record the pending target SYNCHRONOUSLY, before the await below. Callers
+    // (e.g. TabbedExplorerBrowser.AddNewTab) rely on _pendingNavigatePath being
+    // set the instant Navigate() is called — even though the rest of this method
+    // completes asynchronously — so that ShellListView_Loaded's C:\ fallback
+    // (which only fires when _pendingNavigatePath is still null) never races a
+    // navigation that has already been requested. Without this, awaiting
+    // Task.Run(Directory.Exists) below would let control return to the caller,
+    // Loaded would fire with _pendingNavigatePath still null, kick off a second,
+    // competing "C:\" navigation, and both could eventually raise
+    // NavigationCompleted — invoking any one-shot completion callback twice
+    // (e.g. TaskCompletionSource.SetResult, throwing InvalidOperationException).
+    _pendingNavigatePath = path;
+
     // Validate existence off the UI thread — Directory.Exists can block 50-200 ms
     // on network paths, mapped drives, or spinning disks.
     // UNC paths (\\server or \\server\share) are exempt: Directory.Exists returns
     // false for bare server roots (\\server) even when the server is reachable.
     bool isUncPath = path.StartsWith(@"\\", StringComparison.Ordinal);
-    if (!isUncPath && !await Task.Run(() => Directory.Exists(path)))
+    if (!isUncPath && !await Task.Run(() => Directory.Exists(path))) {
+      if (_pendingNavigatePath == path)
+        _pendingNavigatePath = null;
       return;
+    }
 
     // If navigating to the parent folder, preselect the folder we came from —
     // same behaviour as the Up button.
@@ -2004,14 +2032,16 @@ public sealed partial class ShellListView : UserControl {
       if (!IsIconOnlyMode(ViewMode)) {
         foreach (var item in kfItems) {
           if (item.HasRealThumbnail) continue;
+          // Cheap in-memory lookup first — only pay for the IsCloudItem() syscall
+          // (which round-trips through the OneDrive cloud-filter minifilter) when
+          // there is actually a cached thumbnail candidate to gate.
+          if (!_thumbCache.TryGetValue((item.FullPath, kfSize), out var cached)) continue;
           // Cloud-backed items may have stale type-icon entries in _thumbCache from
           // previous visits — never stamp them; they need fresh thumbnails via the
           // cloud pipeline (SHCNE_UPDATEITEM invalidation + ResizeToFit).
           if (NativeShell.IsCloudItem(item.FullPath)) continue;
-          if (_thumbCache.TryGetValue((item.FullPath, kfSize), out var cached)) {
-            item.Icon = cached;
-            item.HasRealThumbnail = true;
-          }
+          item.Icon = cached;
+          item.HasRealThumbnail = true;
         }
       }
 
@@ -2130,11 +2160,12 @@ public sealed partial class ShellListView : UserControl {
       if (!IsIconOnlyMode(ViewMode)) {
         foreach (var item in uncSorted) {
           if (item.HasRealThumbnail) continue;
+          // Cheap in-memory lookup first — only pay for the IsCloudItem() syscall
+          // when there is actually a cached thumbnail candidate to gate.
+          if (!_thumbCache.TryGetValue((item.FullPath, uncSize), out var cached)) continue;
           if (NativeShell.IsCloudItem(item.FullPath)) continue;
-          if (_thumbCache.TryGetValue((item.FullPath, uncSize), out var cached)) {
-            item.Icon = cached;
-            item.HasRealThumbnail = true;
-          }
+          item.Icon = cached;
+          item.HasRealThumbnail = true;
         }
       }
 
@@ -2242,11 +2273,14 @@ public sealed partial class ShellListView : UserControl {
     if (!IsIconOnlyMode(ViewMode)) {
       foreach (var item in allItems) {
         if (item.HasRealThumbnail) continue;
-        if (NativeShell.IsCloudItem(item.FullPath) && item.IsFolder) continue;
-        if (_thumbCache.TryGetValue((item.FullPath, size), out var cached)) {
-          item.Icon = cached;
-          item.HasRealThumbnail = true;
-        }
+        // Cheap in-memory lookup first — only pay for the IsCloudItem() syscall
+        // (which round-trips through the OneDrive cloud-filter minifilter) when
+        // there is actually a cached thumbnail candidate to gate, and only for
+        // folders (the only case the cloud check applies to).
+        if (!_thumbCache.TryGetValue((item.FullPath, size), out var cached)) continue;
+        if (item.IsFolder && NativeShell.IsCloudItem(item.FullPath)) continue;
+        item.Icon = cached;
+        item.HasRealThumbnail = true;
       }
     }
 
@@ -2642,7 +2676,7 @@ public sealed partial class ShellListView : UserControl {
   /// Warm → ApplyCachedIcons → PreloadCached chain with a single await.
   /// </summary>
   private async Task WarmAndPreloadParallelAsync(
-      List<ShellItem> allItems, List<ShellItem> viewportSlice, uint size, CancellationToken ct) {
+      List<ShellItem> allItems, List<ShellItem> viewportSlice, uint size, CancellationToken ct, Boolean forcePreloadThumbs = false) {
 
     var wd = new NavDiag($"Warm size={size} all={allItems.Count} vp={viewportSlice.Count}");
 
@@ -2681,7 +2715,7 @@ public sealed partial class ShellListView : UserControl {
         // Cloud-backed items may have stale shell cache entries — skip them so
         // they go through LoadCloudThumbnailAsync with the Storage API.
         if (!item.HasRealThumbnail && !perFile && !IsPerItemFolder(item) &&
-            !NativeShell.IsCloudItem(item.FullPath))
+            (!NativeShell.IsCloudItem(item.FullPath) || forcePreloadThumbs))
           thumbPaths![vi] = item.FullPath;
       }
     }
@@ -2771,26 +2805,6 @@ public sealed partial class ShellListView : UserControl {
 
   private static WriteableBitmap? FindAnyCachedIcon(string ext) =>
       _typeIconByExt.TryGetValue(ext, out var wb) ? wb : null;
-
-  /// <summary>
-  /// Warms <see cref="_typeIconCache"/> for <paramref name="size"/> then
-  /// re-stamps every item whose icon is still null or stale. Called after a
-  /// view-mode switch so icons are shown at the correct new resolution.
-  /// </summary>
-  private async Task WarmAndStampAsync(List<ShellItem> items, uint size, CancellationToken ct) {
-    try {
-      await WarmTypeIconCacheAsync(items, size, ct);
-    } catch (OperationCanceledException) { return; } catch { return; }
-    if (ct.IsCancellationRequested) return;
-    // Re-stamp on the UI thread (we are always on the UI thread after the await
-    // because WarmTypeIconCacheAsync uses ConfigureAwait defaults).
-    foreach (var item in items) {
-      if (item.HasRealThumbnail) continue;
-      var ext = TypeIconKey(item);
-      if (_typeIconCache.TryGetValue((ext, size), out var icon))
-        item.Icon = icon;
-    }
-  }
 
   private async Task LoadTypeIconAsync(ShellItem rep, string ext, uint size, CancellationToken ct) {
     try {
@@ -3122,13 +3136,10 @@ public sealed partial class ShellListView : UserControl {
     var iconQueue    = _iconQueue;
     var ct           = _thumbCts.Token;
     var dq           = DispatcherQueue;
-    // ViewMode is a DependencyProperty and must only be read on the UI thread;
-    // reading it from the background worker threads below throws a COMException
-    // (RPC_E_WRONG_THREAD). Capture the icon-only flag here instead.
-    var iconOnlyMode = IsIconOnlyMode(ViewMode);
+    // iconOnlyMode is NOT captured here — it is a volatile field read by workers.
 
     for (var i = 0; i < ThumbConcurrency; i++) {
-      var t = new Thread(() => ProcessThumbnailQueue(thumbQueue, dq, ct, iconOnlyMode)) {
+      var t = new Thread(() => ProcessThumbnailQueue(thumbQueue, dq, ct)) {
         IsBackground = true,
         Name         = $"ThumbWorker-{i}"
       };
@@ -3152,10 +3163,16 @@ public sealed partial class ShellListView : UserControl {
 
   private void ProcessThumbnailQueue(
       BlockingCollection<(ShellItem Item, uint Size, int Retry)> queue,
-      DispatcherQueue dq, CancellationToken ct, bool iconOnlyMode) {
+      DispatcherQueue dq, CancellationToken ct) {
     // All pixel/COM work runs on this background thread.
     // Only the final WriteableBitmap creation + item.Icon assignment is
     // dispatched back to the UI thread at Low priority.
+    //
+    // iconOnlyMode is read from the volatile _workerIconOnly field, which is
+    // updated on the UI thread whenever ViewMode changes.  The old approach
+    // captured it once at thread-start, which meant stale workers from a
+    // previous view mode (e.g. Details with iconOnlyMode=true) would race
+    // with new workers and fetch IconOnly icons instead of real thumbnails.
     try {
       foreach (var (item, size, retry) in queue.GetConsumingEnumerable(ct)) {
         if (ct.IsCancellationRequested) break;
@@ -3165,6 +3182,7 @@ public sealed partial class ShellListView : UserControl {
         bool isPerItemFolder = IsPerItemFolder(item);
         bool isPerFile = _perFileIconExts.Contains(ext);
         bool canUpgrade = !isPerItemFolder && (item.IsFolder || !isPerFile);
+        bool iconOnlyMode = _workerIconOnly;
 
         try {
           if (!canUpgrade) {
@@ -3239,8 +3257,11 @@ public sealed partial class ShellListView : UserControl {
               foreach (var k in keysToRemove) _typeIconCache.Remove(k);
             }
             _thumbCache.TryRemove((item.FullPath, size), out _);
-            item.HasRealThumbnail = false;
-
+            // HasRealThumbnail is already false — it was set by ApplyViewMode
+            // (line 4028) before this item was enqueued. Setting it again here
+            // triggers OnPropertyChanged on a background thread, which the
+            // WinUI binding layer handles by calling back into COM on the UI
+            // thread, causing a COMException.  Remove the redundant write.
             _ = LoadCloudThumbnailAsync(item, size, retry, dq, ct);
             continue;
           } else {
@@ -3980,7 +4001,7 @@ public sealed partial class ShellListView : UserControl {
     }
   }
 
-  private void ApplyViewMode(ShellViewMode mode) {
+  private async Task ApplyViewMode(ShellViewMode mode) {
     // -- Fast path: mode unchanged ------------------------------------------
     // Skip everything when navigating between folders that share the same view
     // mode.  ViewMode assignment in ApplyFolderSettings now only calls SetValue
@@ -3990,11 +4011,32 @@ public sealed partial class ShellListView : UserControl {
       return;
 
     CollapseAllNameExpansions();
+    // Must be set before RestartThumbnailWorker()/enqueueing below — workers read
+    // this live per item, and enqueueing thumbnail work while it still reflects the
+    // previous mode causes items to be stamped with the generic type icon (never
+    // re-requested) instead of a real thumbnail.
+    _workerIconOnly = IsIconOnlyMode(mode);
+    var allItems = Items.ToList();
+    foreach (var item in Items)
+      item.HasRealThumbnail = false;  // force re-request of type icon or thumbnail
     RestartThumbnailWorker();
     var size = PhysicalSize(ThumbnailSizeForMode(mode));
-    var allItems = Items.ToList();
-    foreach (var item in allItems) {
-      item.HasRealThumbnail = false;
+
+    if (allItems.Count > 0 && !_thumbCts.IsCancellationRequested && !_workerIconOnly) {
+      var ct = _thumbCts.Token;
+      int viewportCount = Math.Min(allItems.Count, EstimateViewportItemCount(mode));
+      var viewportSlice = viewportCount == allItems.Count
+          ? allItems : allItems.GetRange(0, viewportCount);
+      // Warms type icons and stamps any already-cached (shell disk-cache) real
+      // thumbnails for the viewport — same pipeline LoadDirectory uses on first
+      // navigation into a folder.
+      await WarmAndPreloadParallelAsync(allItems, viewportSlice, size, ct, true);
+    }
+
+    foreach (var item in allItems.Where(item => !item.HasRealThumbnail || _workerIconOnly)) {
+      if (_workerIconOnly) {
+        item.HasRealThumbnail = false;  // force re-request of type icon
+      }
       var ext = TypeIconKey(item);
       if (_typeIconCache.TryGetValue((ext, size), out var icon))
         item.Icon = icon;
@@ -4002,13 +4044,7 @@ public sealed partial class ShellListView : UserControl {
         item.Icon = null;
     }
 
-    // If there are items and the new size is not yet cached, warm it off-thread
-    // and re-stamp so icons switch to the correct resolution without waiting for
-    // the per-item thumbnail worker (which would show null/blank in the meantime).
-    if (allItems.Count > 0) {
-      var ct = _thumbCts.Token;
-      _ = WarmAndStampAsync(allItems, size, ct);
-    }
+    
     string templateKey = mode switch {
       ShellViewMode.ExtraLargeIcons => "ExtraLargeIconsTemplate",
       ShellViewMode.LargeIcons => "LargeIconsTemplate",
@@ -4060,6 +4096,24 @@ public sealed partial class ShellListView : UserControl {
     // default style — clear it again to keep per-container animations disabled.
     ShellView.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
     ShellView.Transitions              = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
+
+    // Force full container regeneration so ContainerContentChanging fires fresh for
+    // every visible item under the new template/panel. Merely swapping ItemTemplate/
+    // ItemsPanel can leave existing containers recycled in place without re-firing
+    // container-changing for them, which silently starves those items of thumbnail
+    // requests — they stay on the generic type icon until something else (e.g. a
+    // full folder reload) recreates containers from scratch via Items.AddRange.
+    // Detaching/reattaching ItemsSource is the same "recreate from scratch" path,
+    // without re-fetching anything from the shell.
+    double savedScrollOffset = _scrollViewer?.VerticalOffset ?? 0;
+    ShellView.ItemsSource = null;
+    ShellView.ItemsSource = Items;
+    if (savedScrollOffset > 0) {
+      var restoreOffset = savedScrollOffset;
+      DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
+        _scrollViewer?.ChangeView(null, restoreOffset, null, true);
+      });
+    }
 
     DetailsHeader.Visibility = Visibility.Visible;
     _currentMode = mode;

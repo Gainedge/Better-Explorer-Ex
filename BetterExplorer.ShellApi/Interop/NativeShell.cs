@@ -1176,13 +1176,24 @@ public static class NativeShell {
 
   // Pump all pending messages on the current STA thread for up to <ms> milliseconds.
   // This lets async COM shell extensions post their completion callbacks.
-  internal static void PumpMessagesFor(int ms) {
-    var deadline = Environment.TickCount64 + ms;
+  internal static void PumpMessagesFor(int ms) => PumpMessagesUntil(null, ms);
+
+  /// <summary>
+  /// Pumps the STA message queue until <paramref name="until"/> returns true (checked
+  /// after every drain of the queue) or <paramref name="maxMs"/> elapses, whichever comes
+  /// first. Used to wait for a lazily-populated shell-extension submenu without always
+  /// paying the full worst-case timeout — most extensions populate within a millisecond
+  /// or two of WM_INITMENUPOPUP, so returning as soon as <paramref name="until"/> is
+  /// satisfied avoids blocking every context-menu open on the slowest possible extension.
+  /// </summary>
+  internal static void PumpMessagesUntil(Func<bool>? until, int maxMs) {
+    var deadline = Environment.TickCount64 + maxMs;
     while (Environment.TickCount64 < deadline) {
       while (PeekMessageW(out var msg, IntPtr.Zero, 0, 0, 1 /*PM_REMOVE*/)) {
         TranslateMessage(ref msg);
         DispatchMessageW(ref msg);
       }
+      if (until is not null && until()) return;
       Thread.Sleep(1);
     }
   }

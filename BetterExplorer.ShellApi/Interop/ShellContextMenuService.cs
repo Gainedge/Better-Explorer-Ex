@@ -140,8 +140,8 @@ public sealed class ShellContextMenuSession : IDisposable {
   private static readonly Dictionary<string, string> _labelToVerb =
       new(StringComparer.OrdinalIgnoreCase) {
     ["Open"]               = "open",
-    ["Open with"]          = "openwith",
-    ["Open With"]          = "openwith",
+    ["Open with"]          = "openas",
+    ["Open With"]          = "openas",
     ["Explore"]            = "explore",
     ["Find"]               = "find",
     ["Cut"]                = "cut",
@@ -241,9 +241,13 @@ public sealed class ShellContextMenuSession : IDisposable {
           // Only pump the STA message loop when the submenu is still empty after
           // the init message — those are the truly async extensions (e.g. Libraries,
           // ESET). Submenus that were populated synchronously skip the pump entirely,
-          // eliminating the per-submenu delay for the common case.
-          if (NativeShell.GetMenuItemCount(mii.hSubMenu) == 0)
-            NativeShell.PumpMessagesFor(60);
+          // eliminating the per-submenu delay for the common case. When a pump is
+          // needed, return the instant the extension populates the submenu instead
+          // of always burning the full worst-case timeout — most extensions finish
+          // within 1-2ms, so this turns a flat 60ms tax per submenu into a few ms.
+          IntPtr subMenu = mii.hSubMenu;
+          if (NativeShell.GetMenuItemCount(subMenu) == 0)
+            NativeShell.PumpMessagesUntil(() => NativeShell.GetMenuItemCount(subMenu) > 0, 60);
 
           subItems = BuildFromMenu(mii.hSubMenu);
         }
@@ -428,25 +432,45 @@ public static class ShellContextMenuService {
   // made the first two right-clicks noticeably slow.
   private static readonly StaWorker _sharedSta = new StaWorker();
 
+  // Warm-up is a process-wide effect (loaded extension DLLs, JITted code paths) —
+  // running it again for every new tab/ShellListView instance would just queue
+  // redundant work onto the shared STA thread for no benefit. 0 = not started.
+  private static int _warmUpStarted;
+  private static Task? _warmUpTask;
+
   /// <summary>
-  /// Pre-loads shell extension DLLs on the shared STA thread so the first real
-  /// right-click is fast. Call once early in the app lifecycle (e.g. from
-  /// <c>ShellListView.Loaded</c>) and discard the returned Task — it completes
-  /// in the background without blocking the UI.
+  /// Pre-loads shell extension DLLs <em>and</em> exercises the full menu-build
+  /// path (icon extraction, <c>GetCommandString</c> verb lookups, and the
+  /// <c>WM_INITMENUPOPUP</c> + message-pump used for lazily-populated
+  /// submenus such as "New" or "Send to") on the shared STA thread, so the
+  /// first real right-click pays none of that cost. Call once early in the
+  /// app lifecycle (e.g. from <c>ShellListView.Loaded</c>) and discard the
+  /// returned Task — it completes in the background without blocking the UI.
   ///
-  /// Two throw-away <c>QueryContextMenu</c> calls are made:
+  /// Three throw-away queries are built and fully walked via
+  /// <see cref="ShellContextMenuSession.BuildItems"/>:
   /// 1. Desktop folder background — loads <c>HKCR\Directory\Background</c>,
   ///    <c>HKCR\Folder</c>, and <c>HKCR\AllFilesystemObjects</c> handlers.
   /// 2. A guaranteed system file — loads <c>HKCR\*</c> handlers (applies to
   ///    every file type, so antivirus / archive helpers etc. are pre-loaded).
+  /// 3. A guaranteed system folder — loads <c>HKCR\Directory</c> /
+  ///    <c>HKCR\Folder</c> item (not background) handlers, e.g. "pin to Quick
+  ///    access", cloud-sync overlays' submenus, etc.
   /// </summary>
-  public static Task WarmUpAsync() =>
-      _sharedSta.Run(() => {
+  public static Task WarmUpAsync() {
+    if (Interlocked.CompareExchange(ref _warmUpStarted, 1, 0) == 0) {
+      _warmUpTask = _sharedSta.Run(() => {
         WarmUpDesktopBackground();
-        WarmUpFile(System.IO.Path.Combine(Environment.SystemDirectory, "notepad.exe"));
+        WarmUpItem(System.IO.Path.Combine(Environment.SystemDirectory, "notepad.exe"));
+        WarmUpItem(Environment.SystemDirectory);
       });
+    }
+    return _warmUpTask!;
+  }
 
-  // Loads Folder / Directory\Background / AllFilesystemObjects shell handlers.
+  // Loads Folder / Directory\Background / AllFilesystemObjects shell handlers,
+  // and fully walks the resulting menu (submenus, verbs, icons) so those code
+  // paths are JITted/cached ahead of the first real background right-click.
   private static void WarmUpDesktopBackground() {
     try {
       int hr = NativeShell.SHGetDesktopFolder(out object desktopObj);
@@ -454,23 +478,20 @@ public static class ShellContextMenuService {
       try {
         hr = desktop.CreateViewObject(IntPtr.Zero, IID_IContextMenu, out object cmObj);
         if (hr != 0 || cmObj is not NativeShell.IContextMenuCM cm) return;
-        try {
-          IntPtr hMenu = NativeShell.CreatePopupMenu();
-          if (hMenu == IntPtr.Zero) return;
-          try   { cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL); }
-          finally { NativeShell.DestroyMenu(hMenu); }
-        } finally { try { Marshal.ReleaseComObject(cm); } catch { } }
+        BuildAndDiscard(cm);
       } finally { try { Marshal.ReleaseComObject(desktop); } catch { } }
     } catch { }
   }
 
-  // Loads HKCR\* and per-extension handlers (applies to every file item).
-  private static void WarmUpFile(string filePath) {
-    if (!System.IO.File.Exists(filePath)) return;
+  // Loads HKCR\* (or HKCR\Directory/Folder for a directory path) and
+  // per-extension handlers, then fully walks the resulting menu the same way
+  // WarmUpDesktopBackground does. Works for both files and folders.
+  private static void WarmUpItem(string path) {
+    if (!System.IO.File.Exists(path) && !System.IO.Directory.Exists(path)) return;
     IntPtr pidl = IntPtr.Zero;
     NativeShell.IShellFolderCM? parent = null;
     try {
-      pidl = NativeShell.ILCreateFromPathW(filePath);
+      pidl = NativeShell.ILCreateFromPathW(path);
       if (pidl == IntPtr.Zero) return;
 
       int hr = NativeShell.SHBindToParent(
@@ -482,17 +503,31 @@ public static class ShellContextMenuService {
       hr = folder.GetUIObjectOf(IntPtr.Zero, 1, children,
            IID_IContextMenu, IntPtr.Zero, out object cmObj);
       if (hr != 0 || cmObj is not NativeShell.IContextMenuCM cm) return;
-      try {
-        IntPtr hMenu = NativeShell.CreatePopupMenu();
-        if (hMenu == IntPtr.Zero) return;
-        try   { cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL); }
-        finally { NativeShell.DestroyMenu(hMenu); }
-      } finally { try { Marshal.ReleaseComObject(cm); } catch { } }
+      BuildAndDiscard(cm);
     } catch { }
     finally {
       if (pidl != IntPtr.Zero) NativeShell.ILFree(pidl);
       if (parent is not null) try { Marshal.ReleaseComObject(parent); } catch { }
     }
+  }
+
+  // Populates the HMENU for a throw-away IContextMenu and fully walks it via
+  // ShellContextMenuSession.BuildItems — same work a real right-click does —
+  // then tears it down. Must be called on the shared STA thread.
+  private static void BuildAndDiscard(NativeShell.IContextMenuCM cm) {
+    try {
+      IntPtr hMenu = NativeShell.CreatePopupMenu();
+      if (hMenu == IntPtr.Zero) { try { Marshal.ReleaseComObject(cm); } catch { } return; }
+
+      cm.QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL);
+
+      NativeShell.IContextMenu3CM? cm3 = cm as NativeShell.IContextMenu3CM;
+      NativeShell.IContextMenu2CM? cm2 = cm3 is null ? cm as NativeShell.IContextMenu2CM : null;
+
+      var session = new ShellContextMenuSession(cm, cm2, cm3, hMenu, _sharedSta, ownsSta: false);
+      try { session.BuildItems(); } catch { }
+      session.Dispose();
+    } catch { try { Marshal.ReleaseComObject(cm); } catch { } }
   }
 
   public static Task<ShellContextMenuSession?> QueryAsync(
