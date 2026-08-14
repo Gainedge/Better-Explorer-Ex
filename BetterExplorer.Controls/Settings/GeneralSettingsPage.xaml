@@ -11,6 +11,30 @@
   <ScrollViewer Padding="0,0,0,24">
     <StackPanel Spacing="4" Padding="24,24,24,0">
 
+      <ctk:SettingsCard Header="Startup location"
+                        Description="The folder Explorer opens when it starts. Leave blank to use the default location.">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <TextBox x:Name="StartupLocationBox"
+                   PlaceholderText="Default location"
+                   MinWidth="260"
+                   TextChanged="OnStartupLocationTextChanged" />
+          <Button x:Name="BrowseStartupLocationButton"
+                  Content="Browse…"
+                  Click="OnBrowseStartupLocationClick" />
+          <Button x:Name="ThisPcStartupLocationButton"
+                  Content="This PC"
+                  ToolTipService.ToolTip="Use This PC — the Browse… dialog can't select virtual folders like This PC or Network."
+                  Click="OnThisPcStartupLocationClick" />
+        </StackPanel>
+      </ctk:SettingsCard>
+
+      <ctk:SettingsCard Header="Restore last opened tabs"
+                        Description="Reopen the tabs from the previous session when the app starts.">
+        <ToggleSwitch x:Name="RestoreTabsToggle"
+                      IsOn="False"
+                      Toggled="OnRestoreTabsToggled" />
+      </ctk:SettingsCard>
+
       <ctk:SettingsCard Header="Show hidden files">
         <ToggleSwitch x:Name="ShowHiddenFilesToggle"
                       IsOn="False"

@@ -16,6 +16,23 @@
     <!-- Shared column-width state — both the header and each item row bind to this. -->
     <shellapi:DetailsColumnSettings x:Key="DetailsColumns" />
 
+    <!-- Elevation shadow used by the item tooltip popup, matching FlyoutPresenter's depth. -->
+    <ThemeShadow x:Key="TooltipShadow" />
+
+    <!--
+      WinUI 3's AcrylicBrush only supports in-app ("Backdrop") sampling — it blurs whatever is
+      rendered behind it on the same compositor surface. ItemTooltipPopup previously used
+      ShouldConstrainToRootBounds="False" so it could extend past the control's edges, but that
+      makes WinAppSDK render the popup on a separate top-level overlay surface with nothing
+      behind it to sample, so the acrylic fell back to a flat color. Constraining the popup to
+      root bounds keeps it on the same surface as the list items so the blur actually samples them.
+    -->
+    <AcrylicBrush x:Key="TooltipAcrylicBrush"
+                  TintColor="{ThemeResource SolidBackgroundFillColorBase}"
+                  TintOpacity="0.4"
+                  TintLuminosityOpacity="0.5"
+                  FallbackColor="{ThemeResource SolidBackgroundFillColorBase}" />
+
     <!-- Fixed height for the details column header row. Applied to both the header
          grid and each DataTemplate item so the gripper Border stretches fully. -->
     <x:Double x:Key="DetailsHeaderHeight">35</x:Double>
@@ -726,7 +743,7 @@
     </Canvas>
 
     <!-- Shell ListView -->
-    <Grid Grid.Row="1" x:Name="DragSelectGrid">
+    <Grid Grid.Row="1" x:Name="DragSelectGrid" Background="Transparent">
       <ListView x:Name="ShellView"
                       SelectionMode="Extended"
                       DoubleTapped="ShellView_DoubleTapped"
@@ -828,7 +845,132 @@
         </Border>
       </Popup>
 
+      <!-- ═══════════════════════════════════════════════
+             Acrylic item tooltip
+        ════════════════════════════════════════════════ -->
+      <Popup x:Name="ItemTooltipPopup" IsOpen="False" IsLightDismissEnabled="False"
+             ShouldConstrainToRootBounds="True" IsHitTestVisible="False">
+        <Border x:Name="TooltipBorder"
+                CornerRadius="{ThemeResource OverlayCornerRadius}"
+                BorderBrush="{ThemeResource FlyoutBorderThemeBrush}"
+                BorderThickness="1"
+                MaxWidth="740"
+                Padding="0"
+                IsHitTestVisible="False"
+                Background="{StaticResource TooltipAcrylicBrush}"
+                Translation="0,0,32"
+                Shadow="{StaticResource TooltipShadow}">
+          <Grid x:Name="TooltipContentGrid" Padding="12">
+            <!-- Loading state -->
+            <ProgressRing x:Name="TooltipLoadingRing"
+                          Width="24" Height="24"
+                          IsActive="False"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center" />
+
+            <!-- Standard item info -->
+            <StackPanel x:Name="TooltipStandardInfo"
+                        Orientation="Horizontal" Spacing="10"
+                        HorizontalAlignment="Left"
+                        VerticalAlignment="Center">
+              <!-- 96px icon — rendered at native pixel size for crisp display -->
+              <Grid Width="96" Height="96" VerticalAlignment="Center">
+                <Image x:Name="TooltipIcon"
+                       Width="96" Height="96"
+                       Stretch="Uniform"
+                       Visibility="Collapsed" />
+              </Grid>
+              <!-- File info panel — single-column Grid so both TextBlocks share the same
+                                 column width and the filename never stretches independently. -->
+              <Grid VerticalAlignment="Center" HorizontalAlignment="Left" MinWidth="120">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="TooltipFileName"
+                                         Grid.Row="0"
+                                         FontWeight="SemiBold" FontSize="13"
+                                         TextWrapping="NoWrap"
+                                         MaxWidth="260"
+                                         HorizontalAlignment="Left"
+                                         TextTrimming="CharacterEllipsis" />
+                <TextBlock x:Name="TooltipInfoTip"
+                                         Grid.Row="1"
+                                         FontSize="12"
+                                         Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                         TextWrapping="NoWrap"
+                                         MaxWidth="350"
+                                         MaxLines="6"
+                                         TextTrimming="WordEllipsis"
+                                         Visibility="Collapsed" />
+              </Grid>
+            </StackPanel>
+
+            <!-- Picture item extra info (shown below standard info) -->
+            <StackPanel x:Name="TooltipPictureInfo"
+                        Orientation="Vertical" Spacing="6"
+                        Visibility="Collapsed">
+              <!-- Large preview thumbnail -->
+              <Border x:Name="TooltipPreviewBorder"
+                      MinWidth="180" MinHeight="180"
+                      MaxWidth="600" MaxHeight="600"
+                      CornerRadius="4"
+                      HorizontalAlignment="Center"
+                      Visibility="Collapsed">
+                <Grid>
+                  <!-- Placeholder glyph shown while the real preview is loading
+                       (including forced cloud hydration for dehydrated files),
+                       or as a permanent fallback if it never becomes available. -->
+                  <FontIcon x:Name="TooltipPreviewPlaceholderGlyph"
+                            Glyph="&#xEB9F;"
+                            FontSize="48"
+                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                  <Image x:Name="TooltipLargePreview"
+                         Stretch="Uniform"
+                         HorizontalAlignment="Center"
+                         VerticalAlignment="Center" />
+                  <ProgressRing x:Name="TooltipPreviewLoadingRing"
+                                Width="28" Height="28"
+                                IsActive="False"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center" />
+                </Grid>
+              </Border>
+              <!-- Rating (left) + file name (right), shown below the large preview -->
+              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                <StackPanel x:Name="TooltipRatingStars"
+                            Grid.Column="0"
+                            Orientation="Horizontal" Spacing="1"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Center" />
+                <TextBlock x:Name="TooltipPictureFileName"
+                           Grid.Column="1"
+                           FontWeight="SemiBold" FontSize="13"
+                           HorizontalAlignment="Left"
+                           VerticalAlignment="Center"
+                           TextWrapping="NoWrap"
+                           MaxWidth="380"
+                           TextTrimming="CharacterEllipsis" />
+              </Grid>
+              <!-- Combined file size + dimensions row -->
+              <StackPanel Orientation="Horizontal" Spacing="4"
+                          HorizontalAlignment="Left">
+                <TextBlock x:Name="TooltipPictureSize"
+                           FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock x:Name="TooltipDimensions"
+                           FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+              </StackPanel>
+            </StackPanel>
+          </Grid>
+        </Border>
+      </Popup>
+
       <!-- Inline rename TextBox — created and positioned in code-behind -->
+
     </Grid>
 
     <!-- Status bar -->

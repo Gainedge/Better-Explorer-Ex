@@ -19,6 +19,7 @@ public sealed partial class MainWindow : Window
     private const double TabStripDips = 40;
 
     private InputNonClientPointerSource? _nonClientSource;
+    private bool _isDraggingTab;
 
     // ── Settings keys ─────────────────────────────────────────────────────────
     private const string SettingX         = "Window.X";
@@ -55,7 +56,14 @@ public sealed partial class MainWindow : Window
         SizeChanged            += OnWindowSizeChanged;
         Closed                 += OnWindowClosed;
 
-        BetterExplorer.Controls.SettingsPage.ThemeChangeRequested += OnThemeChangeRequested;
+        BetterExplorer.Controls.SettingsPage.ThemeChangeRequested   += OnThemeChangeRequested;
+        BetterExplorer.Controls.SettingsPage.StartupLocationChanged += OnStartupLocationChanged;
+        BetterExplorer.Controls.SettingsPage.GetMainWindowHandle     = () => WinRT.Interop.WindowNative.GetWindowHandle(this);
+
+        // Apply persisted startup location so the first tab opens there.
+        var startupPath = BetterExplorer.Controls.SettingsPage.StartupLocation;
+        if (!string.IsNullOrWhiteSpace(startupPath))
+            TabbedBrowser.DefaultPath = startupPath;
 
         // Hide the HWND the instant it is first activated so DWM never
         // composites the initial black frame to the screen.  The window is
@@ -171,7 +179,12 @@ public sealed partial class MainWindow : Window
 
     private void OnWindowClosed(object sender, WindowEventArgs e)
     {
-        BetterExplorer.Controls.SettingsPage.ThemeChangeRequested -= OnThemeChangeRequested;
+        BetterExplorer.Controls.SettingsPage.ThemeChangeRequested   -= OnThemeChangeRequested;
+        BetterExplorer.Controls.SettingsPage.StartupLocationChanged -= OnStartupLocationChanged;
+
+        if (BetterExplorer.Controls.SettingsPage.RestoreTabs)
+            TabbedBrowser.SaveSession();
+
         SaveWindowPlacement();
     }
 
@@ -180,6 +193,11 @@ public sealed partial class MainWindow : Window
         if (Content is FrameworkElement root)
             root.RequestedTheme = theme;
         UpdateTitleBarButtonColors(theme);
+    }
+
+    private void OnStartupLocationChanged(string? path)
+    {
+        TabbedBrowser.DefaultPath = string.IsNullOrWhiteSpace(path) ? null : path;
     }
 
     private void UpdateTitleBarButtonColors(ElementTheme theme)
@@ -238,6 +256,11 @@ public sealed partial class MainWindow : Window
         TabbedBrowser.TabControl.LayoutUpdated +=
             (_, _) => DispatcherQueue.TryEnqueue(UpdateNonClientRegions);
 
+        // During a tab drag the whole strip must be Passthrough so that
+        // HTCLIENT is returned everywhere, including the animated gap between
+        // tabs where the dragged tab will land (see UpdateNonClientRegions).
+        TabbedBrowser.TabControl.TabDragStarting += OnTabDragStarting;
+
         UpdateNonClientRegions();
     }
 
@@ -255,6 +278,35 @@ public sealed partial class MainWindow : Window
                 AppWindow.Position.X, AppWindow.Position.Y,
                 AppWindow.Size.Width, AppWindow.Size.Height);
         }
+    }
+
+    // ── Tab drag ──────────────────────────────────────────────────────────────
+
+    private void OnTabDragStarting(TabView sender, TabViewTabDragStartingEventArgs e)
+    {
+        if (_nonClientSource is null || TabbedBrowser.XamlRoot is null) return;
+
+        _isDraggingTab = true;
+
+        // Override non-client regions for the duration of the drag: make the
+        // ENTIRE tab strip row Passthrough (HTCLIENT) so that Windows never
+        // consumes mouse-up over the animated gap between tabs as a window-drag
+        // end.  Passthrough rects take priority over Caption rects.
+        var scale       = (float)TabbedBrowser.XamlRoot.RasterizationScale;
+        var stripHeight = GetTabStripHeightPx(scale);
+        var windowWidth = AppWindow.Size.Width;
+        _nonClientSource.SetRegionRects(
+            NonClientRegionKind.Passthrough,
+            [new RectInt32(0, 0, windowWidth, stripHeight)]);
+
+        // OperationCompleted fires when the OLE drag session ends, whether the
+        // drop succeeded, was cancelled, or was dropped outside the TabView.
+        e.Data.OperationCompleted += (_, _) =>
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                _isDraggingTab = false;
+                UpdateNonClientRegions();
+            });
     }
 
     // ── Non-client region management ──────────────────────────────────────────
@@ -276,6 +328,10 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void UpdateNonClientRegions()
     {
+        // Skip region updates while a tab drag is in progress; the drag handler
+        // has already set the full strip as Passthrough and will restore once done.
+        if (_isDraggingTab) return;
+
         if (_nonClientSource is null || TabbedBrowser.XamlRoot is null || AppWindow is null) return;
 
         var scale       = (float)TabbedBrowser.XamlRoot.RasterizationScale;

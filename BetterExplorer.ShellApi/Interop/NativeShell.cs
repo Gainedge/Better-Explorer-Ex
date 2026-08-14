@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -26,7 +26,7 @@ namespace BetterExplorer.ShellApi.Interop;
 /// calls the high-level public helpers.
 /// </summary>
 public static class NativeShell {
-  // ── Known-folder GUIDs ────────────────────────────────────────────────────
+  // -- Known-folder GUIDs ----------------------------------------------------
 
   public static readonly Guid FOLDERID_QuickAccess = new("679f85cb-0220-4080-b29b-5540cc05aab6");
   public static readonly Guid FOLDERID_ComputerFolder = new("20D04FE0-3AEA-1069-A2D8-08002B30309D");
@@ -38,10 +38,10 @@ public static class NativeShell {
 
   // CLSID of the Network Places shell namespace object.  This is the parsing-name GUID
   // that SHCreateItemFromParsingName / SIGDN_DESKTOPABSOLUTEPARSING returns for the
-  // Network folder — different from FOLDERID_NetworkFolder but represents the same view.
+  // Network folder � different from FOLDERID_NetworkFolder but represents the same view.
   public static readonly Guid CLSID_NetworkPlaces = new("F02C1A0D-BE21-4350-88B0-7367FC96EF3C");
 
-  // Shell namespace for UPnP/WSD network devices (Media devices, Printers, Infrastructure, …).
+  // Shell namespace for UPnP/WSD network devices (Media devices, Printers, Infrastructure, �).
   // This is the virtual folder Windows Explorer merges with FOLDERID_NetworkFolder to produce
   // the full "Network" tree including all device categories.
   private static readonly Guid CLSID_NetworkDevicesFolder =
@@ -50,16 +50,16 @@ public static class NativeShell {
   private static readonly Guid FOLDERID_Links =
       new("bfb9d5e0-c6a9-404c-b2b2-ae6db6af4968");
 
-  // ── Global shell-call concurrency cap ────────────────────────────────────
+  // -- Global shell-call concurrency cap ------------------------------------
   // Every blocking COM call into IShellItemImageFactory.GetImage() and
-  // SHGetFileInfo() can take 100ms–1000ms (e.g. ResizeToFit on slow drives).
-  // Without a cap, N rapid navigations leave N×8 thread-pool threads blocked
+  // SHGetFileInfo() can take 100ms�1000ms (e.g. ResizeToFit on slow drives).
+  // Without a cap, N rapid navigations leave N�8 thread-pool threads blocked
   // in COM, starving the pool and causing the progressive-slowdown pattern.
   // 8 slots matches ThumbConcurrency; stale workers wait here instead of
   // monopolising thread-pool threads.
   private static readonly SemaphoreSlim _shellCallSem = new(8, 8);
 
-  // ── SIIGBF flags ──────────────────────────────────────────────────────────
+  // -- SIIGBF flags ----------------------------------------------------------
 
   [Flags]
   public enum SIIGBF : int {
@@ -70,7 +70,7 @@ public static class NativeShell {
     CacheOnly_Thumb = InCacheOnly | ThumbnailOnly,
   }
 
-  // ── COM interfaces ────────────────────────────────────────────────────────
+  // -- COM interfaces --------------------------------------------------------
 
   [ComImport, Guid("BCC18B79-BA16-442F-80C4-8A59C30C463B"),
    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -209,7 +209,7 @@ public static class NativeShell {
     void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string ppszFileName);
   }
 
-  // ── IFileOperation (shell copy/move/delete with Explorer UI) ─────────────
+  // -- IFileOperation (shell copy/move/delete with Explorer UI) -------------
 
   /// <summary>
   /// The shell item interface used as source/dest for IFileOperation.
@@ -357,7 +357,7 @@ public static class NativeShell {
     [PreserveSig] int GetAnyOperationsAborted(out bool pfAnyOperationsAborted);
   }
 
-  // ── IImageList (system image list — used to extract overlay icons) ─────────
+  // -- IImageList (system image list � used to extract overlay icons) ---------
 
   [ComImport, Guid("46EB5926-582E-4017-9FDF-E8998DAA0950"),
    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -393,7 +393,7 @@ public static class NativeShell {
     [PreserveSig] int GetOverlayImage(int iOverlay, out int piIndex);
   }
 
-  // ── Structs ───────────────────────────────────────────────────────────────
+  // -- Structs ---------------------------------------------------------------
 
   [StructLayout(LayoutKind.Sequential)]
   private struct SIZE { public int cx, cy; }
@@ -445,7 +445,7 @@ public static class NativeShell {
     [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)] public string szTypeName;
   }
 
-  // ── IID / CLSID constants ─────────────────────────────────────────────────
+  // -- IID / CLSID constants -------------------------------------------------
 
   private static readonly Guid IID_IShellItemImageFactory = new("BCC18B79-BA16-442F-80C4-8A59C30C463B");
   private static readonly Guid IID_IShellFolder = new("000214E6-0000-0000-C000-000000000046");
@@ -481,7 +481,7 @@ public static class NativeShell {
   private const uint FOF_NO_UI            = 0x0614;  // FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR
   private const uint FOFX_ADDUNDORECORD   = 0x20000000;  // add to Explorer undo stack
 
-  // ── IShellFolder constants ────────────────────────────────────────────────
+  // -- IShellFolder constants ------------------------------------------------
 
   private const uint SHCONTF_FOLDERS        = 0x0020;
   private const uint SHCONTF_NONFOLDERS     = 0x0040;
@@ -491,10 +491,11 @@ public static class NativeShell {
   private const uint SHCONTF_ENABLE_ASYNC   = 0x8000;  // return partial list now; more via SHCNE_UPDATEDIR
   private const uint SFGAO_FILESYSTEM = 0x40000000;
   private const uint SFGAO_FOLDER = 0x20000000;
+  private const uint SFGAO_LINK = 0x00010000;
   private const uint SHGDN_FORPARSING = 0x8000;
   private const int  CSIDL_NETWORK = 0x0012;
 
-  // ── SHGetFileInfo constants ───────────────────────────────────────────────
+  // -- SHGetFileInfo constants -----------------------------------------------
 
   private const uint SHGFI_ICON           = 0x100;
   private const uint SHGFI_LARGEICON      = 0x0;
@@ -507,21 +508,21 @@ public static class NativeShell {
   private const uint DI_NORMAL = 0x3;
 
   // System image list size identifiers for SHGetImageList.
-  private const int SHIL_LARGE = 0;   // 32×32
-  private const int SHIL_SMALL = 1;   // 16×16
+  private const int SHIL_LARGE = 0;   // 32�32
+  private const int SHIL_SMALL = 1;   // 16�16
 
-  // IID for IImageList — used by SHGetImageList.
+  // IID for IImageList � used by SHGetImageList.
   private static readonly Guid IID_IImageList = new("46EB5926-582E-4017-9FDF-E8998DAA0950");
 
 
-  // Per-overlay-slot pixel cache (overlay slot 1-15 → premultiplied BGRA bytes + dimensions).
+  // Per-overlay-slot pixel cache (overlay slot 1-15 ? premultiplied BGRA bytes + dimensions).
   // A null Pixels value means "slot exists but icon could not be rendered".
   private static readonly Dictionary<int, (byte[]? Pixels, int W, int H)> _overlayPixelCache = new();
   private static readonly object _overlayPixelCacheLock = new();
   // Tracks which slots are currently being fetched; other callers wait in the lock.
   private static readonly HashSet<int> _overlayPixelInFlight = new();
 
-  // ── FindFirstFileEx constants ─────────────────────────────────────────────
+  // -- FindFirstFileEx constants ---------------------------------------------
 
   private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
   private const uint FILE_ATTRIBUTE_HIDDEN = 0x02;
@@ -535,10 +536,74 @@ public static class NativeShell {
   private const uint LARGE_FETCH = 2;
   private static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
 
-  // ── Shell property keys (PKEY) ────────────────────────────────────────────
+  // -- Archive / shortcut detection ------------------------------------------
+  // Extensions for compressed archives that Windows Explorer treats as folders.
+  private static readonly HashSet<string> s_archiveExts =
+      new(StringComparer.OrdinalIgnoreCase)
+      { ".zip", ".cab", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tar.gz", ".lzma", ".lz4", ".zst" };
+
+  /// <summary>True when <paramref name="path"/> has a known archive extension.</summary>
+  public static bool IsArchivePath(string path) =>
+      !string.IsNullOrEmpty(path) && s_archiveExts.Contains(Path.GetExtension(path));
+
+  /// <summary>True when <paramref name="path"/> has a <c>.lnk</c> extension (shell shortcut).</summary>
+  public static bool IsShortcutPath(string path) =>
+      !string.IsNullOrEmpty(path) &&
+      Path.GetExtension(path).Equals(".lnk", StringComparison.OrdinalIgnoreCase);
+
+  // Extensions whose thumbnail should be shown as a large preview in the item tooltip.
+  private static readonly HashSet<string> s_pictureExts =
+      new(StringComparer.OrdinalIgnoreCase)
+      { ".jpg",".jpeg",".png",".bmp",".gif",".tiff",".tif",".webp",".heic",".heif",".ico",".jfif",
+        ".raw",".cr2",".nef",".arw",".dng" };
+
+  /// <summary>True when <paramref name="path"/> is a recognized picture file.</summary>
+  public static bool IsPicturePath(string path) =>
+      !string.IsNullOrEmpty(path) && s_pictureExts.Contains(Path.GetExtension(path));
+
+  /// <summary>
+  /// Returns the shell infotip text for a file — the same multi-line tooltip
+  /// that Windows Explorer shows when hovering an item (includes properties
+  /// like Company, File version, Date created, etc.).  Returns <see langword="null"/>
+  /// when the shell has no infotip or the path cannot be resolved.
+  /// </summary>
+  public static string? GetInfoTip(string fullPath) {
+    IntPtr pidl = IntPtr.Zero;
+    IShellFolderCM? parent = null;
+    try {
+      pidl = ILCreateFromPathW(fullPath);
+      if (pidl == IntPtr.Zero) return null;
+
+      int hr = SHBindToParent(pidl, IID_IShellFolder, out object folderObj, out IntPtr childPidl);
+      if (hr != 0 || folderObj is not IShellFolderCM folder) return null;
+      parent = folder;
+
+      try {
+        var children = new[] { childPidl };
+        hr = folder.GetUIObjectOf(IntPtr.Zero, 1, children,
+            IID_IQueryInfo, IntPtr.Zero, out object qiObj);
+        if (hr != 0 || qiObj is not IQueryInfoCM qi) return null;
+
+        try {
+          hr = qi.GetInfoTip(0x0001 | QITIPF_USESLOWTIPS, out IntPtr pwszTip);
+          if (hr != 0 || pwszTip == IntPtr.Zero) return null;
+          try {
+            return Marshal.PtrToStringUni(pwszTip);
+          } finally { Marshal.FreeCoTaskMem(pwszTip); }
+        } finally { Marshal.ReleaseComObject(qi); }
+      } finally { Marshal.ReleaseComObject(parent); }
+    } catch { return null; }
+    finally {
+      if (pidl != IntPtr.Zero) ILFree(pidl);
+      // parent is released in the inner finally — but if we never got to it
+      // (e.g. pidl was zero or the BindToParent call threw), it's null.
+    }
+  }
+
+  // -- Shell property keys (PKEY) --------------------------------------------
   // PKEY_Size         = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 12
   // PKEY_DateModified = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 14
-  // PKEY_ItemTypeText = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 4  ("File folder", "PNG File", …)
+  // PKEY_ItemTypeText = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 4  ("File folder", "PNG File", �)
   // PKEY_FileAttributes = {B725F130-47EF-101A-A5F1-02608C9EEBAC}, pid 13
   // IShellItem2 methods take BExplorer.Shell.Interop.PROPERTYKEY (int pid).
   private static readonly Guid _pkeyStorageFmtId = new("B725F130-47EF-101A-A5F1-02608C9EEBAC");
@@ -548,7 +613,7 @@ public static class NativeShell {
   private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_DateModified => new() { fmtid = _pkeyStorageFmtId, pid = 14 };
   private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_ItemTypeText => new() { fmtid = _pkeyStorageFmtId, pid =  4 };
   private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_FileAttribs  => new() { fmtid = _pkeyStorageFmtId, pid = 13 };
-  // System.Network.DeviceType — {A3B29791-7713-4E1D-BB40-17DB85F01831} pid 100
+  // System.Network.DeviceType � {A3B29791-7713-4E1D-BB40-17DB85F01831} pid 100
   // Explorer uses this uint property to group items in the Network folder:
   //   1 = Computer  2 = Printer  3 = Media device  4 = Infrastructure  5 = Storage
   private static readonly Guid _pkeyNetworkFmtId = new("A3B29791-7713-4E1D-BB40-17DB85F01831");
@@ -567,8 +632,8 @@ public static class NativeShell {
   // Maps the shell type-name string returned by SHGetFileInfo(SHGFI_TYPENAME) or
   // PKEY_Device_CategoryGroup to the Explorer-style group header labels.
   // Strings must stay in sync with:
-  //   ShellTreeView.xaml.cs  — NetworkCategoryOrder()
-  //   ShellListView.xaml.cs  — _networkTypeGroupOrder
+  //   ShellTreeView.xaml.cs  � NetworkCategoryOrder()
+  //   ShellListView.xaml.cs  � _networkTypeGroupOrder
   public static string NormalizeNetworkCategory(string raw) {
     if (string.IsNullOrWhiteSpace(raw)) return "Other devices";
     var s = raw.Trim();
@@ -579,7 +644,7 @@ public static class NativeShell {
       return s;
 
     // SHGetFileInfo(SHGFI_TYPENAME) returns these exact strings from the shell namespace.
-    // "Computer" → individual machine node  →  Computers
+    // "Computer" ? individual machine node  ?  Computers
     if (s.Equals("Computer", StringComparison.OrdinalIgnoreCase))
       return "Computers";
 
@@ -627,7 +692,7 @@ public static class NativeShell {
       IShellFolder parentFolder, IntPtr childPidl,
       string parsePath, bool isFolder) {
 
-    // Step 1 — property store via parsing name.
+    // Step 1 � property store via parsing name.
     try {
       if (SHGetPropertyStoreFromParsingName("shell:" + parsePath, IntPtr.Zero, GPS_DEFAULT,
               typeof(IPropertyStore).GUID, out var store) == 0 && store != null) {
@@ -640,7 +705,7 @@ public static class NativeShell {
       }
     } catch { }
 
-    // Step 2 — IShellItem2 via SHCreateItemWithParent + GPS_BESTEFFORT.
+    // Step 2 � IShellItem2 via SHCreateItemWithParent + GPS_BESTEFFORT.
     // This succeeds for WSD/PnpX devices whose slow property handler has
     // the device type but is not returned by GPS_DEFAULT above.
     try {
@@ -668,13 +733,13 @@ public static class NativeShell {
       }
     } catch { }
 
-    // Step 3 — UPnP device-type encoded in the parsing path.
+    // Step 3 � UPnP device-type encoded in the parsing path.
     // SSDP virtual items have a segment like "uuid:upnp-<DeviceType>-<uuid>".
     // The UPnP device type strings are defined by the UPnP Forum device schema.
     var upnpCategory = GetCategoryFromUpnpPath(parsePath);
     if (upnpCategory != null) return upnpCategory;
 
-    // Step 4 — structural fallback for classic WNet nodes.
+    // Step 4 � structural fallback for classic WNet nodes.
     if (isFolder)
       return parsePath.StartsWith(@"\\", StringComparison.Ordinal) ? "Computers" : "Network";
     return "Printers";
@@ -696,7 +761,7 @@ public static class NativeShell {
       if (parsePath.IndexOf("Microsoft.Networking.WSD", StringComparison.OrdinalIgnoreCase) >= 0)
         return "Printers";
       // Any other SSDP path without a recognised uuid:upnp- device type is an
-      // unknown device — avoid the WNet structural fallback (which would wrongly
+      // unknown device � avoid the WNet structural fallback (which would wrongly
       // classify it as a computer or printer).
       if (parsePath.IndexOf("Microsoft.Networking.SSDP", StringComparison.OrdinalIgnoreCase) >= 0)
         return "Other devices";
@@ -735,7 +800,7 @@ public static class NativeShell {
     };
   }
 
-  // ── P/Invoke declarations ─────────────────────────────────────────────────
+  // -- P/Invoke declarations -------------------------------------------------
 
   [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
   private static extern int SHGetPropertyStoreFromParsingName(
@@ -743,7 +808,7 @@ public static class NativeShell {
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
       [MarshalAs(UnmanagedType.Interface)] out IPropertyStore ppv);
 
-  // GPS_DEFAULT — read-only, all properties, no slow/offline items.
+  // GPS_DEFAULT � read-only, all properties, no slow/offline items.
   private const int GPS_DEFAULT = 0;
 
   [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
@@ -777,7 +842,7 @@ public static class NativeShell {
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
       [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
 
-  // Returns a private IShellItem — used for shell-namespace parent resolution.
+  // Returns a private IShellItem � used for shell-namespace parent resolution.
   [DllImport("shell32.dll", EntryPoint = "SHCreateItemFromParsingName",
              CharSet = CharSet.Unicode, PreserveSig = false)]
   private static extern void SHCreateItemFromParsingNameShell(
@@ -785,7 +850,7 @@ public static class NativeShell {
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
       [MarshalAs(UnmanagedType.Interface)] out IShellItem ppv);
 
-  // Returns IShellItem2 — used for property-store queries (size, dates, type text).
+  // Returns IShellItem2 � used for property-store queries (size, dates, type text).
   [DllImport("shell32.dll", EntryPoint = "SHCreateItemFromParsingName",
              CharSet = CharSet.Unicode, PreserveSig = false)]
   private static extern void SHCreateItemFromParsingNameItem2(
@@ -793,7 +858,7 @@ public static class NativeShell {
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
       [MarshalAs(UnmanagedType.Interface)] out IShellItem2 ppv);
 
-  // Creates an IShellItem2 from a parent IShellFolder + child PIDL — used in network enumeration.
+  // Creates an IShellItem2 from a parent IShellFolder + child PIDL � used in network enumeration.
   [DllImport("shell32.dll", PreserveSig = false)]
   private static extern void SHCreateItemWithParent(
       IntPtr pidlParent,
@@ -817,7 +882,7 @@ public static class NativeShell {
   private static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes,
       ref SHFILEINFO psfi, uint cbSizeFileInfo, uint uFlags);
 
-  // PIDL overload — pszPath is treated as an ITEMIDLIST* when SHGFI_PIDL is set.
+  // PIDL overload � pszPath is treated as an ITEMIDLIST* when SHGFI_PIDL is set.
   [DllImport("shell32.dll", CharSet = CharSet.Auto)]
   private static extern IntPtr SHGetFileInfo(IntPtr pidl, uint dwFileAttributes,
       ref SHFILEINFO psfi, uint cbSizeFileInfo, uint uFlags);
@@ -830,7 +895,7 @@ public static class NativeShell {
   [DllImport("ole32.dll")]
   private static extern void CoTaskMemFree(IntPtr pv);
 
-  // WNetAddConnection2 / WNetCancelConnection2 — declared here, struct/constants below near WNetOpenEnum.
+  // WNetAddConnection2 / WNetCancelConnection2 � declared here, struct/constants below near WNetOpenEnum.
 
   [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
   private static extern int StrRetToBufW(ref STRRET pstr, IntPtr pidl, [Out] char[] pszBuf, uint cchBuf);
@@ -852,7 +917,7 @@ public static class NativeShell {
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
       [MarshalAs(UnmanagedType.Interface)] out object ppv);
 
-  // uxtheme ordinals — used to push dark-mode into the shell dialogs that
+  // uxtheme ordinals � used to push dark-mode into the shell dialogs that
   // IFileOperation shows, which otherwise appear light in a WinUI 3 process.
   // SetPreferredAppMode = ordinal 135 (Win10 1903+)
   // FlushMenuThemes     = ordinal 136
@@ -862,7 +927,7 @@ public static class NativeShell {
   [DllImport("uxtheme.dll", EntryPoint = "#136", SetLastError = false)]
   private static extern void FlushMenuThemes();
 
-  // ── Win32 clipboard (CF_HDROP fallback for Explorer-copied files) ──────────
+  // -- Win32 clipboard (CF_HDROP fallback for Explorer-copied files) ----------
 
   [DllImport("user32.dll")] private static extern bool OpenClipboard(IntPtr hWndNewOwner);
   [DllImport("user32.dll")] private static extern bool CloseClipboard();
@@ -969,7 +1034,7 @@ public static class NativeShell {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
   private static extern uint GetFileAttributesW(string lpFileName);
 
-  // ── Context-menu P/Invoke ─────────────────────────────────────────────────
+  // -- Context-menu P/Invoke -------------------------------------------------
 
   [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
   internal static extern IntPtr ILCreateFromPathW([MarshalAs(UnmanagedType.LPWStr)] string pszPath);
@@ -1023,7 +1088,7 @@ public static class NativeShell {
       [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
       [MarshalAs(UnmanagedType.Interface)] out object ppv);
 
-  // ── Public IShellFolder (for context-menu use) ────────────────────────────
+  // -- Public IShellFolder (for context-menu use) ----------------------------
 
   [ComImport, Guid("000214E6-0000-0000-C000-000000000046"),
    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -1056,6 +1121,28 @@ public static class NativeShell {
     [PreserveSig] int SetNameOf(IntPtr hwnd, IntPtr pidl,
         [MarshalAs(UnmanagedType.LPWStr)] string pszName,
         uint uFlags, out IntPtr ppidlOut);
+  }
+
+  // IQueryInfo — retrieves the shell infotip (the multi-line tooltip text
+  // Windows Explorer shows in its details pane and tooltip).
+  // IID: {00021500-0000-0000-C000-000000000046}
+  private static readonly Guid IID_IQueryInfo =
+      new("00021500-0000-0000-C000-000000000046");
+
+  // QITIPF flags for GetInfoTip:
+  //   DEFAULT     = 0x0000 — use the default flags for the item
+  //   USENAME     = 0x0001 — return the item's display name (ignored if not set)
+  //   LINKNOTARGET = 0x0002 — don't resolve the link target
+  //   LINKUSETARGET = 0x0004 — return info about the link target
+  //   USESLOWTIPS = 0x0008 — allow slow property retrieval (network etc.)
+  //   SINGLELINE  = 0x0010 — single-line tip only
+  private const uint QITIPF_USESLOWTIPS = 0x0008;
+
+  [ComImport, Guid("00021500-0000-0000-C000-000000000046"),
+   InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  private interface IQueryInfoCM {
+    [PreserveSig] int GetInfoTip(uint dwFlags, out IntPtr ppwszTip);
+    [PreserveSig] int GetInfoFlags(out uint pdwFlags);
   }
 
   [DllImport("user32.dll")]
@@ -1104,7 +1191,7 @@ public static class NativeShell {
   internal static extern bool GetMenuItemInfoW(IntPtr hMenu, uint item, bool fByPosition,
       ref MENUITEMINFOW lpmii);
 
-  // ── IShellItemArray (context-menu variant) ────────────────────────────────
+  // -- IShellItemArray (context-menu variant) --------------------------------
 
   [ComImport, Guid("B63EA76D-1F85-456F-A19C-48159EFA858B"),
    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -1129,14 +1216,14 @@ public static class NativeShell {
 
 
   
-  // PROPERTYKEY: fmtid (GUID) + pid (DWORD) — must be sequential/no padding
+  // PROPERTYKEY: fmtid (GUID) + pid (DWORD) � must be sequential/no padding
   [StructLayout(LayoutKind.Sequential)]
   private struct PROPERTYKEY {
     public Guid fmtid;
     public uint pid;
   }
 
-  // ── IContextMenu ──────────────────────────────────────────────────────────
+  // -- IContextMenu ----------------------------------------------------------
 
   [ComImport, Guid("000214E4-0000-0000-C000-000000000046"),
    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -1150,7 +1237,7 @@ public static class NativeShell {
         IntPtr pszName, uint cchMax);
   }
 
-  // ── IContextMenu2 (adds HandleMenuMsg) ───────────────────────────────────
+  // -- IContextMenu2 (adds HandleMenuMsg) -----------------------------------
 
   /// <summary>
   /// COM interface for IContextMenu2. The vtable must list IContextMenu methods first
@@ -1159,7 +1246,7 @@ public static class NativeShell {
   [ComImport, Guid("000214F4-0000-0000-C000-000000000046"),
    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
   public interface IContextMenu2CM {
-    // ── IContextMenu ──────────────────────────────────────────────────────
+    // -- IContextMenu ------------------------------------------------------
     [PreserveSig]
     int QueryContextMenu(IntPtr hmenu, uint indexMenu, uint idCmdFirst, uint idCmdLast, uint uFlags);
     [PreserveSig]
@@ -1167,17 +1254,17 @@ public static class NativeShell {
     [PreserveSig]
     int GetCommandString(UIntPtr idCmd, uint uType, IntPtr pReserved,
         IntPtr pszName, uint cchMax);
-    // ── IContextMenu2 ─────────────────────────────────────────────────────
+    // -- IContextMenu2 -----------------------------------------------------
     [PreserveSig]
     int HandleMenuMsg(uint uMsg, IntPtr wParam, IntPtr lParam);
   }
 
-  // ── IContextMenu3 (adds HandleMenuMsg2) ──────────────────────────────────
+  // -- IContextMenu3 (adds HandleMenuMsg2) ----------------------------------
 
   [ComImport, Guid("BCFCE0A0-EC17-11D0-8D10-00A0C90F2719"),
    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
   public interface IContextMenu3CM {
-    // ── IContextMenu ──────────────────────────────────────────────────────
+    // -- IContextMenu ------------------------------------------------------
     [PreserveSig]
     int QueryContextMenu(IntPtr hmenu, uint indexMenu, uint idCmdFirst, uint idCmdLast, uint uFlags);
     [PreserveSig]
@@ -1185,15 +1272,15 @@ public static class NativeShell {
     [PreserveSig]
     int GetCommandString(UIntPtr idCmd, uint uType, IntPtr pReserved,
         IntPtr pszName, uint cchMax);
-    // ── IContextMenu2 ─────────────────────────────────────────────────────
+    // -- IContextMenu2 -----------------------------------------------------
     [PreserveSig]
     int HandleMenuMsg(uint uMsg, IntPtr wParam, IntPtr lParam);
-    // ── IContextMenu3 ─────────────────────────────────────────────────────
+    // -- IContextMenu3 -----------------------------------------------------
     [PreserveSig]
     int HandleMenuMsg2(uint uMsg, IntPtr wParam, IntPtr lParam, out IntPtr plResult);
   }
 
-  // ── GetCommandString type codes (GCS_*) ───────────────────────────────────
+  // -- GetCommandString type codes (GCS_*) -----------------------------------
 
   public const uint GCS_VERBA     = 0x00000000;  // ANSI verb string
   public const uint GCS_HELPTEXTA = 0x00000001;  // ANSI help text
@@ -1203,7 +1290,7 @@ public static class NativeShell {
   public const uint GCS_VALIDATEW = 0x00000006;  // validate Unicode verb
   public const uint GCS_UNICODE   = 0x00000004;  // Unicode flag bit
 
-  // ── MENUITEMINFOW (Unicode) ───────────────────────────────────────────────
+  // -- MENUITEMINFOW (Unicode) -----------------------------------------------
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   public struct MENUITEMINFOW {
@@ -1240,7 +1327,7 @@ public static class NativeShell {
     public const uint MFS_GRAYED    = 0x00000003;
   }
 
-  // ── CMINVOKECOMMANDINFOEX ─────────────────────────────────────────────────
+  // -- CMINVOKECOMMANDINFOEX -------------------------------------------------
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
   public struct CMINVOKECOMMANDINFOEX {
@@ -1269,7 +1356,7 @@ public static class NativeShell {
   [StructLayout(LayoutKind.Sequential)]
   public struct POINT { public int X; public int Y; }
 
-  // ── Cloud/offline detection ───────────────────────────────────────────────
+  // -- Cloud/offline detection -----------------------------------------------
 
   /// <summary>
   /// Returns <see langword="true"/> when the file is a cloud placeholder that has not
@@ -1285,13 +1372,92 @@ public static class NativeShell {
         return false; // INVALID_FILE_ATTRIBUTES
                       // RECALL_ON_DATA_ACCESS: cloud-only (dehydrated).
                       // RECALL_ON_OPEN: also fetched remotely on access.
-                      // Exclude PINNED — pinned items are locally available.
+                      // Exclude PINNED � pinned items are locally available.
       const uint cloudBits = FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN;
       return (attrs & cloudBits) != 0 && (attrs & FILE_ATTRIBUTE_PINNED) == 0;
     } catch { return false; }
   }
 
-  // ── Windows.Storage thumbnail pipeline (for cloud items) ─────────────────
+  /// <summary>
+  /// Returns <see langword="true"/> when the item lives in a cloud-synced directory
+  /// (OneDrive, SharePoint, etc.) -- including items that are pinned/locally available.
+  /// Unlike <see cref="IsCloudOnlyItem"/>, this does NOT exclude pinned items because
+  /// even pinned OneDrive folders may have stale shell thumbnail-cache entries; routing
+  /// them through the Storage API pipeline produces more reliable thumbnails.
+  /// Uses a two-tier detection: file attributes for dehydrated items, path-based
+  /// matching for pinned/locally-available items in known OneDrive directories.
+  /// </summary>
+  public static bool IsCloudItem(string path) {
+    // ?? Tier 1: file-attribute check (fast, works for dehydrated placeholders) ??
+    try {
+      uint attrs = GetFileAttributesW(path);
+      if (attrs != 0xFFFFFFFF) {
+        const uint cloudBits = FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN;
+        if ((attrs & cloudBits) != 0)
+          return true;
+      }
+    } catch { }
+
+    // ?? Tier 2: path-based check (catches pinned/available OneDrive items) ?????
+    // Pinned OneDrive items lose the RECALL attributes, so we detect them by
+    // checking whether the path falls under a known cloud-synced root directory.
+    foreach (var root in GetCloudRootPaths()) {
+      if (path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        return true;
+    }
+
+    return false;
+  }
+
+  // PKEY_StorageProviderSyncStatus — present (any value) on every item that
+  // lives under a registered cloud storage provider root, regardless of
+  // hydration state. Same GUID/pid the upstream BetterExplorer project reads
+  // via IShellItem2 to flag cloud items provider-agnostically (catches
+  // Dropbox/Google Drive/Box/etc., and pinned items outside a recognised
+  // OneDrive root that the attribute/path tiers above miss).
+  //
+  // Deliberately NOT folded into IsCloudItem: that method is called per-item
+  // in hot list-thumbnail loops, and this extra COM round-trip (plus an
+  // exception on every miss) is only worth paying where accuracy matters more
+  // than throughput — i.e. once per tooltip hover, not once per file in a
+  // folder listing.
+  private static readonly Guid _pkeyStorageProviderFmtId = new("E77E90DF-6271-4F5B-834F-2DD1F245DDA4");
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_StorageProviderSyncStatus =>
+      new() { fmtid = _pkeyStorageProviderFmtId, pid = 3 };
+
+  public static bool HasStorageProviderSyncStatus(string path) {
+    try {
+      SHCreateItemFromParsingNameItem2(path, IntPtr.Zero, IID_IShellItem2, out var si2);
+      if (si2 is null) return false;
+      try {
+        var pk = PKEY_StorageProviderSyncStatus;
+        si2.GetUInt32(ref pk, out _); // throws unless the property exists on this item.
+        return true;
+      } catch { return false; }
+      finally { Marshal.ReleaseComObject(si2); }
+    } catch { return false; }
+  }
+
+  /// <summary>
+  /// Lazily-resolved list of local cloud-synced root directories (OneDrive personal,
+  /// OneDrive for Business, etc.) read from well-known environment variables.
+  /// </summary>
+  private static string[]? _cloudRootPaths;
+  private static string[] GetCloudRootPaths() {
+    if (_cloudRootPaths is not null) return _cloudRootPaths;
+    var paths = new List<string>(4);
+    // OneDrive sets different env vars for personal vs. business accounts.
+    // Try each and keep only those that point to an existing directory.
+    foreach (var envVar in new[] { "OneDriveConsumer", "OneDriveBusiness", "OneDrive" }) {
+      var value = Environment.GetEnvironmentVariable(envVar);
+      if (!string.IsNullOrEmpty(value) && Directory.Exists(value))
+        paths.Add(value);
+    }
+    _cloudRootPaths = paths.Count > 0 ? paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() : [];
+    return _cloudRootPaths;
+  }
+
+  // -- Windows.Storage thumbnail pipeline (for cloud items) -----------------
 
   // Maps file extensions to the best ThumbnailMode for content-based thumbnails.
   private static ThumbnailMode ThumbnailModeForExt(string ext) => ext.ToLowerInvariant() switch {
@@ -1313,27 +1479,38 @@ public static class NativeShell {
   /// into a <see cref="WriteableBitmap"/>.
   /// </summary>
   public static async Task<(byte[]? Pixels, int W, int H)> GetStorageThumbnailPixelsAsync(
-      string path, uint size, CancellationToken ct) {
+      string path, uint size, CancellationToken ct, ThumbnailMode? modeOverride = null,
+      ThumbnailOptions options = ThumbnailOptions.UseCurrentScale) {
     try {
       ct.ThrowIfCancellationRequested();
 
       var reqSize = (uint)Math.Max(size, 16);
       bool isFolder = (GetFileAttributesW(path) & FILE_ATTRIBUTE_DIRECTORY) != 0;
-      var mode = isFolder
+      var mode = modeOverride ?? (isFolder
           ? ThumbnailMode.SingleItem
-          : ThumbnailModeForExt(Path.GetExtension(path));
+          : ThumbnailModeForExt(Path.GetExtension(path)));
 
+      // Default stays UseCurrentScale, matching the list-view thumbnail
+      // loader's original (working) behavior. ResizeThumbnail is what
+      // actually tells the shell/cloud provider to generate or fetch a
+      // thumbnail at the requested size instead of handing back whatever's
+      // cheaply available — without it, providers are more likely to bail
+      // out to ThumbnailType.Icon — but that behavior is opted into
+      // explicitly only by the tooltip's large-preview fetch, which is the
+      // one call site that was actually confirmed broken with the default.
+      // Applying it as the function's own default affected every caller,
+      // including the list-view loader that didn't need the change.
       StorageItemThumbnail? thumbnail;
       if (isFolder) {
         var folder = await StorageFolder.GetFolderFromPathAsync(path)
             .AsTask(ct).ConfigureAwait(false);
         thumbnail = await folder.GetThumbnailAsync(mode, reqSize,
-            ThumbnailOptions.UseCurrentScale).AsTask(ct).ConfigureAwait(false);
+            options).AsTask(ct).ConfigureAwait(false);
       } else {
         var file = await StorageFile.GetFileFromPathAsync(path)
             .AsTask(ct).ConfigureAwait(false);
         thumbnail = await file.GetThumbnailAsync(mode, reqSize,
-            ThumbnailOptions.UseCurrentScale).AsTask(ct).ConfigureAwait(false);
+            options).AsTask(ct).ConfigureAwait(false);
       }
 
       if (thumbnail == null || thumbnail.Size == 0)
@@ -1373,6 +1550,59 @@ public static class NativeShell {
     return PixelsToBitmapSync(pixels, w, h);
   }
 
+  /// <summary>
+  /// Last-resort loader for dehydrated cloud-only placeholders (e.g. OneDrive
+  /// "Files On-Demand" items) whose embedded thumbnail cache is empty, so
+  /// <see cref="GetStorageThumbnailPixelsAsync"/> and the shell fast path both
+  /// come back empty/generic. Opening a read stream on the file forces the
+  /// cloud provider to actually download ("hydrate") the content, then the
+  /// full image is decoded and scaled down to <paramref name="size"/> during
+  /// decode (cheap even for large photos, since the decoder only produces
+  /// pixels at the requested scale). This can take a while for large files
+  /// on a slow connection, so the caller should show a spinner/placeholder
+  /// and apply a generous timeout via <paramref name="ct"/>.
+  /// </summary>
+  public static async Task<(byte[]? Pixels, int W, int H)> ForceLoadImagePixelsViaStorageApiAsync(
+      string path, uint size, CancellationToken ct) {
+    try {
+      ct.ThrowIfCancellationRequested();
+
+      var file = await StorageFile.GetFileFromPathAsync(path).AsTask(ct).ConfigureAwait(false);
+
+      // Opening the stream is what actually triggers hydration for on-demand
+      // cloud files \u2014 GetThumbnailAsync only ever reads the (possibly empty)
+      // cached thumbnail and never downloads the real content.
+      using var stream = await file.OpenReadAsync().AsTask(ct).ConfigureAwait(false);
+      if (stream is null || stream.Size == 0) return (null, 0, 0);
+
+      var decoder = await BitmapDecoder.CreateAsync(stream).AsTask(ct).ConfigureAwait(false);
+
+      // Scale during decode so we never materialise the full-resolution image
+      // in memory just to immediately downsize it for the tooltip preview.
+      uint srcW = decoder.PixelWidth, srcH = decoder.PixelHeight;
+      double scale = srcW > 0 && srcH > 0
+          ? Math.Min(1.0, size / (double)Math.Max(srcW, srcH))
+          : 1.0;
+      uint dstW = Math.Max(1, (uint)Math.Round(srcW * scale));
+      uint dstH = Math.Max(1, (uint)Math.Round(srcH * scale));
+
+      var transform = new BitmapTransform { ScaledWidth = dstW, ScaledHeight = dstH, InterpolationMode = BitmapInterpolationMode.Fant };
+      var softBitmap = await decoder.GetSoftwareBitmapAsync(
+          BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, transform,
+          ExifOrientationMode.RespectExifOrientation, ColorManagementMode.DoNotColorManage).AsTask(ct).ConfigureAwait(false);
+      ct.ThrowIfCancellationRequested();
+
+      int w = softBitmap.PixelWidth, h = softBitmap.PixelHeight;
+      var buf = new byte[w * h * 4];
+      softBitmap.CopyToBuffer(buf.AsBuffer());
+      return (buf, w, h);
+    } catch (OperationCanceledException) {
+      return (null, 0, 0);
+    } catch {
+      return (null, 0, 0);
+    }
+  }
+
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   private static extern IntPtr FindFirstFileEx(
       string lpFileName, int fInfoLevelId, out WIN32_FIND_DATA lpFindFileData,
@@ -1382,7 +1612,7 @@ public static class NativeShell {
   [DllImport("kernel32.dll")]
   private static extern bool FindClose(IntPtr hFindFile);
 
-  // ── Bitmap helpers ────────────────────────────────────────────────────────
+  // -- Bitmap helpers --------------------------------------------------------
 
   /// <summary>
   /// Returns an HBITMAP for a file-system or shell parsing path via IShellItemImageFactory.
@@ -1413,7 +1643,7 @@ public static class NativeShell {
   }
 
   /// <summary>
-  /// Returns an HBITMAP for a known virtual folder via SHGetKnownFolderIDList → SHCreateItemFromIDList.
+  /// Returns an HBITMAP for a known virtual folder via SHGetKnownFolderIDList ? SHCreateItemFromIDList.
   /// Returns IntPtr.Zero on failure. Caller is responsible for DeleteObject.
   /// </summary>
   public static IntPtr TryGetIDListKnownFolderHBitmap(Guid folderId, uint size) {
@@ -1455,7 +1685,7 @@ public static class NativeShell {
       var pixels = new byte[w * h * 4];
       if (GetDIBits(hdc, hbm, 0, (uint)h, pixels, ref bmi, 0) == 0)
         return (null, 0, 0);
-      // Straight BGRA → premultiplied BGRA (required by WriteableBitmap).
+      // Straight BGRA ? premultiplied BGRA (required by WriteableBitmap).
       for (int i = 0; i < pixels.Length; i += 4) {
         byte a = pixels[i + 3];
         if (a == 255)
@@ -1492,7 +1722,7 @@ public static class NativeShell {
   }
 
   /// <summary>
-  /// Full async pipeline: get HBITMAP on thread-pool → copy pixels → create WriteableBitmap on UI thread.
+  /// Full async pipeline: get HBITMAP on thread-pool ? copy pixels ? create WriteableBitmap on UI thread.
   /// </summary>
   public static async Task<WriteableBitmap?> GetShellImageAsync(
       string path, uint size, SIIGBF flags, CancellationToken ct) {
@@ -1511,7 +1741,7 @@ public static class NativeShell {
   public static async Task<(byte[]? Pixels, int W, int H, int Hr)> GetShellImagePixelsAsync(
       string path, uint size, SIIGBF flags, CancellationToken ct) {
     // Acquire the global cap BEFORE entering Task.Run so a cancelled token
-    // skips the wait entirely — stale workers never block a thread-pool thread.
+    // skips the wait entirely � stale workers never block a thread-pool thread.
     try { await _shellCallSem.WaitAsync(ct).ConfigureAwait(false); }
     catch (OperationCanceledException) { return (null, 0, 0, unchecked((int)0x80004004)); }
     try {
@@ -1538,7 +1768,7 @@ public static class NativeShell {
     return (PixelsToBitmapSync(pixels, w, h), hr);
   }
 
-  // ── Shell overlay icons ──────────────────────────────────────────────────
+  // -- Shell overlay icons --------------------------------------------------
 
   /// <summary>
   /// Synchronous equivalent of <see cref="GetShellImagePixelsAsync"/> for use on
@@ -1594,7 +1824,7 @@ public static class NativeShell {
   }
 
   private static (byte[]? Pixels, int W, int H, int Slot) GetOverlayIconPixelsCore(string path) {
-    // ── Step 1: obtain the overlay slot via PIDL (thread-pool MTA is fine here) ──
+    // -- Step 1: obtain the overlay slot via PIDL (thread-pool MTA is fine here) --
     IntPtr pidl = ILCreateFromPathW(path);
     if (pidl == IntPtr.Zero)
       return (null, 0, 0, 0);
@@ -1614,7 +1844,7 @@ public static class NativeShell {
     if (overlaySlot == 0)
       return (null, 0, 0, 0);
 
-    // ── Step 2: fast path — pixel data already cached for this slot ──────────
+    // -- Step 2: fast path � pixel data already cached for this slot ----------
     //  Also waits for any in-flight fetch of the same slot to complete so we
     //  never spin up two STA threads that both call SHGetImageList for the same
     //  system image list (a process-wide COM singleton whose RCW must not be
@@ -1635,11 +1865,11 @@ public static class NativeShell {
       _overlayPixelInFlight.Add(overlaySlot);
     }
 
-    // ── Step 3: fetch icon on a dedicated STA thread ──────────────────────
+    // -- Step 3: fetch icon on a dedicated STA thread ----------------------
     // IImageList is a free-threaded COM object in practice, but SHGetImageList
     // must be called from the same apartment that will use the interface.
-    // Using a short-lived STA thread avoids the “COM object separated from its
-    // underlying RCW” error that occurs when a cached RCW outlives its STA thread.
+    // Using a short-lived STA thread avoids the �COM object separated from its
+    // underlying RCW� error that occurs when a cached RCW outlives its STA thread.
     byte[]? pixels = null;
     int pw = 0, ph = 0;
     Exception? innerEx = null;
@@ -1698,8 +1928,8 @@ public static class NativeShell {
   /// </summary>
   private static (byte[]? pixels, int w, int h) HIconToPixels(IntPtr hIcon, int targetW, int targetH) {
     // When 0,0 is passed, derive the icon's native pixel dimensions so we never
-    // upscale (which destroys quality).  SHIL_JUMBO gives 256×256 natively;
-    // SHIL_EXTRALARGE gives 48×48.  Both are rendered at their true size.
+    // upscale (which destroys quality).  SHIL_JUMBO gives 256�256 natively;
+    // SHIL_EXTRALARGE gives 48�48.  Both are rendered at their true size.
     if ((targetW == 0 || targetH == 0) && GetIconInfo(hIcon, out var iconInfo)) {
       IntPtr hbmForSize = iconInfo.hbmColor != IntPtr.Zero ? iconInfo.hbmColor : iconInfo.hbmMask;
       if (hbmForSize != IntPtr.Zero && GetObject(hbmForSize, Marshal.SizeOf<BITMAP>(), out var bm) != 0) {
@@ -1861,7 +2091,7 @@ public static class NativeShell {
     return results;
   }
 
-  // ── Known-folder path helpers ─────────────────────────────────────────────
+  // -- Known-folder path helpers ---------------------------------------------
 
   public static string? SHGetKnownFolderPath(Guid folderId) {
     int hr = SHGetKnownFolderPathNative(folderId, 0, IntPtr.Zero, out var pPath);
@@ -1875,7 +2105,7 @@ public static class NativeShell {
     return path ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
   }
 
-  // ── Quick Access enumeration ──────────────────────────────────────────────
+  // -- Quick Access enumeration ----------------------------------------------
 
   public static List<(string Name, string Path)> EnumerateQuickAccessFolders() {
     var result = new List<(string, string)>();
@@ -1907,7 +2137,7 @@ public static class NativeShell {
     return result;
   }
 
-  // ── Shell-namespace breadcrumb helpers ────────────────────────────────────
+  // -- Shell-namespace breadcrumb helpers ------------------------------------
 
   private const uint SIGDN_NORMALDISPLAY = 0x00000000;
   private const uint SIGDN_PARENTRELATIVEPARSING = 0x80018001;
@@ -1923,7 +2153,7 @@ public static class NativeShell {
   /// <summary>
   /// Walks the shell namespace from <paramref name="path"/> to the desktop root and
   /// returns the ordered chain of <see cref="BreadcrumbSegment"/> values (root first).
-  /// Virtual folders (This PC, Quick Access, …) are included with their correct
+  /// Virtual folders (This PC, Quick Access, �) are included with their correct
   /// display names and canonical ::{GUID} parsing names.
   /// </summary>
   public static List<BreadcrumbSegment> BuildShellBreadcrumbs(string path) {
@@ -1945,7 +2175,7 @@ public static class NativeShell {
 
         IShellItem? parent = null;
         try { current.GetParent(out parent); } catch {
-          // Virtual roots like "This PC" have no parent — stop here with the single item.
+          // Virtual roots like "This PC" have no parent � stop here with the single item.
           break;
         }
 
@@ -1957,7 +2187,7 @@ public static class NativeShell {
         string parentParsing;
         try { parent.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, out parentParsing); } catch { break; }
 
-        // Desktop root typically has no parent — detect cycle or empty name
+        // Desktop root typically has no parent � detect cycle or empty name
         if (string.IsNullOrEmpty(parentParsing) || parentParsing == parsingName)
           break;
 
@@ -2053,7 +2283,7 @@ public static class NativeShell {
     if (string.IsNullOrEmpty(path))
       return result;
 
-    // Virtual known-folder path — delegate to IShellFolder enumeration.
+    // Virtual known-folder path � delegate to IShellFolder enumeration.
     if (path.StartsWith("::", StringComparison.Ordinal)) {
       try {
         SHCreateItemFromParsingNameShell(path, IntPtr.Zero, IID_IShellItem, out var folderItem);
@@ -2101,7 +2331,57 @@ public static class NativeShell {
     return result;
   }
 
-  // ── Shell-namespace parent resolution ────────────────────────────────────
+  /// <summary>
+  /// Enumerates the Desktop shell folder's direct children � the top-level
+  /// namespace roots (This PC, Network, OneDrive, Libraries, etc.) � in the
+  /// native Windows enumeration order (no sorting).  This mirrors the order
+  /// that Windows Explorer uses in its navigation pane and address-bar
+  /// root dropdown.
+  ///
+  /// Only virtual shell items (parsing names starting with "::") are returned,
+  /// which represent browsable namespace root nodes.  Regular desktop items
+  /// such as files, shortcuts, and user-created folders are excluded.
+  /// </summary>
+  public static List<(string DisplayName, string ParsingName)> GetDesktopNamespaceRoots() {
+    var result = new List<(string, string)>();
+    try {
+      if (SHGetDesktopFolder(out var desktopObj) != 0 || desktopObj == null)
+        return result;
+      var desktop = (IShellFolder)desktopObj;
+      try {
+        if (desktop.EnumObjects(IntPtr.Zero,
+                SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_FASTITEMS,
+                out var enumObj) == 0 && enumObj != null) {
+          try {
+            while (enumObj.Next(1, out var childPidl, out _) == 0) {
+              try {
+                var strretParsing = default(STRRET);
+                desktop.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strretParsing);
+                string? parsingName = StrRetToStr(ref strretParsing, childPidl);
+                if (string.IsNullOrEmpty(parsingName)) continue;
+
+                // Only include virtual shell namespace roots (parsing name starts
+                // with "::").  This excludes regular desktop files, shortcuts, and
+                // user-created folders, showing only the browsable top-level nodes
+                // like This PC, Network, OneDrive, Libraries, etc.
+                if (!parsingName.StartsWith("::", StringComparison.Ordinal)) continue;
+
+                var strretDisplay = default(STRRET);
+                desktop.GetDisplayNameOf(childPidl, 0, out strretDisplay);
+                string? displayName = StrRetToStr(ref strretDisplay, childPidl);
+                if (string.IsNullOrEmpty(displayName)) displayName = parsingName;
+
+                result.Add((displayName, parsingName));
+              } catch { } finally { CoTaskMemFree(childPidl); }
+            }
+          } finally { Marshal.ReleaseComObject(enumObj); }
+        }
+      } finally { Marshal.ReleaseComObject(desktop); }
+    } catch { }
+    return result;
+  }
+
+  // -- Shell-namespace parent resolution ------------------------------------
 
   private const uint SIGDN_FILESYSPATH = 0x80058000;
 
@@ -2128,7 +2408,7 @@ public static class NativeShell {
         if (parent == null)
           return (null, Guid.Empty);
         try {
-          // Always try the filesystem path first — regular folders like C:\Windows or
+          // Always try the filesystem path first � regular folders like C:\Windows or
           // C:\ have a real filesystem path even if they are also registered known folders
           // (e.g. FOLDERID_Windows, FOLDERID_Profile).  Preferring the filesystem path
           // keeps navigation inside LoadDirectory / Navigate rather than the slower
@@ -2139,8 +2419,8 @@ public static class NativeShell {
               return (fsPath, Guid.Empty);
           } catch { }
 
-          // No filesystem path — parent is a purely virtual known folder (Desktop,
-          // This PC, Libraries, Network…).  Resolve via IKnownFolderManager so we
+          // No filesystem path � parent is a purely virtual known folder (Desktop,
+          // This PC, Libraries, Network�).  Resolve via IKnownFolderManager so we
           // get the canonical FOLDERID GUID rather than a raw CLSID.
           try {
             SHGetIDListFromObject(parent, out parentPidl);
@@ -2175,7 +2455,7 @@ public static class NativeShell {
     }
   }
 
-  // ── IShellFolder enumeration (virtual known folder navigation) ────────────
+  // -- IShellFolder enumeration (virtual known folder navigation) ------------
 
   public static List<ShellItem> EnumerateKnownFolderChildren(Guid folderId) {
     var result = new List<ShellItem>();
@@ -2382,10 +2662,11 @@ public static class NativeShell {
                   folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
                   string? displayName = StrRetToStr(ref strretDisplay, childPidl);
 
-                  uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER;
+                  uint attrs = SFGAO_FILESYSTEM | SFGAO_FOLDER | SFGAO_LINK;
                   folder.GetAttributesOf(1, [childPidl], ref attrs);
                   bool isFolder = (attrs & SFGAO_FOLDER) != 0;
                   bool isFs = (attrs & SFGAO_FILESYSTEM) != 0;
+                  bool isLink = (attrs & SFGAO_LINK) != 0;
 
                   if (!isFolder && !isFs && !Directory.Exists(parsePath))
                     continue;
@@ -2394,8 +2675,10 @@ public static class NativeShell {
                     Name = displayName ?? Path.GetFileName(parsePath),
                     FullPath = parsePath,
                     IsFolder = isFolder,
+                    IsShortcut = isLink || IsShortcutPath(parsePath),
+                    IsArchive = IsArchivePath(parsePath),
                   };
-                  // Library children are real filesystem paths — use FindFirstFileEx.
+                  // Library children are real filesystem paths � use FindFirstFileEx.
                   // Only use IShellItem2 for virtual items that have no FS path.
                   if (isFs)
                     EnrichFromFindFirstFile(item, parsePath);
@@ -2420,7 +2703,7 @@ public static class NativeShell {
                 }
 
                 /// <summary>
-                /// Fills metadata on <paramref name="item"/> using <c>FindFirstFileEx</c> — much
+                /// Fills metadata on <paramref name="item"/> using <c>FindFirstFileEx</c> � much
                 /// faster than <c>IShellItem2</c> for real filesystem paths because it avoids
                 /// one COM creation call + four property-store reads per item.
                 /// Falls back silently if the path is not accessible.
@@ -2433,10 +2716,18 @@ public static class NativeShell {
       if (hFind == INVALID_HANDLE_VALUE) return;
       FindClose(hFind);
 
-      if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE) != 0) return;
+      if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE) != 0) {
+        // Reparse point (junction, symlink, mount point) � flag as link item
+        // and bail: FindFirstFileEx metadata is unreliable for these paths.
+        item.IsLinkItem = true;
+        return;
+      }
 
       item.DateModified = DateTime.FromFileTimeUtc(data.ftLastWriteTime).ToLocalTime();
       item.IsHidden     = (data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+      item.IsShortcut   = IsShortcutPath(parsePath);
+      item.IsArchive    = IsArchivePath(parsePath);
+      item.IsPicture    = IsPicturePath(parsePath);
       // Ensure DisplayName mirrors the name already set from IShellFolder.
       if (string.IsNullOrEmpty(item.DisplayName))
         item.DisplayName = item.Name;
@@ -2464,7 +2755,19 @@ public static class NativeShell {
       SHCreateItemFromParsingNameItem2(parsePath, IntPtr.Zero, IID_IShellItem2, out var si2);
       if (si2 is null) return;
 
-      // Display name — only overwrite if the shell gives a richer name than the
+      // Shell attributes � SFGAO_LINK indicates a shortcut or reparse point.
+      try {
+        si2.GetAttributes((SFGAO)(SFGAO_LINK | SFGAO_FILESYSTEM), out var sfgao);
+        if ((sfgao & SFGAO.LINK) != 0)
+          item.IsShortcut = true;
+      } catch { }
+
+      // Extension-based detection for shortcut and archive.
+      item.IsShortcut = item.IsShortcut || IsShortcutPath(parsePath);
+      item.IsArchive  = IsArchivePath(parsePath);
+      item.IsPicture  = IsPicturePath(parsePath);
+
+      // Display name
       // IShellFolder display name we already have (e.g. "Local Disk (C:)" vs "C:").
       try {
         if (si2.GetDisplayName(SIGDN.NORMALDISPLAY, out var shellName) == HResult.S_OK
@@ -2474,7 +2777,7 @@ public static class NativeShell {
         }
       } catch { }
 
-      // Item type text ("File folder", "Local Disk", "System Folder", …)
+      // Item type text ("File folder", "Local Disk", "System Folder", �)
       try {
         var pk = PKEY_ItemTypeText;
         if (si2.GetString(ref pk, out var typeText) == HResult.S_OK
@@ -2504,7 +2807,7 @@ public static class NativeShell {
     } catch { }
   }
 
-  // ── FindFirstFileEx directory enumeration ─────────────────────────────────
+  // -- FindFirstFileEx directory enumeration ---------------------------------
 
   // Cache shell-friendly type strings ("PNG Image", "Text Document") keyed by extension.
   // SHGetFileInfo with SHGFI_USEFILEATTRIBUTES|SHGFI_TYPENAME reads from the registry
@@ -2536,7 +2839,7 @@ public static class NativeShell {
         di = new DriveInfo(norm);
         driveType = di.DriveType;
       } else {
-        // Network paths or device paths — attempt to match via DriveInfo enumeration.
+        // Network paths or device paths � attempt to match via DriveInfo enumeration.
         foreach (var d in DriveInfo.GetDrives()) {
           if (string.Equals(d.RootDirectory.FullName.TrimEnd('\\'),
                             norm, StringComparison.OrdinalIgnoreCase)) {
@@ -2559,13 +2862,37 @@ public static class NativeShell {
 
       item.IsDrive = true;
 
-      if (!di.IsReady) return; // removable media not inserted — leave space at 0
+      if (!di.IsReady) return; // removable media not inserted � leave space at 0
 
       long total = di.TotalSize;
       long free  = di.TotalFreeSpace;
       item.DriveTotalBytes = total;
       item.DriveUsedBytes  = total - free;
     } catch { }
+  }
+
+  /// <summary>
+  /// Re-queries total/used space for a drive root (e.g. "C:\") in response to a
+  /// SHCNE_FREESPACE notification. Returns false if <paramref name="path"/> is not
+  /// a ready drive root, leaving <paramref name="totalBytes"/>/<paramref name="usedBytes"/>
+  /// unset.
+  /// </summary>
+  public static bool TryGetDriveSpace(string path, out long totalBytes, out long usedBytes) {
+    totalBytes = 0;
+    usedBytes  = 0;
+    try {
+      var norm = path?.TrimEnd('\\', '/');
+      if (string.IsNullOrEmpty(norm) || norm.Length < 2 || norm[1] != ':')
+        return false;
+      var di = new DriveInfo(norm);
+      if (!di.IsReady)
+        return false;
+      totalBytes = di.TotalSize;
+      usedBytes  = totalBytes - di.TotalFreeSpace;
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   public static string GetItemTypeStringPublic(string ext) => GetItemTypeString(ext);
@@ -2576,7 +2903,7 @@ public static class NativeShell {
       return cached;
 
     // Ask the shell for the friendly type name. SHGFI_USEFILEATTRIBUTES means the
-    // file is never opened — only the extension drives the registry lookup.
+    // file is never opened � only the extension drives the registry lookup.
     string result;
     try {
       var dummy = "x" + ext; // e.g. "x.png"
@@ -2617,6 +2944,9 @@ public static class NativeShell {
         var fullPath = Path.Combine(path, name);
         bool isDir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
         bool isHidden = (attrs & FILE_ATTRIBUTE_HIDDEN) != 0;
+        bool isLinkItem = false; // reparse points are skipped above; set via shell enrichment
+        bool isShortcut = IsShortcutPath(fullPath);
+        bool isArchive = IsArchivePath(fullPath);
         var modified = DateTime.FromFileTimeUtc(data.ftLastWriteTime).ToLocalTime();
         if (isDir) {
           folders.Add(new ShellItem {
@@ -2625,6 +2955,8 @@ public static class NativeShell {
             ItemType = "File folder",
             IsFolder = true,
             IsHidden = isHidden,
+            IsLinkItem = isLinkItem,
+            IsArchive = isArchive,
             DateModified = modified
           });
         } else {
@@ -2636,6 +2968,10 @@ public static class NativeShell {
             ItemType = GetItemTypeString(ext),
             IsFolder = false,
             IsHidden = isHidden,
+            IsShortcut = isShortcut,
+            IsLinkItem = isLinkItem,
+            IsArchive = isArchive,
+            IsPicture = s_pictureExts.Contains(ext),
             Size = FormatSize(size),
             SizeBytes = size,
             DateModified = modified
@@ -2664,22 +3000,25 @@ public static class NativeShell {
         return null;
       FindClose(hFind);
 
-      var name  = data.cFileName;
+      var name = data.cFileName;
       var attrs = data.dwFileAttributes;
       if ((attrs & FILE_ATTRIBUTE_REPARSE) != 0)
         return null;
 
-      bool isDir    = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-      bool isHidden = (attrs & FILE_ATTRIBUTE_HIDDEN)    != 0;
-      var  modified = DateTime.FromFileTimeUtc(data.ftLastWriteTime).ToLocalTime();
+      bool isDir = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      bool isHidden = (attrs & FILE_ATTRIBUTE_HIDDEN) != 0;
+      bool isShortcut = IsShortcutPath(fullPath);
+      bool isArchive = IsArchivePath(fullPath);
+      var modified = DateTime.FromFileTimeUtc(data.ftLastWriteTime).ToLocalTime();
 
       if (isDir) {
         return new ShellItem {
-          Name         = name,
-          FullPath     = fullPath,
-          ItemType     = "File folder",
-          IsFolder     = true,
-          IsHidden     = isHidden,
+          Name = name,
+          FullPath = fullPath,
+          ItemType = "File folder",
+          IsFolder = true,
+          IsHidden = isHidden,
+          IsArchive = isArchive,
           DateModified = modified
         };
       }
@@ -2687,34 +3026,131 @@ public static class NativeShell {
       long size = ((long)data.nFileSizeHigh << 32) | (uint)data.nFileSizeLow;
 
       // IShellItem2.GetString(PKEY_ItemTypeText) gives the shell's own friendly
-      // type string ("PNG File", "Text Document", etc.) — better than a raw
+      // type string ("PNG File", "Text Document", etc.) � better than a raw
       // extension lookup.  Fall back to extension lookup if the COM call fails.
-      string? typeText = null;
-      try {
-        SHCreateItemFromParsingNameItem2(fullPath, IntPtr.Zero, IID_IShellItem2, out var si2);
-        if (si2 is not null) {
-          var pk = PKEY_ItemTypeText;
-          si2.GetString(ref pk, out typeText);
-        }
-      } catch { /* COM unavailable / locked — fall through */ }
+      var typeText = GetItemTypeText(fullPath);
 
       if (string.IsNullOrEmpty(typeText))
         typeText = GetItemTypeString(Path.GetExtension(name));
 
       return new ShellItem {
-        Name         = name,
-        FullPath     = fullPath,
-        ItemType     = typeText,
-        IsFolder     = false,
-        IsHidden     = isHidden,
-        Size         = FormatSize(size),
-        SizeBytes    = size,
+        Name = name,
+        FullPath = fullPath,
+        ItemType = typeText,
+        IsFolder = false,
+        IsHidden = isHidden,
+        IsShortcut = isShortcut,
+        IsArchive = isArchive,
+        IsPicture = IsPicturePath(fullPath),
+        Size = FormatSize(size),
+        SizeBytes = size,
         DateModified = modified
       };
     } catch { return null; }
   }
 
-  // ── Windows Search via ISearchFolderItemFactory (STA thread) ─────────────
+  public static String? GetItemTypeText(String fullPath) {
+    string? typeText = null;
+    try {
+      SHCreateItemFromParsingNameItem2(fullPath, IntPtr.Zero, IID_IShellItem2, out var si2);
+      if (si2 is not null) {
+        var pk = PKEY_ItemTypeText;
+        si2.GetString(ref pk, out typeText);
+      }
+    } catch { /* COM unavailable / locked � fall through */ }
+
+    return typeText;
+  }
+
+  // -- Image metadata for tooltips (dimensions, rating) --------------------
+
+  // PKEY_System_ImageHorizontalSize = {E0100211-1B5D-4DC3-98BC-744C2F2E7960} pid 3  (UINT32)
+  // PKEY_System_ImageVerticalSize   = {E0100211-1B5D-4DC3-98BC-744C2F2E7960} pid 4  (UINT32)
+  // PKEY_System_Rating              = {64440490-4C8B-11D1-8B70-080036B11A03} pid 9  (UINT32, 0�99)
+  private static readonly Guid _pkeyImageFmtId  = new("E0100211-1B5D-4DC3-98BC-744C2F2E7960");
+  private static readonly Guid _pkeyRatingFmtId = new("64440490-4C8B-11D1-8B70-080036B11A03");
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_ImageWidth  => new() { fmtid = _pkeyImageFmtId, pid = 3 };
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_ImageHeight => new() { fmtid = _pkeyImageFmtId, pid = 4 };
+  private static global::BetterExplorer.ShellApi.Interop.PROPERTYKEY PKEY_Rating      => new() { fmtid = _pkeyRatingFmtId, pid = 9 };
+
+  /// <summary>Reads image dimensions and rating from the shell property store for a file.
+  /// Returns <c>(width, height, rating)</c>; zeros when the property is unavailable.
+  /// Uses <see cref="IShellItem2.GetUInt32"/> directly � the same fast, reliable
+  /// path that <see cref="EnrichFromIShellItem2"/> uses for other properties.
+  /// Pass <paramref name="openSlowItems"/> = <see langword="true"/> for cloud-backed
+  /// (OneDrive/SharePoint) items, whose properties may live behind a slow/network
+  /// property handler that the default (fast-only) flags refuse to open.</summary>
+  public static (int Width, int Height, int Rating) GetImageMetadata(string fullPath, bool openSlowItems = false) {
+    int width = 0, height = 0, rating = 0;
+    try {
+      SHCreateItemFromParsingNameItem2(fullPath, IntPtr.Zero, IID_IShellItem2, out var si2);
+      if (si2 is null) return (0, 0, 0);
+      try {
+        // Read each property via the direct IShellItem2.GetUInt32 COM method.
+        // This is faster and more reliable than going through IPropertyStore.GetValue
+        // which has PropVariant marshalling issues in some .NET runtimes.
+        try { var pk = PKEY_ImageWidth;  si2.GetUInt32(ref pk, out var w); width  = (int)w; } catch { }
+        try { var pk = PKEY_ImageHeight; si2.GetUInt32(ref pk, out var h); height  = (int)h; } catch { }
+        try { var pk = PKEY_Rating;      si2.GetUInt32(ref pk, out var r); rating  = (int)r; } catch { }
+      } finally { Marshal.ReleaseComObject(si2); }
+    } catch { /* COM unavailable / locked � fall through */ }
+    return (width, height, rating);
+  }
+
+  /// <summary>Converts a raw Windows rating value (0�99) to a 0�5 star count.
+  /// 0 = no rating, 1�12 = 1?, 13�37 = 2?, 38�62 = 3?, 63�87 = 4?, 88�99 = 5?.</summary>
+  /// <summary>Converts a raw Windows rating value (0�99) to a 0�5 star value with
+  /// half-star precision.  0 = no rating; 1�99 maps linearly to 0.5�5.0 stars,
+  /// rounded to the nearest half.</summary>
+  public static double RatingToStars(int rawRating) {
+    if (rawRating <= 0) return 0;
+    // Map 1�99 ? 0.5�5.0 in half-star increments.
+    return Math.Round(rawRating / 99.0 * 10) / 2.0;
+  }
+
+  /// <summary>
+  /// Reads image dimensions and rating from the <c>Windows.Storage</c> typed
+  /// property accessors.  This is used for all items because the COM-based
+  /// <see cref="GetImageMetadata"/> silently returns zeros for many files.
+  /// For cloud-backed items (OneDrive, SharePoint) a short timeout is applied
+  /// so that dehydrated placeholders that would trigger a download do not
+  /// block the tooltip indefinitely.
+  /// </summary>
+  public static async Task<(int Width, int Height, int Rating)> GetStorageImageMetadataAsync(
+      string fullPath, bool isCloud, CancellationToken ct) {
+    try {
+      ct.ThrowIfCancellationRequested();
+
+      CancellationToken effectiveCt = ct;
+      CancellationTokenSource? timeoutCts = null;
+      try {
+        if (isCloud) {
+          // GetFileFromPathAsync for a dehydrated cloud placeholder can block
+          // while Windows attempts hydration.  A short timeout keeps the tooltip
+          // responsive.
+          timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+          timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+          effectiveCt = timeoutCts.Token;
+        }
+
+        var file = await StorageFile.GetFileFromPathAsync(fullPath)
+            .AsTask(effectiveCt).ConfigureAwait(false);
+
+        // Read dimensions and rating from the strongly-typed ImageProperties
+        // (reliable unlike the COM IPropertyStore path).
+        var imageProps = await file.Properties.GetImagePropertiesAsync()
+            .AsTask(effectiveCt).ConfigureAwait(false);
+
+        int width  = (int)imageProps.Width;
+        int height = (int)imageProps.Height;
+        int rating = (int)imageProps.Rating;
+
+        return (width, height, rating);
+      } finally { timeoutCts?.Dispose(); }
+    } catch (OperationCanceledException) { return (0, 0, 0); } catch { return (0, 0, 0); }
+  }
+
+  // -- Windows Search via ISearchFolderItemFactory (STA thread) -------------
 
   /// <summary>
   /// Searches <paramref name="folderPath"/> recursively for items whose names match
@@ -2801,6 +3237,39 @@ public static class NativeShell {
     return await tcs.Task.ConfigureAwait(false);
   }
 
+  /// <summary>
+  /// Streaming variant that searches the entire Windows Search index (no folder
+  /// scope).  Returns a <see cref="ChannelReader{T}"/> that yields results as
+  /// they are found on an STA worker thread.
+  /// </summary>
+  public static ChannelReader<ShellItem> SearchGlobalStreamAsync(
+      string query, CancellationToken ct) {
+    var channel = Channel.CreateUnbounded<ShellItem>(
+        new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+
+    if (string.IsNullOrWhiteSpace(query)) {
+      channel.Writer.Complete();
+      return channel.Reader;
+    }
+
+    var thread = new Thread(() => {
+      try {
+        ct.ThrowIfCancellationRequested();
+        DoShellItemSearchStreamingGlobal(query, ct, channel.Writer);
+        channel.Writer.Complete();
+      } catch (OperationCanceledException) {
+        channel.Writer.Complete();
+      } catch (Exception ex) {
+        System.Diagnostics.Debug.WriteLine($"[SearchGlobalStreamAsync] {ex.GetType().Name}: {ex.Message}");
+        channel.Writer.Complete();
+      }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.IsBackground = true;
+    thread.Start();
+    return channel.Reader;
+  }
+
   private static String PrepareSearchQuery(String query) {
     var prefix = "System.Generic.String:";
     if (query.StartsWith("*.")) {
@@ -2846,7 +3315,7 @@ public static class NativeShell {
     factory.SetCondition(searchCondition.NativeSearchCondition);
 
 
-    // ── 3. Enumerate the virtual search-results IShellFolder ──────────────
+    // -- 3. Enumerate the virtual search-results IShellFolder --------------
     var hr = factory.GetShellItem(IID_IShellItem, out var searchItemObj);
     if (hr != 0 || searchItemObj is not IShellItem searchItem)
       return results;
@@ -2953,7 +3422,62 @@ public static class NativeShell {
     } finally { Marshal.ReleaseComObject(searchItem); }
   }
 
-    // ── Library XML parser ────────────────────────────────────────────────────
+  /// <summary>
+  /// COM/STA worker for global (no-scope) Windows Search: creates a
+  /// <c>SearchFolderItemFactory</c> without calling <c>SetScope</c>, which
+  /// makes it search the entire Windows Search index.
+  /// </summary>
+  private static void DoShellItemSearchStreamingGlobal(
+      string rawQuery, CancellationToken ct, ChannelWriter<ShellItem> writer) {
+    var factory = (BExplorer.Shell.Interop.ISearchFolderItemFactory)new SearchFolderItemFactoryCoClass();
+    var searchCondition = SearchConditionFactory.ParseStructuredQuery(PrepareSearchQuery(rawQuery));
+    factory.SetCondition(searchCondition.NativeSearchCondition);
+
+    var hr = factory.GetShellItem(IID_IShellItem, out var searchItemObj);
+    if (hr != 0 || searchItemObj is not IShellItem searchItem)
+      return;
+
+    try {
+      searchItem.BindToHandler(IntPtr.Zero, BHID_SFObject, IID_IShellFolder, out var sfObj);
+      if (sfObj is not IShellFolder sf)
+        return;
+
+      try {
+        hr = sf.EnumObjects(IntPtr.Zero,
+            (uint)(SHCONTF.FOLDERS | SHCONTF.INCLUDEHIDDEN | SHCONTF.INCLUDESUPERHIDDEN |
+                   SHCONTF.NONFOLDERS | SHCONTF.FASTITEMS),
+            out var enumIDList);
+        if (hr != 0 || enumIDList is null)
+          return;
+
+        try {
+          while (true) {
+            ct.ThrowIfCancellationRequested();
+            hr = enumIDList.Next(1, out var childPidl, out var fetched);
+            if (hr != 0 || fetched == 0) break;
+
+            try {
+              var strret = default(STRRET);
+              sf.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strret);
+              string? fullPath = StrRetToStr(ref strret, childPidl);
+
+              if (string.IsNullOrEmpty(fullPath)) continue;
+              string name = Path.GetFileName(fullPath);
+              if (string.IsNullOrEmpty(name)) continue;
+
+              var item = GetSingleItemMetadata(fullPath);
+              if (item is not null)
+                writer.TryWrite(item);
+            } finally {
+              Marshal.FreeCoTaskMem(childPidl);
+            }
+          }
+        } finally { Marshal.ReleaseComObject(enumIDList); }
+      } finally { Marshal.ReleaseComObject(sf); }
+    } finally { Marshal.ReleaseComObject(searchItem); }
+  }
+
+    // -- Library XML parser ----------------------------------------------------
 
   public static string? ResolveLibraryDefaultPath(string libraryFile) {
     try {
@@ -2983,7 +3507,7 @@ public static class NativeShell {
     return null;
   }
 
-  // ── .lnk shortcut resolver ────────────────────────────────────────────────
+  // -- .lnk shortcut resolver ------------------------------------------------
 
   public static string? ResolveShortcut(string lnkPath) {
     try {
@@ -3003,7 +3527,7 @@ public static class NativeShell {
     } catch { return null; }
   }
 
-  // ── Shell icon fallback (SHGetFileInfo + DrawIconEx) ─────────────────────
+  // -- Shell icon fallback (SHGetFileInfo + DrawIconEx) ---------------------
 
   private static IntPtr TryIconToBitmap(string virtualPath, int size) {
     var sfi = new SHFILEINFO();
@@ -3072,23 +3596,23 @@ public static class NativeShell {
     } catch { return IntPtr.Zero; }
   }
 
-  // ── FormatSize helper ─────────────────────────────────────────────────────
+  // -- FormatSize helper -----------------------------------------------------
 
   // Windows Explorer always shows file sizes in KB, rounded up to the nearest KB,
-  // with a thousands separator — e.g. "1 KB", "12 KB", "1,234 KB".
+  // with a thousands separator � e.g. "1 KB", "12 KB", "1,234 KB".
   // Zero-byte files show as "0 KB". Folders (bytes == -1 or 0) are left blank by the caller.
   public static string FormatSize(long bytes) {
     if (bytes <= 0) return "0 KB";
-    long kb = (bytes + 1023) / 1024;   // ceiling division → always at least 1 KB
+    long kb = (bytes + 1023) / 1024;   // ceiling division ? always at least 1 KB
     return $"{kb:N0} KB";
   }
 
-  // ── Network (shell namespace) ─────────────────────────────────────────────────────────────
+  // -- Network (shell namespace) -------------------------------------------------------------
   //
   // Real Windows Explorer enumerates the Network neighbourhood by walking the shell namespace
   // rooted at FOLDERID_NetworkFolder via IShellFolder.  This gives ALL device categories
-  // (Computers, Media devices, Infrastructure, Printers, Other devices…) exactly as Explorer
-  // shows them — something WNetOpenEnum can never do because it only sees disk shares.
+  // (Computers, Media devices, Infrastructure, Printers, Other devices�) exactly as Explorer
+  // shows them � something WNetOpenEnum can never do because it only sees disk shares.
   // WNet constants are kept only for the sub-level share enumeration under a specific server.
 
   private const uint RESOURCETYPE_ANY        = 0x00000000;  // all resource types
@@ -3177,7 +3701,7 @@ public static class NativeShell {
   ///
   /// Top-level (<paramref name="parentParsingPath"/> == null):
   ///   Returns every direct child: workgroups, UPnP device groups, media devices,
-  ///   printers, infrastructure nodes, etc. — exactly as Explorer shows them.
+  ///   printers, infrastructure nodes, etc. � exactly as Explorer shows them.
   ///
   /// Sub-container (non-null <paramref name="parentParsingPath"/>):
   ///   Returns the direct children of that shell parsing path.
@@ -3191,9 +3715,9 @@ public static class NativeShell {
 
     if (parentParsingPath == null) {
       // BExplorer-proven path:
-      //   SHGetDesktopFolder()                        → IShellFolder (desktop root)
-      //   SHGetSpecialFolderLocation(CSIDL_NETWORK)   → PIDL for Network
-      //   desktop.BindToObject(networkPidl)            → IShellFolder for Network
+      //   SHGetDesktopFolder()                        ? IShellFolder (desktop root)
+      //   SHGetSpecialFolderLocation(CSIDL_NETWORK)   ? PIDL for Network
+      //   desktop.BindToObject(networkPidl)            ? IShellFolder for Network
       //   EnumObjects with FOLDERS|NONFOLDERS|NETPRINTERSRCH|SHAREABLE
       IShellFolder? netFolder  = null;
       IntPtr        networkPidl = IntPtr.Zero;
@@ -3254,7 +3778,7 @@ public static class NativeShell {
 
   // Enumerates the immediate children of a shell IShellFolder and converts each to a
   // NetworkResource.  Uses NETPRINTERSRCH|SHAREABLE so printers, UPnP devices, media
-  // devices, infrastructure nodes etc. are included — not just computers.
+  // devices, infrastructure nodes etc. are included � not just computers.
   // Does NOT recurse: Explorer shows workgroups/device-groups as expandable nodes.
   private static void EnumerateNetworkFolderChildren(
       IShellFolder folder, List<NetworkResource> result) {
@@ -3268,19 +3792,19 @@ public static class NativeShell {
     try {
       while (enumIdList.Next(1, out var childPidl, out _) == 0) {
         try {
-          // Parsing name — used as the unique identifier / navigation path.
+          // Parsing name � used as the unique identifier / navigation path.
           var strretParsing = default(STRRET);
           folder.GetDisplayNameOf(childPidl, SHGDN_FORPARSING, out strretParsing);
           string? parseName = StrRetToStr(ref strretParsing, childPidl);
           if (string.IsNullOrEmpty(parseName)) continue;
 
-          // Display name — what the user sees.
+          // Display name � what the user sees.
           var strretDisplay = default(STRRET);
           folder.GetDisplayNameOf(childPidl, 0, out strretDisplay);
           string? displayName = StrRetToStr(ref strretDisplay, childPidl);
           if (string.IsNullOrEmpty(displayName)) displayName = parseName;
 
-          // Folder flag — containers are expandable (workgroup, device group…).
+          // Folder flag � containers are expandable (workgroup, device group�).
           uint attrs = SFGAO_FOLDER;
           folder.GetAttributesOf(1, [childPidl], ref attrs);
           bool isFolder = (attrs & SFGAO_FOLDER) != 0;
@@ -3356,7 +3880,7 @@ public static class NativeShell {
     return result;
   }
 
-  // ── IFileOperation helper ─────────────────────────────────────────────────
+  // -- IFileOperation helper -------------------------------------------------
 
   /// <summary>
   /// Performs a shell copy or move using <c>IFileOperation</c>, which shows
@@ -3449,7 +3973,7 @@ public static class NativeShell {
     return tcs.Task;
   }
 
-  // ── Progress sink ─────────────────────────────────────────────────────────
+  // -- Progress sink ---------------------------------------------------------
 
   /// <summary>
   /// Minimal <see cref="IFileOperationProgressSink"/> that records which
@@ -3525,7 +4049,7 @@ public static class NativeShell {
     public void ResumeTimer() { }
   }
 
-  // ── Rename sink ───────────────────────────────────────────────────────────
+  // -- Rename sink -----------------------------------------------------------
 
   private sealed class RenameSink : IFileOperationProgressSink {
     internal string? NewPath { get; private set; }
@@ -3558,7 +4082,7 @@ public static class NativeShell {
     public void ResumeTimer() { }
   }
 
-  // ── Shell rename helper ────────────────────────────────────────────────────
+  // -- Shell rename helper ----------------------------------------------------
 
   /// <summary>
   /// Renames a single file or folder via <c>IFileOperation</c>, which
@@ -3585,7 +4109,7 @@ public static class NativeShell {
         if (hwndOwner != IntPtr.Zero)
           fileOp.SetOwnerWindow(hwndOwner);
 
-        // Silent rename — no progress dialog, no confirmation prompts.
+        // Silent rename � no progress dialog, no confirmation prompts.
         // FOFX_ADDUNDORECORD still adds an undo entry to Explorer's undo stack.
         fileOp.SetOperationFlags(FOF_NO_UI | FOFX_ADDUNDORECORD);
         fileOp.Advise(sink, out cookie);
@@ -3613,7 +4137,7 @@ public static class NativeShell {
     return tcs.Task;
   }
 
-  // ── Shell delete (to Recycle Bin) ─────────────────────────────────────────
+  // -- Shell delete (to Recycle Bin) -----------------------------------------
 
   private const uint FOF_ALLOWUNDO    = 0x0040;
 
@@ -3648,7 +4172,7 @@ public static class NativeShell {
 
         int itemsQueued = 0;
         foreach (var path in paths) {
-          // Skip items that no longer exist — they may have been removed by a
+          // Skip items that no longer exist � they may have been removed by a
           // file-system watcher or a previous operation before we got here.
           if (!System.IO.File.Exists(path) && !System.IO.Directory.Exists(path))
             continue;
@@ -3657,7 +4181,7 @@ public static class NativeShell {
             fileOp.DeleteItem(srcItem, null);
             itemsQueued++;
           } catch {
-            // Path became unavailable between the existence check and binding —
+            // Path became unavailable between the existence check and binding �
             // skip it silently so IFileOperation doesn't surface a "not found" dialog.
           }
         }
@@ -3713,10 +4237,19 @@ public static class NativeShell {
     public void ResumeTimer() { }
   }
 
-  // ── Shell Properties dialog ───────────────────────────────────────────────
+  // -- Shell Properties dialog -----------------------------------------------
 
   [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
   private static extern bool ShellExecuteExW(ref SHELLEXECUTEINFOW lpExecInfo);
+
+  [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+  static extern IntPtr ShellExecute(
+    IntPtr hwnd,
+    string lpOperation,
+    string lpFile,
+    string lpParameters,
+    string lpDirectory,
+    int nShowCmd);
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   private struct SHELLEXECUTEINFOW {
@@ -3750,7 +4283,7 @@ public static class NativeShell {
     ShellExecuteExW(ref sei);
   }
 
-  // ── Folder icon helpers ───────────────────────────────────────────────────
+  // -- Folder icon helpers ---------------------------------------------------
 
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   private static extern bool WritePrivateProfileStringW(
@@ -3772,7 +4305,7 @@ public static class NativeShell {
   // Read-capable variant of SHFOLDERCUSTOMSETTINGS: pszIconFile is an IntPtr
   // so the caller allocates the buffer and the shell fills it in.  The write
   // struct in Shell32.cs uses `string` which the marshaller can only pass IN,
-  // not receive back — hence this separate private definition.
+  // not receive back � hence this separate private definition.
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   private struct SHFCS_READ {
     public uint   dwSize;
@@ -3807,7 +4340,7 @@ public static class NativeShell {
 
   /// <summary>
   /// Sets a custom icon for <paramref name="folderPath"/> using
-  /// <c>SHGetSetFolderCustomSettings</c> — the same API used by Explorer itself.
+  /// <c>SHGetSetFolderCustomSettings</c> � the same API used by Explorer itself.
   /// <paramref name="iconFile"/> can be a .ico, .exe, or .dll path.
   /// <paramref name="iconIndex"/> is the 0-based resource index.
   /// </summary>
@@ -3853,7 +4386,7 @@ public static class NativeShell {
 
   /// <summary>
   /// Flushes the shell icon cache for <paramref name="folderPath"/> so the new
-  /// icon is reflected immediately — mirrors Better Explorer's implementation.
+  /// icon is reflected immediately � mirrors Better Explorer's implementation.
   /// </summary>
   private static void UpdateIconCacheForFolder(string folderPath) {
     // Read back the image-list index the shell assigned to this folder's icon.
@@ -3871,7 +4404,7 @@ public static class NativeShell {
     Shell32.SHUpdateImage(fcsRead.pszIconFile ?? string.Empty, fcsRead.iIconIndex, 0, -1);
 
     // Send only a targeted SHCNE_UPDATEITEM for the specific folder.
-    // Do NOT send SHCNE_ASSOCCHANGED — it has no path and causes every shell
+    // Do NOT send SHCNE_ASSOCCHANGED � it has no path and causes every shell
     // change listener to trigger a full directory reload, which clears the
     // current selection and collapses the contextual toolbar.
     var pszFolder = Marshal.StringToHGlobalUni(folderPath);
@@ -3884,9 +4417,25 @@ public static class NativeShell {
   }
 
   /// <summary>
+  /// Sends <c>SHCNE_UPDATEITEM</c> for <paramref name="path"/> so the shell
+  /// invalidates its own thumbnail-cache entry for this specific item.
+  /// Followed by a short delay before re-querying, the shell and cloud-provider
+  /// extensions (OneDrive, SharePoint, etc.) will regenerate the cached thumbnail.
+  /// </summary>
+  public static void NotifyShellUpdateItem(string path) {
+    var ptr = Marshal.StringToHGlobalUni(path);
+    try {
+      SHChangeNotify(0x00002000 /* SHCNE_UPDATEITEM */,
+          0x0005 /* SHCNF_PATHW | SHCNF_FLUSH */, ptr, IntPtr.Zero);
+    } finally {
+      Marshal.FreeHGlobal(ptr);
+    }
+  }
+
+  /// <summary>
   /// Sends <c>SHCNE_UPDATEDIR</c> for <paramref name="dirPath"/> so the shell
   /// invalidates its thumbnail-cache entries for all items inside that directory.
-  /// Safe to call for a single-folder restore — does not trigger a full list reload.
+  /// Safe to call for a single-folder restore � does not trigger a full list reload.
   /// </summary>
   public static void NotifyShellUpdateDir(string dirPath) {
     var ptr = Marshal.StringToHGlobalUni(dirPath);
@@ -3904,11 +4453,11 @@ public static class NativeShell {
   /// </summary>
   /// <summary>
   /// Returns <see langword="true"/> if <paramref name="folderPath"/> has a
-  /// custom icon recorded in its desktop.ini — handles both the
+  /// custom icon recorded in its desktop.ini � handles both the
   /// <c>IconFile=</c> key written by <c>SHGetSetFolderCustomSettings</c> and
   /// the <c>IconResource=</c> key written by Explorer's Customize tab.
   /// </summary>
-  // ── desktop.ini helpers ──────────────────────────────────────────────────
+  // -- desktop.ini helpers --------------------------------------------------
 
   /// <summary>
   /// Reads a single key from a .ini-style file, handling both UTF-16 LE (shell-
@@ -4016,7 +4565,85 @@ public static class NativeShell {
     System.Diagnostics.Process.Start(psi);
   }
 
-  // ── Icon extraction (for FolderIconPickerDialog) ──────────────────────────
+  // -- This PC network helpers -----------------------------------------------
+
+  /// <summary>Opens the Windows "Map Network Drive" dialog.</summary>
+  public static void ShowMapNetworkDriveDialog() =>
+      System.Diagnostics.Process.Start(
+          new System.Diagnostics.ProcessStartInfo("rundll32.exe",
+              "shell32.dll,SHHelpShortcuts_RunDLL Connect")
+          { UseShellExecute = true });
+
+  /// <summary>Opens the Windows "Disconnect Network Drive" dialog.</summary>
+  public static void ShowDisconnectNetworkDriveDialog() =>
+      System.Diagnostics.Process.Start(
+          new System.Diagnostics.ProcessStartInfo("rundll32.exe",
+              "shell32.dll,SHHelpShortcuts_RunDLL Disconnect")
+          { UseShellExecute = true });
+
+  /// <summary>
+  /// Launches the native "Add a network location" wizard by invoking the
+  /// <c>addnetworkplace</c> verb on the background <c>IContextMenu</c> of "This PC".
+  /// </summary>
+  public static void ShowAddNetworkLocationWizard(IntPtr hwnd = default) {
+    // Resolve "This PC" to an absolute PIDL via its virtual-folder CLSID display name.
+    SHParseDisplayName($"::{{{FOLDERID_ComputerFolder}}}", IntPtr.Zero,
+        out IntPtr pidl, 0, out _);
+    if (pidl == IntPtr.Zero) return;
+
+    IShellFolderCM? folder = null;
+    IContextMenuCM? cm     = null;
+    IntPtr verbW = IntPtr.Zero;
+    IntPtr verbA = IntPtr.Zero;
+    try {
+      // Bind the PIDL directly to IShellFolderCM for "This PC".
+      if (SHBindToObject(IntPtr.Zero, pidl, IntPtr.Zero,
+              IID_IShellFolder, out object folderObj) != 0
+          || folderObj is not IShellFolderCM f) return;
+      folder = f;
+
+      // Get the folder-background IContextMenu (same as right-clicking empty space
+      // inside the This PC folder).  The "addnetworkplace" verb lives here.
+      if (folder.CreateViewObject(hwnd, typeof(IContextMenuCM).GUID,
+              out object cmObj) != 0
+          || cmObj is not IContextMenuCM c) return;
+      cm = c;
+
+      verbW = Marshal.StringToHGlobalUni("addnetworkplace");
+      verbA = Marshal.StringToHGlobalAnsi("addnetworkplace");
+      var info = new CMINVOKECOMMANDINFOEX {
+        cbSize = Marshal.SizeOf<NativeShell.CMINVOKECOMMANDINFOEX>(),
+        fMask = 0x00004000, // CMIC_MASK_UNICODE
+        hwnd = hwnd,
+        lpVerb = verbA,
+        lpVerbW = verbW,
+        nShow = 1, // SW_SHOWNORMAL
+        lpDirectory = IntPtr.Zero,
+        lpDirectoryW = null,
+      };
+      cm.InvokeCommand(ref info);
+    } finally {
+      if (verbW  != IntPtr.Zero) Marshal.FreeHGlobal(verbW);
+      if (verbA != IntPtr.Zero) Marshal.FreeHGlobal(verbA);
+      if (cm     is not null) try { Marshal.ReleaseComObject(cm);     } catch { }
+      if (folder is not null) try { Marshal.ReleaseComObject(folder); } catch { }
+      Marshal.FreeCoTaskMem(pidl);
+    }
+  }
+
+  /// <summary>
+  /// Opens the Windows "Add a device" wizard (DevicePairingWizard) so the user
+  /// can discover and connect to media servers and other devices on the network.
+  /// </summary>
+  public static void ShowMediaServerConnectionDialog() =>
+      System.Diagnostics.Process.Start(
+          new System.Diagnostics.ProcessStartInfo(
+              System.IO.Path.Combine(
+                  System.Environment.GetFolderPath(System.Environment.SpecialFolder.System),
+                  "DevicePairingWizard.exe"))
+          { UseShellExecute = true });
+
+  // -- Icon extraction (for FolderIconPickerDialog) --------------------------
 
   [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
   private static extern int ExtractIconExW(
@@ -4063,7 +4690,7 @@ public static class NativeShell {
       if (small[0] != IntPtr.Zero) DestroyIcon(small[0]);
     }
   }
-  // ── Picture helpers ───────────────────────────────────────────────────────
+  // -- Picture helpers -------------------------------------------------------
 
   private const uint SPI_SETDESKWALLPAPER = 0x0014;
   private const uint SPIF_UPDATEINIFILE   = 0x0001;
@@ -4124,7 +4751,7 @@ public static class NativeShell {
     await encoder.FlushAsync();
   }
 
-  // ── WSL / Linux ─────────────────────────────────────────────────────────────
+  // -- WSL / Linux -------------------------------------------------------------
 
   /// <summary>
   /// Returns the display names of all installed WSL distributions by reading

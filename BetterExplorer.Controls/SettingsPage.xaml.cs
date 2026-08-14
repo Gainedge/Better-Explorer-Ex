@@ -17,11 +17,24 @@ public sealed partial class SettingsPage : UserControl
     // Per-browser overrides — independent from the General defaults above
     public const string BrowserShowHiddenFilesKey    = "App.Browser.ShowHiddenFiles";
     public const string BrowserShowFileExtensionsKey = "App.Browser.ShowFileExtensions";
+    public const string StartupLocationKey           = "App.StartupLocation";
+    public const string RestoreTabsKey               = "App.RestoreTabs";
+    // Session data (written on close, read on startup)
+    public const string SessionTabPathsKey           = "Session.TabPaths";
+    public const string SessionActiveTabIndexKey     = "Session.ActiveTabIndex";
 
     // ── Events consumed by MainWindow ────────────────────────────────────────
     public static event Action<ElementTheme>? ThemeChangeRequested;
     public static event Action<string>?       FileOpHandlerChanged;
     public static event Action<string>?       SearchEngineChanged;
+    public static event Action<string?>?      StartupLocationChanged;
+    public static event Action<bool>?         RestoreTabsChanged;
+
+    /// <summary>
+    /// Set by the host window so that controls in this library can initialize pickers.
+    /// Returns the HWND of the main application window.
+    /// </summary>
+    public static Func<IntPtr>? GetMainWindowHandle { get; set; }
 
     // Internal helpers called by sub-pages
     internal static void RaiseThemeChangeRequested(ElementTheme theme)
@@ -30,6 +43,10 @@ public sealed partial class SettingsPage : UserControl
         => FileOpHandlerChanged?.Invoke(handler);
     internal static void RaiseSearchEngineChanged(string engine)
         => SearchEngineChanged?.Invoke(engine);
+    internal static void RaiseStartupLocationChanged(string? path)
+        => StartupLocationChanged?.Invoke(path);
+    internal static void RaiseRestoreTabsChanged(bool value)
+        => RestoreTabsChanged?.Invoke(value);
 
     /// <summary>Raised when the user clicks the footer Close button.</summary>
     public event EventHandler? CloseRequested;
@@ -73,6 +90,30 @@ public sealed partial class SettingsPage : UserControl
                 return ApplicationData.Current.LocalSettings.Values
                     .TryGetValue(FileOpHandlerKey, out var v) ? v as string ?? "System" : "System";
             } catch { return "System"; }
+        }
+    }
+
+    /// <summary>Returns the currently persisted startup location (null means the default shell location).</summary>
+    public static string? StartupLocation
+    {
+        get
+        {
+            try {
+                return ApplicationData.Current.LocalSettings.Values
+                    .TryGetValue(StartupLocationKey, out var v) ? v as string : null;
+            } catch { return null; }
+        }
+    }
+
+    /// <summary>Returns whether the restore-last-tabs setting is enabled (default false).</summary>
+    public static bool RestoreTabs
+    {
+        get
+        {
+            try {
+                return ApplicationData.Current.LocalSettings.Values
+                    .TryGetValue(RestoreTabsKey, out var v) && v is bool b ? b : false;
+            } catch { return false; }
         }
     }
 

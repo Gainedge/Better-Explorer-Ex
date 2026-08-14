@@ -53,12 +53,12 @@ internal static class ShellContextMenuFlyout {
   // secondary (list) section to avoid duplicates.
   private static readonly HashSet<string> _primaryVerbs =
       new(StringComparer.OrdinalIgnoreCase) {
-    "open", "openas", "openwith", "cut", "copy", "paste", "delete", "rename", "properties",
+    "open", "openas", "openwith", "cut", "copy", "share", "paste", "delete", "rename", "properties",
   };
 
   private static readonly HashSet<string> _skipLabels =
       new(StringComparer.OrdinalIgnoreCase) {
-    "open", "open with", "cut", "copy", "paste", "delete", "rename", "properties",
+    "open", "open with", "cut", "copy", "share", "paste", "delete", "rename", "properties",
   };
 
   // ── Acrylic flyout presenter style ───────────────────────────────────────
@@ -133,6 +133,12 @@ internal static class ShellContextMenuFlyout {
     flyout.PrimaryCommands.Add(MakePrimaryButton(
         "\uE8C8", "Copy  Ctrl+C",
         async _ => { flyout.Hide(); await shellListView.CopySelectedToClipboardAsync(); }));
+
+    if (!isMulti && !isFolder) {
+      flyout.PrimaryCommands.Add(MakePrimaryButton(
+          "\uE72D", "Share",
+          async _ => { flyout.Hide(); await shellListView.ShareSelectedAsync(); }));
+    }
 
     flyout.PrimaryCommands.Add(MakePrimaryButton(
         "\uE77F", "Paste  Ctrl+V",

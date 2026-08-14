@@ -24,6 +24,8 @@ using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.Graphics.Imaging;
 using Windows.Storage;
+using Windows.Storage.FileProperties;
+using WinSCP;
 
 namespace BetterExplorer.Controls;
 
@@ -105,6 +107,16 @@ public sealed partial class ShellListView : UserControl {
   /// <summary>Raised whenever the current directory changes.</summary>
   public event EventHandler<string>? PathChanged;
 
+  /// <summary>
+  /// Raised when a navigation has fully finished \u2014 items are in <see cref="Items"/>,
+  /// selection/status bar/folder watcher are set up, AND background icon/thumbnail
+  /// warming (<c>WarmAndPreloadParallelAsync</c>) has completed. Unlike
+  /// <see cref="PathChanged"/> (which fires as soon as items are visible, before
+  /// warming finishes), this is the signal to use when something must wait for
+  /// navigation to be truly done, e.g. hiding a startup loading overlay.
+  /// </summary>
+  public event EventHandler<string>? NavigationCompleted;
+
   /// <summary>Raised when a search starts (non-null query) or is cleared (null).</summary>
   public event EventHandler<string?>? SearchQueryChanged;
 
@@ -115,6 +127,9 @@ public sealed partial class ShellListView : UserControl {
   /// already fired true, so the busy state remains correct.
   /// </summary>
   public event EventHandler<bool>? BusyChanged;
+
+  /// <summary>Raised to surface a transient status/error message to the host.</summary>
+  public event EventHandler<string>? StatusMessage;
 
   /// <summary>Raised whenever the list-view selection changes.</summary>
   public event EventHandler? SelectionChanged;
@@ -139,6 +154,10 @@ public sealed partial class ShellListView : UserControl {
   /// <summary>Returns the full path of the selected folder, or <see langword="null"/> if the selection is not a single folder.</summary>
   public string? SelectedFolderPath =>
       SelectionIsSingleFolder ? (ShellView.SelectedItems[0] as ShellItem)?.FullPath : null;
+
+  /// <summary>Returns the first selected <see cref="ShellItem"/>, or <see langword="null"/> if nothing is selected.</summary>
+  public ShellItem? FirstSelectedItem =>
+      ShellView.SelectedItems.Count > 0 && ShellView.SelectedItems[0] is ShellItem si ? si : null;
 
   // Common raster/vector image extensions recognised by the Picture Tools section.
   private static readonly HashSet<string> s_pictureExts =
@@ -284,14 +303,18 @@ public sealed partial class ShellListView : UserControl {
   private static readonly ConcurrentDictionary<(string Path, uint Size), WriteableBitmap> _thumbCache = new();
   private const int ThumbCacheMaxSize = 300;
 
-  private static readonly HashSet<string> _thumbnailExts = new(StringComparer.OrdinalIgnoreCase)
-  {
-        ".jpg",".jpeg",".png",".gif",".bmp",".tiff",".tif",".webp",".heic",".heif",
-        ".raw",".cr2",".nef",".arw",".dng",
-        ".mp4",".avi",".mkv",".mov",".wmv",".m4v",".flv",".webm",
-        ".pdf"
-    };
-
+  // Deliberately NOT a curated allow-list of "extensions known to have
+  // thumbnails" — that approach silently excluded any type Windows itself CAN
+  // generate a real content thumbnail for but that nobody happened to add here
+  // (Office docs, SVG, PSD, audio with embedded album art, RAW variants not
+  // listed, third-party IThumbnailProvider registrations, etc.). Those items
+  // would show a generic type icon forever and never even attempt a real
+  // fetch — while the tooltip's large-preview fetch (which has no such
+  // allow-list) proved a real thumbnail existed all along. Eligibility is now
+  // "not explicitly icon-only" (see _perFileIconExts) instead of "explicitly
+  // known-good" — the same opt-out model the tooltip preview already used
+  // successfully. SIIGBF.ThumbnailOnly (see ProcessThumbnailQueue) keeps the
+  // cost of a miss low: it fails fast instead of doing real generation work.
   private static readonly HashSet<string> _perFileIconExts = new(StringComparer.OrdinalIgnoreCase)
   {
         ".exe", ".dll", ".lnk", ".ico", ".cpl"
@@ -369,6 +392,31 @@ public sealed partial class ShellListView : UserControl {
     _renameTextBox.KeyDown   += RenameTextBox_KeyDown;
     _renameTextBox.LostFocus += RenameTextBox_LostFocus;
     _renamePopup.Child = _renameTextBox;
+
+    // Only re-clamp when the tooltip would overflow the screen after async
+    // content (icon / infotip / preview) changes its size — do NOT reset the
+    // position from scratch, because that causes a visible "jump" that makes
+    // the filename text appear to shift horizontally.
+    TooltipBorder.SizeChanged += (_, _) => {
+      if (!ItemTooltipPopup.IsOpen) return;
+      double tipW = TooltipBorder.ActualWidth  > 0 ? TooltipBorder.ActualWidth  : 300;
+      double tipH = TooltipBorder.ActualHeight > 0 ? TooltipBorder.ActualHeight : 120;
+      var rootSize = DragSelectGrid.ActualSize;
+      if (rootSize.X <= 0 || rootSize.Y <= 0) return;
+
+      double popupX = ItemTooltipPopup.HorizontalOffset;
+      double popupY = ItemTooltipPopup.VerticalOffset;
+
+      bool changed = false;
+      if (popupX + tipW > rootSize.X) { popupX = Math.Max(0, rootSize.X - tipW - 4); changed = true; }
+      if (popupY + tipH > rootSize.Y) { popupY = Math.Max(0, rootSize.Y - tipH - 4); changed = true; }
+      if (popupX < 0) { popupX = 0; changed = true; }
+      if (popupY < 0) { popupY = 0; changed = true; }
+      if (changed) {
+        ItemTooltipPopup.HorizontalOffset = popupX;
+        ItemTooltipPopup.VerticalOffset   = popupY;
+      }
+    };
   }
 
   private void ShellListView_Loaded(object sender, RoutedEventArgs e) {
@@ -429,6 +477,68 @@ public sealed partial class ShellListView : UserControl {
     // Reposition the name-expansion popup whenever the list area is resized
     // (e.g. window resize, pane splitter drag) so it tracks the selected item.
     DragSelectGrid.SizeChanged += OnDragSelectGridSizeChanged;
+
+    // Wire up item-tooltip pointer events on DragSelectGrid (not ShellView)
+    // with handledEventsToo so they fire even when the DragSelectGrid tunnel
+    // handlers or ListView internals mark events as handled.
+    _tooltipEnteredHandler ??= new PointerEventHandler(OnTooltipPointerEntered);
+    _tooltipExitedHandler  ??= new PointerEventHandler(OnTooltipPointerExited);
+    _tooltipMovedHandler   ??= new PointerEventHandler(OnTooltipPointerMoved);
+    DragSelectGrid.AddHandler(PointerEnteredEvent, _tooltipEnteredHandler, true);
+    DragSelectGrid.AddHandler(PointerExitedEvent,  _tooltipExitedHandler,  true);
+    DragSelectGrid.AddHandler(PointerMovedEvent,   _tooltipMovedHandler,   true);
+
+    // Neither PointerEntered nor PointerMoved fire on first load if the cursor is
+    // already sitting motionless over the control when it appears (e.g. the click
+    // that launched the app, or the tab that was already selected). Proactively
+    // poll the real cursor position once layout has settled so the tooltip still
+    // works without requiring the user to move the mouse first.
+    DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, CheckInitialTooltipHover);
+  }
+
+  /// <summary>
+  /// Detects whether the real screen cursor is already over a list item right after
+  /// load/layout, since no pointer-routed event is guaranteed to fire in that case.
+  /// </summary>
+  private void CheckInitialTooltipHover() {
+    try {
+      if (!GetCursorPos(out var screenPt)) return;
+      var hwnd = GetOwnerHwnd();
+      if (hwnd == IntPtr.Zero) return;
+      var clientPt = screenPt;
+      if (!ScreenToClient(hwnd, ref clientPt)) return;
+
+      double scale = _dpiScale > 0 ? _dpiScale : 1.0;
+      var rootPoint = new Point(clientPt.X / scale, clientPt.Y / scale);
+
+      if (XamlRoot is null) return;
+      var elements = VisualTreeHelper.FindElementsInHostCoordinates(rootPoint, this);
+      ListViewItem? lvi = null;
+      foreach (var el in elements) {
+        if (el is ListViewItem candidate) { lvi = candidate; break; }
+      }
+      if (lvi is null) return;
+      if (ShellView.ItemFromContainer(lvi) is not ShellItem item) return;
+
+      _tooltipPointerInside = true;
+      if (DragSelectGrid.TransformToVisual(this) is { } xform) {
+        var gridOrigin = xform.TransformPoint(new Point(0, 0));
+        _tooltipPointerPos = new Point(rootPoint.X - gridOrigin.X, rootPoint.Y - gridOrigin.Y);
+      }
+      ScheduleTooltipShow(item);
+    } catch { /* best effort */ }
+  }
+
+  [DllImport("user32.dll")]
+  private static extern bool GetCursorPos(out TooltipPOINT lpPoint);
+
+  [DllImport("user32.dll")]
+  private static extern bool ScreenToClient(IntPtr hWnd, ref TooltipPOINT lpPoint);
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct TooltipPOINT {
+    public int X;
+    public int Y;
   }
 
   private void ShellListView_Unloaded(object sender, RoutedEventArgs e) {
@@ -440,6 +550,15 @@ public sealed partial class ShellListView : UserControl {
       root.RemoveHandler(KeyDownEvent, _keyDownHandler);
 
     DragSelectGrid.SizeChanged -= OnDragSelectGridSizeChanged;
+
+    // Unsubscribe tooltip pointer events.
+    if (_tooltipEnteredHandler is not null)
+      DragSelectGrid.RemoveHandler(PointerEnteredEvent, _tooltipEnteredHandler);
+    if (_tooltipExitedHandler is not null)
+      DragSelectGrid.RemoveHandler(PointerExitedEvent,  _tooltipExitedHandler);
+    if (_tooltipMovedHandler is not null)
+      DragSelectGrid.RemoveHandler(PointerMovedEvent,   _tooltipMovedHandler);
+    HideItemTooltip();
   }
 
   private void OnDragSelectGridSizeChanged(object sender, SizeChangedEventArgs e) {
@@ -577,6 +696,34 @@ public sealed partial class ShellListView : UserControl {
         case ShellChangeType.RenameFolder when e.Path is not null && e.Path2 is not null:
           TreeFolderRenamed?.Invoke(this, (e.Path, e.Path2));
           break;
+      }
+
+      // ── Drive update (This PC view only) ──────────────────────────────────
+      // Fires when any drive property changes (icon, label, free space, etc.)
+      // while the user is viewing This PC. Refresh just the affected drive tile
+      // instead of falling through to a full Refresh() that re-enumerates every
+      // drive.  SHCNE_FREESPACE only carries the drive path, but SHCNE_UPDATEITEM
+      // also fires for icon/label changes — both are handled here.
+      if (_isThisPcView && e.Path is not null &&
+          e.EventType is ShellChangeType.FreeSpace or ShellChangeType.UpdateItem or ShellChangeType.UpdateDir) {
+        var driveItem = Items.FirstOrDefault(i =>
+            i.IsDrive && string.Equals(i.FullPath?.TrimEnd('\\', '/'),
+                e.Path.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase));
+        if (driveItem is not null) {
+          // Free-space numbers
+          if (NativeShell.TryGetDriveSpace(e.Path, out var totalBytes, out var usedBytes)) {
+            driveItem.DriveTotalBytes = totalBytes;
+            driveItem.DriveUsedBytes  = usedBytes;
+          }
+          // Icon / label — push through RefreshItem so the tile re-queries the
+          // shell for its current icon (drives keep their own icons, not
+          // content thumbnails, so IconOnly is correct here).
+          if (e.EventType is ShellChangeType.UpdateItem or ShellChangeType.UpdateDir)
+            RefreshItem(driveItem.FullPath!);
+          return;
+        }
+        // Drive not in items yet (DriveAdd not yet enumerated) — fall through
+        // so the full Refresh picks it up.
       }
 
       // For real FS paths FileSystemWatcher handles per-item updates.
@@ -878,6 +1025,9 @@ public sealed partial class ShellListView : UserControl {
     item.SizeBytes    = fresh.SizeBytes;
     item.ItemType     = fresh.ItemType;
     item.IsHidden     = fresh.IsHidden;
+    item.IsShortcut   = fresh.IsShortcut;
+    item.IsLinkItem   = fresh.IsLinkItem;
+    item.IsArchive    = fresh.IsArchive;
 
     if (!refreshThumbnail)
       return;
@@ -892,6 +1042,23 @@ public sealed partial class ShellListView : UserControl {
 
   // ── Navigation API ───────────────────────────────────────────────────────
 
+
+
+
+
+
+
+
+
+  /// <summary>
+  /// Records a navigation target without actually starting the load — used for
+  /// background tabs that shouldn't do any shell work (enumeration, icon/thumbnail
+  /// loading) until the user actually selects them. This only suppresses
+  /// ShellListView_Loaded's C:\ fallback; call <see cref="Navigate"/> with the same
+  /// path later to actually load it.
+  /// </summary>
+  public void ArmPendingNavigation(string path) => _pendingNavigatePath = path;
+
   public async void Navigate(string path) {
     // Normalise: strip surrounding quotes and expand environment variables so that
     // typed paths like %USERPROFILE%\Documents or "C:\Foo" work from the address bar.
@@ -902,16 +1069,44 @@ public sealed partial class ShellListView : UserControl {
     if (string.Equals(path, CurrentPath, StringComparison.OrdinalIgnoreCase))
       return;
 
+    // FTP/SFTP/SCP/FTPS paths bypass the shell pipeline entirely.
+    if (IsFtpPath(path)) {
+      if (_ftpSite is null) return;
+      _backStack.Push(CurrentPath);
+      _forwardStack.Clear();
+      _ = LoadFtpDirectoryAsync(_ftpSite, FtpUrlToRemotePath(path), path);
+      return;
+    }
+
+    // Leaving FTP? Disconnect silently before entering the normal shell path.
+    if (IsFtpMode) DisconnectFtpSilently();
+
+    // Virtual shell folders (This PC, Network, Recycle Bin, …) are addressed as
+    // "::{GUID}" and have no filesystem existence to check against Directory.Exists.
+    // Route them through NavigateToKnownFolder so they get the same known-folder
+    // handling (This PC tile view, Network grouping, etc.) as clicking the
+    // tree-view node does, and so _pendingNavigatePath is set synchronously —
+    // otherwise a concurrent ShellListView_Loaded fallback can race it to C:\.
+    if (path.StartsWith("::", StringComparison.Ordinal)) {
+      var stripped = path.Trim(':', '{', '}');
+      if (Guid.TryParse(stripped, out var folderId)) {
+        NavigateToKnownFolder(folderId);
+        return;
+      }
+    }
+
     // Validate existence off the UI thread — Directory.Exists can block 50-200 ms
     // on network paths, mapped drives, or spinning disks.
     // UNC paths (\\server or \\server\share) are exempt: Directory.Exists returns
-    // false for bare server roots (\\server) even when the server is reachable, and
-    // network latency makes the check unreliable. LoadDirectory handles enumeration
-    // failures gracefully, so we skip the guard for any \\ path.
+    // false for bare server roots (\\server) even when the server is reachable.
     bool isUncPath = path.StartsWith(@"\\", StringComparison.Ordinal);
     if (!isUncPath && !await Task.Run(() => Directory.Exists(path)))
       return;
 
+    // If navigating to the parent folder, preselect the folder we came from —
+    // same behaviour as the Up button.
+    if (IsDirectChild(path, CurrentPath))
+      _pendingSelectPaths = [CurrentPath.TrimEnd('\\', '/')];
     _pendingNavigatePath = path;
     if (!string.IsNullOrEmpty(CurrentPath))
       _backStack.Push(CurrentPath);
@@ -925,8 +1120,12 @@ public sealed partial class ShellListView : UserControl {
     var leaving = CurrentPath;
     _forwardStack.Push(leaving);
     var dest = _backStack.Pop();
-    // If the destination is an ancestor of where we are, pre-select the child
-    // folder we came from so the user sees where they were.
+    if (IsFtpPath(dest)) {
+      if (_ftpSite is not null)
+        _ = LoadFtpDirectoryAsync(_ftpSite, FtpUrlToRemotePath(dest), dest);
+      return;
+    }
+    if (IsFtpMode) DisconnectFtpSilently();
     if (IsDirectChild(dest, leaving))
       _pendingSelectPaths = [leaving.TrimEnd('\\', '/')];
     LoadDirectory(dest);
@@ -938,13 +1137,29 @@ public sealed partial class ShellListView : UserControl {
     var leaving = CurrentPath;
     _backStack.Push(leaving);
     var dest = _forwardStack.Pop();
-    // Pre-select the child we're going back into when returning to a subfolder.
+    if (IsFtpPath(dest)) {
+      if (_ftpSite is not null)
+        _ = LoadFtpDirectoryAsync(_ftpSite, FtpUrlToRemotePath(dest), dest);
+      return;
+    }
+    if (IsFtpMode) DisconnectFtpSilently();
     if (IsDirectChild(leaving, dest))
       _pendingSelectPaths = [dest.TrimEnd('\\', '/')];
     LoadDirectory(dest);
   }
 
   public void GoUp() {
+    if (IsFtpMode) {
+      var parentUrl = FtpUrlParent(CurrentPath);
+      if (parentUrl is null)
+        DisconnectFtp();
+      else {
+        _backStack.Push(CurrentPath);
+        _forwardStack.Clear();
+        _ = LoadFtpDirectoryAsync(_ftpSite!, FtpUrlToRemotePath(parentUrl), parentUrl);
+      }
+      return;
+    }
     var fromPath = CurrentPath.TrimEnd('\\', '/');
     var (fsPath, knownFolderGuid) = NativeShell.TryGetShellParent(CurrentPath);
     if (fsPath is not null) {
@@ -954,6 +1169,25 @@ public sealed partial class ShellListView : UserControl {
       _pendingSelectPaths = [fromPath];
       NavigateToKnownFolder(knownFolderGuid);
     }
+  }
+
+  public void Refresh() {
+    if (string.IsNullOrEmpty(CurrentPath))
+      return;
+    if (IsFtpMode) {
+      _ = LoadFtpDirectoryAsync(_ftpSite!, FtpUrlToRemotePath(CurrentPath), CurrentPath);
+      return;
+    }
+    CollapseAllNameExpansions();
+    _pendingSelectPaths = ShellView.SelectedItems
+        .OfType<ShellItem>()
+        .Select(i => i.FullPath)
+        .ToList();
+    if (_currentKnownFolderId != Guid.Empty) {
+      NavigateToKnownFolder(_currentKnownFolderId, forceReload: true);
+      return;
+    }
+    LoadDirectory(CurrentPath);
   }
 
   private static bool IsWslPath(string path) =>
@@ -971,22 +1205,7 @@ public sealed partial class ShellListView : UserControl {
         || c.StartsWith(p + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
   }
 
-  public void Refresh() {
-    if (string.IsNullOrEmpty(CurrentPath))
-      return;
-    CollapseAllNameExpansions();
-    _pendingSelectPaths = ShellView.SelectedItems
-        .OfType<ShellItem>()
-        .Select(i => i.FullPath)
-        .ToList();
-    // Known-folder views (Network, This PC) must be re-enumerated via
-    // NavigateToKnownFolder — LoadDirectory does not handle virtual namespaces.
-    if (_currentKnownFolderId != Guid.Empty) {
-      NavigateToKnownFolder(_currentKnownFolderId, forceReload: true);
-      return;
-    }
-    LoadDirectory(CurrentPath);
-  }
+
 
   // ── Show-hidden / show-extensions helpers ──────────────────────────────
 
@@ -1231,6 +1450,102 @@ public sealed partial class ShellListView : UserControl {
     BusyChanged?.Invoke(this, false);
   }
 
+  /// <summary>
+  /// Searches the entire system (all indexed locations) using the configured
+  /// search engine.  Results are streamed into the ListView in batches.
+  /// Passing an empty or whitespace query clears the search and restores the folder.
+  /// </summary>
+  public async void SearchGlobal(string query) {
+    if (string.IsNullOrWhiteSpace(query)) {
+      ClearSearch();
+      return;
+    }
+
+    var dispatcherQueue = DispatcherQueue;
+    if (dispatcherQueue == null) return;
+
+    var oldSearchCts = _searchCts;
+    _searchCts = new CancellationTokenSource();
+    CancelAndDisposeAsync(oldSearchCts);
+    var ct = _searchCts.Token;
+
+    var wasAlreadySearching = _isSearchActive;
+    _isSearchActive = true;
+    if (!wasAlreadySearching && !string.IsNullOrEmpty(CurrentPath)) {
+      _backStack.Push(CurrentPath);
+      _forwardStack.Clear();
+      CanGoBack    = true;
+      CanGoForward = false;
+    }
+    _groupColumn = string.Empty;
+    ViewMode = ShellViewMode.Details;
+
+    SearchQueryChanged?.Invoke(this, query);
+    BusyChanged?.Invoke(this, true);
+    CollapseAllNameExpansions();
+
+    var oldSearchNavCts = _navCts;
+    _navCts = new CancellationTokenSource();
+    CancelAndDisposeAsync(oldSearchNavCts);
+    RestartThumbnailWorker();
+    ReleaseItemBitmaps();
+    Items.Clear();
+    if (ShellView.ItemsSource != Items)
+      ShellView.ItemsSource = Items;
+
+    var size = PhysicalSize(ThumbnailSizeForMode(ViewMode));
+    const int batchSize = 10;
+
+    bool useEverything = SettingsPage.SearchEngine == "Everything"
+                         && EverythingSearch.IsAvailable();
+
+    var reader = useEverything
+        ? EverythingSearch.SearchGlobalStreamAsync(query, ct)
+        : NativeShell.SearchGlobalStreamAsync(query, ct);
+    var buffer = new List<ShellItem>(batchSize);
+
+    try {
+      await foreach (var item in reader.ReadAllAsync(ct)) {
+        buffer.Add(item);
+        if (buffer.Count >= batchSize) {
+          var batchToFlush = buffer.ToList();
+          buffer.Clear();
+          var tcs = new TaskCompletionSource();
+          dispatcherQueue.TryEnqueue(async () => {
+            try { await FlushSearchBatchAsync(batchToFlush, size, ct); }
+            catch (Exception ex) { tcs.TrySetException(ex); return; }
+            tcs.TrySetResult();
+          });
+          await tcs.Task;
+        }
+      }
+
+      if (buffer.Count > 0) {
+        var batchToFlush = buffer.ToList();
+        buffer.Clear();
+        var tcs = new TaskCompletionSource();
+        dispatcherQueue.TryEnqueue(async () => {
+          try { await FlushSearchBatchAsync(batchToFlush, size, ct); }
+          catch (Exception ex) { tcs.TrySetException(ex); return; }
+          tcs.TrySetResult();
+        });
+        await tcs.Task;
+      }
+    } catch (OperationCanceledException) {
+      return;
+    }
+
+    if (ct.IsCancellationRequested)
+      return;
+
+    var sorted = SortItems(Items.ToList());
+    Items.Clear();
+    Items.AddRange(sorted);
+    ApplyGrouping();
+    UpdateSortIndicators();
+    BusyChanged?.Invoke(this, false);
+  }
+
   /// <summary>Clears any active search and reloads the current folder.</summary>
   public void ClearSearch() {
     if (!_isSearchActive)
@@ -1369,6 +1684,11 @@ public sealed partial class ShellListView : UserControl {
 
     BusyChanged?.Invoke(this, true);
 
+    // If navigating to the parent known folder, preselect the folder we came from —
+    // same behaviour as the Up button.
+    if (!string.IsNullOrEmpty(CurrentPath) && CurrentPath != virtualPath)
+      _pendingSelectPaths = [CurrentPath.TrimEnd('\\', '/')];
+
     // ── Synchronous cleanup (runs while the tasks above are in-flight) ────────
     if (!string.IsNullOrEmpty(CurrentPath))
       _backStack.Push(CurrentPath);
@@ -1475,6 +1795,7 @@ public sealed partial class ShellListView : UserControl {
         await WarmAndPreloadParallelAsync(items, viewportSlice, size, ct);
       } catch (OperationCanceledException) { }
       diagKf.Finish("WarmAndPreload");
+      NavigationCompleted?.Invoke(this, virtualPath);
       return;
     }
 
@@ -1490,6 +1811,7 @@ public sealed partial class ShellListView : UserControl {
     UpdateStatusBar(0);
     StartFolderWatcher(virtualPath);
     diagKf.Finish("(empty folder)");
+    NavigationCompleted?.Invoke(this, virtualPath);
   }
 
   // Re-enumerates the Network folder and merges any newly-discovered items into the
@@ -1682,6 +2004,10 @@ public sealed partial class ShellListView : UserControl {
       if (!IsIconOnlyMode(ViewMode)) {
         foreach (var item in kfItems) {
           if (item.HasRealThumbnail) continue;
+          // Cloud-backed items may have stale type-icon entries in _thumbCache from
+          // previous visits — never stamp them; they need fresh thumbnails via the
+          // cloud pipeline (SHCNE_UPDATEITEM invalidation + ResizeToFit).
+          if (NativeShell.IsCloudItem(item.FullPath)) continue;
           if (_thumbCache.TryGetValue((item.FullPath, kfSize), out var cached)) {
             item.Icon = cached;
             item.HasRealThumbnail = true;
@@ -1718,6 +2044,7 @@ public sealed partial class ShellListView : UserControl {
         await WarmAndPreloadParallelAsync(kfItems, kfSlice, kfSize, ct);
       } catch (OperationCanceledException) { }
       diag.Finish("WarmAndPreload (virtual)");
+      NavigationCompleted?.Invoke(this, path);
       return;
     }
 
@@ -1803,6 +2130,7 @@ public sealed partial class ShellListView : UserControl {
       if (!IsIconOnlyMode(ViewMode)) {
         foreach (var item in uncSorted) {
           if (item.HasRealThumbnail) continue;
+          if (NativeShell.IsCloudItem(item.FullPath)) continue;
           if (_thumbCache.TryGetValue((item.FullPath, uncSize), out var cached)) {
             item.Icon = cached;
             item.HasRealThumbnail = true;
@@ -1836,6 +2164,7 @@ public sealed partial class ShellListView : UserControl {
         await WarmAndPreloadParallelAsync(uncSorted, uncSlice, uncSize, ct);
       } catch (OperationCanceledException) { }
       diag.Finish("WarmAndPreload (UNC)");
+      NavigationCompleted?.Invoke(this, path);
       return;
     }
 
@@ -1913,6 +2242,7 @@ public sealed partial class ShellListView : UserControl {
     if (!IsIconOnlyMode(ViewMode)) {
       foreach (var item in allItems) {
         if (item.HasRealThumbnail) continue;
+        if (NativeShell.IsCloudItem(item.FullPath) && item.IsFolder) continue;
         if (_thumbCache.TryGetValue((item.FullPath, size), out var cached)) {
           item.Icon = cached;
           item.HasRealThumbnail = true;
@@ -1952,6 +2282,7 @@ public sealed partial class ShellListView : UserControl {
       await WarmAndPreloadParallelAsync(allItems, viewportSlice, size, ct);
     } catch (OperationCanceledException) { }
     diag.Finish("WarmAndPreload");
+    NavigationCompleted?.Invoke(this, path);
     ClearRAM();
   }
 
@@ -2214,8 +2545,9 @@ public sealed partial class ShellListView : UserControl {
   /// that do not yet have a real thumbnail, so offscreen items are loaded on demand.
   /// </summary>
   private void OnScrollViewerViewChanged(object? sender, ScrollViewerViewChangedEventArgs e) {
-    // Close the name-expansion popup immediately when scrolling starts.
+    // Close the name-expansion popup and item tooltip immediately when scrolling starts.
     CollapseAllNameExpansions();
+    CloseItemTooltipImmediate();
 
     // Skip intermediate animation frames — only enqueue thumbnails once scrolling settles.
     if (e.IsIntermediate)
@@ -2229,9 +2561,10 @@ public sealed partial class ShellListView : UserControl {
       if (item.HasRealThumbnail)
         continue;
       var ext = TypeIconKey(item);
+      bool isPerFile = _perFileIconExts.Contains(ext);
       bool canUpgrade = !IsIconOnlyMode(ViewMode) && !IsPerItemFolder(item) &&
-                        (item.IsFolder || _thumbnailExts.Contains(ext));
-      if (!canUpgrade && !_perFileIconExts.Contains(ext))
+                        (item.IsFolder || !isPerFile);
+      if (!canUpgrade && !isPerFile)
         continue;
       _thumbQueue.TryAdd((item, size, 0));
     }
@@ -2270,8 +2603,7 @@ public sealed partial class ShellListView : UserControl {
       // worker via IconOnly — exclude them from the ResizeToFit cache preload.
       if (IsPerItemFolder(item))
         continue;
-      if (!item.IsFolder && !_thumbnailExts.Contains(ext))
-        continue;
+
       paths[i] = item.FullPath;
     }
 
@@ -2346,8 +2678,10 @@ public sealed partial class ShellListView : UserControl {
 
       // Thumb-preload: mark eligible viewport items.
       if (doPreload && viewportIndex!.TryGetValue(item, out int vi)) {
+        // Cloud-backed items may have stale shell cache entries — skip them so
+        // they go through LoadCloudThumbnailAsync with the Storage API.
         if (!item.HasRealThumbnail && !perFile && !IsPerItemFolder(item) &&
-            (item.IsFolder || _thumbnailExts.Contains(ext)))
+            !NativeShell.IsCloudItem(item.FullPath))
           thumbPaths![vi] = item.FullPath;
       }
     }
@@ -2688,6 +3022,19 @@ public sealed partial class ShellListView : UserControl {
     if (item == null || string.IsNullOrEmpty(item.FullPath))
       return;
 
+    // Fix selection / drop-target state so recycled containers don't briefly
+    // flash stale highlight from their previous item.
+    args.ItemContainer.IsSelected = item.IsSelected;
+    item.IsDropTarget = false;
+    SetContainerSelectionBorder(args.ItemContainer, item.IsSelected);
+    SetContainerDropTarget(args.ItemContainer, false);
+
+    // FTP items have no shell icons, thumbnails, or overlay icons.
+    // Guard on item.IsFtpItem (set at construction time) rather than IsFtpMode
+    // so the guard is stable even during the brief window when _ftpSite is null
+    // inside Task.Run while the session is being opened.
+    if (item.IsFtpItem) return;
+
     var size = PhysicalSize(ThumbnailSizeForMode(ViewMode));
     var ext = TypeIconKey(item);
     var ct = _thumbCts.Token;
@@ -2710,13 +3057,6 @@ public sealed partial class ShellListView : UserControl {
       // else: leave Icon as-is (null or stale); worker will fetch the correct size
     }
 
-    // Fix selection / drop-target state so recycled containers don't briefly
-    // flash stale highlight from their previous item.
-    args.ItemContainer.IsSelected = item.IsSelected;
-    item.IsDropTarget = false;
-    SetContainerSelectionBorder(args.ItemContainer, item.IsSelected);
-    SetContainerDropTarget(args.ItemContainer, false);
-
     // Overlay icons are independent of whether a real thumbnail is already loaded.
     // Enqueue before the HasRealThumbnail early-return so folders whose thumbnails
     // were pre-populated by PreloadCachedThumbnailsAsync still get their overlays.
@@ -2727,15 +3067,23 @@ public sealed partial class ShellListView : UserControl {
     if (item.HasRealThumbnail)
       return;
 
-    bool canUpgrade = !IsIconOnlyMode(ViewMode) && !isPerItemFolder &&
-                      (item.IsFolder || _thumbnailExts.Contains(ext));
     bool isPerFile = _perFileIconExts.Contains(ext);
+    bool canUpgrade = !IsIconOnlyMode(ViewMode) && !isPerItemFolder &&
+                      (item.IsFolder || !isPerFile);
 
-    // isFolderPerItem goes to the dedicated fast icon queue so it is never blocked
-    // behind slow thumbnail (ResizeToFit) work in _thumbQueue.
-    if (isFolderPerItem)
+    // isFolderPerItem goes to the dedicated fast icon queue first so a placeholder
+    // is never blocked behind slow thumbnail (ResizeToFit) work in _thumbQueue.
+    // It is ALSO enqueued to _thumbQueue so folders that can actually generate a
+    // content thumbnail (e.g. folders containing images) get upgraded from the
+    // generic folder icon once the background ResizeToFit fetch completes —
+    // otherwise folder thumbnails would never be requested on first load.
+    // Exception: cloud-backed folders need the full thumbnail pipeline (which
+    // invalidates stale shell cache entries and re-fetches via ResizeToFit),
+    // so they go through _thumbQueue only.
+    if (isFolderPerItem && !NativeShell.IsCloudItem(item.FullPath)) {
       _iconQueue.TryAdd((item, size));
-    else if (canUpgrade || isPerFile || item.Icon == null)
+      _thumbQueue.TryAdd((item, size, 0));
+    } else if (canUpgrade || isPerFile || item.Icon == null)
       _thumbQueue.TryAdd((item, size, 0));
   }
 
@@ -2774,9 +3122,13 @@ public sealed partial class ShellListView : UserControl {
     var iconQueue    = _iconQueue;
     var ct           = _thumbCts.Token;
     var dq           = DispatcherQueue;
+    // ViewMode is a DependencyProperty and must only be read on the UI thread;
+    // reading it from the background worker threads below throws a COMException
+    // (RPC_E_WRONG_THREAD). Capture the icon-only flag here instead.
+    var iconOnlyMode = IsIconOnlyMode(ViewMode);
 
     for (var i = 0; i < ThumbConcurrency; i++) {
-      var t = new Thread(() => ProcessThumbnailQueue(thumbQueue, dq, ct)) {
+      var t = new Thread(() => ProcessThumbnailQueue(thumbQueue, dq, ct, iconOnlyMode)) {
         IsBackground = true,
         Name         = $"ThumbWorker-{i}"
       };
@@ -2800,7 +3152,7 @@ public sealed partial class ShellListView : UserControl {
 
   private void ProcessThumbnailQueue(
       BlockingCollection<(ShellItem Item, uint Size, int Retry)> queue,
-      DispatcherQueue dq, CancellationToken ct) {
+      DispatcherQueue dq, CancellationToken ct, bool iconOnlyMode) {
     // All pixel/COM work runs on this background thread.
     // Only the final WriteableBitmap creation + item.Icon assignment is
     // dispatched back to the UI thread at Low priority.
@@ -2811,8 +3163,8 @@ public sealed partial class ShellListView : UserControl {
 
         var ext = TypeIconKey(item);
         bool isPerItemFolder = IsPerItemFolder(item);
-        bool canUpgrade = !isPerItemFolder && (item.IsFolder || _thumbnailExts.Contains(ext));
         bool isPerFile = _perFileIconExts.Contains(ext);
+        bool canUpgrade = !isPerItemFolder && (item.IsFolder || !isPerFile);
 
         try {
           if (!canUpgrade) {
@@ -2834,12 +3186,12 @@ public sealed partial class ShellListView : UserControl {
                 var wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
                 if (wb == null) return;
                 if (!isPerFile) _typeIconCache[(capExt, capSize)] = wb;
-                if (!item.HasRealThumbnail) item.Icon = wb;
+                if (!item.HasRealThumbnail && !item.IsFtpItem) item.Icon = wb;
               });
             } else if (_typeIconCache.TryGetValue((ext, size), out var cached)) {
               var capCached = cached;
               dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
-                if (!item.HasRealThumbnail) item.Icon = capCached;
+                if (!item.HasRealThumbnail && !item.IsFtpItem) item.Icon = capCached;
               });
             }
             continue;
@@ -2848,15 +3200,63 @@ public sealed partial class ShellListView : UserControl {
           // ── Thumbnail-eligible items ──────────────────────────────────────
           byte[]? pixels; int pw, ph; bool isPending;
 
-          if (NativeShell.IsCloudOnlyItem(item.FullPath)) {
-            // Fire an independent async task (Storage API needs async) governed
-            // by its own high-concurrency semaphore.
+          // For 16×16 views (Details/List) use IconOnly instead of content thumbnails
+          if (iconOnlyMode) {
+            byte[]? px = null;
+            int w = 0, h = 0;
+            if (!_typeIconCache.ContainsKey((ext, size)) || isPerFile) {
+              (px, w, h, _) = NativeShell.GetShellImagePixelsSync(
+                  item.FullPath, size, NativeShell.SIIGBF.IconOnly, ct);
+            }
+            if (ct.IsCancellationRequested) continue;
+            if (px != null) {
+              var capPx = px; var capW = w; var capH = h;
+              var capExt = ext; var capSize = size;
+              dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
+                if (ct.IsCancellationRequested) return;
+                var wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
+                if (wb == null) return;
+                if (!isPerFile) _typeIconCache[(capExt, capSize)] = wb;
+                if (!item.HasRealThumbnail && !item.IsFtpItem) item.Icon = wb;
+              });
+            } else if (_typeIconCache.TryGetValue((ext, size), out var cached)) {
+              var capCached = cached;
+              dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
+                if (!item.HasRealThumbnail && !item.IsFtpItem) item.Icon = capCached;
+              });
+            }
+            continue;
+          }
+
+          if (NativeShell.IsCloudItem(item.FullPath)) {
+            // Cloud-backed items (including pinned/locally-available OneDrive folders)
+            // go through the cloud pipeline which invalidates the stale shell thumbnail
+            // cache before re-fetching.  Evict stale in-process cache entries first so
+            // nothing restamps the old icon while the async fetch is in flight.
+            var folderKey = TypeIconKey(item);
+            lock (_typeIconCache) {
+              var keysToRemove = _typeIconCache.Keys.Where(k => k.Ext == folderKey).ToList();
+              foreach (var k in keysToRemove) _typeIconCache.Remove(k);
+            }
+            _thumbCache.TryRemove((item.FullPath, size), out _);
+            item.HasRealThumbnail = false;
+
             _ = LoadCloudThumbnailAsync(item, size, retry, dq, ct);
             continue;
           } else {
+            // SIIGBF.ResizeToFit (0x00) is documented to silently substitute the
+            // generic per-type icon — upscaled to the requested size — when no
+            // real thumbnail exists yet, instead of failing or returning
+            // E_PENDING. That icon is then indistinguishable from a genuine
+            // thumbnail, so it gets wrongly stamped as HasRealThumbnail=true and
+            // never re-requested even after a real thumbnail becomes available
+            // (e.g. once a cloud file finishes downloading). SIIGBF.ThumbnailOnly
+            // fails outright instead of substituting an icon — same fix already
+            // applied in FetchCloudTooltipPreviewAsync — so any non-null result
+            // here is guaranteed to be real content.
             int hr;
             (pixels, pw, ph, hr) = NativeShell.GetShellImagePixelsSync(
-                item.FullPath, size, NativeShell.SIIGBF.ResizeToFit, ct);
+                item.FullPath, size, NativeShell.SIIGBF.ThumbnailOnly, ct);
             isPending = (hr == NativeShell.E_PENDING);
           }
 
@@ -2867,7 +3267,7 @@ public sealed partial class ShellListView : UserControl {
             dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
               if (ct.IsCancellationRequested) return;
               var wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
-              if (wb != null) { item.Icon = wb; item.HasRealThumbnail = true; }
+              if (wb != null && !item.IsFtpItem) { item.Icon = wb; item.HasRealThumbnail = true; }
             });
           } else if (isPending || pixels == null) {
             if (retry < CloudThumbRetryMax) {
@@ -2913,25 +3313,34 @@ public sealed partial class ShellListView : UserControl {
       if (ct.IsCancellationRequested || item.HasRealThumbnail) return;
 
       // ── 3. Fast shell-cache probe (no broker call, no file download) ───────
-      var (shellPx, shellW, shellH, _) = await NativeShell.GetShellImagePixelsAsync(
-          item.FullPath, size, NativeShell.SIIGBF.CacheOnly_Thumb, ct).ConfigureAwait(false);
-
       byte[]? finalPx = null;
       int finalW = 0, finalH = 0;
 
-      if (shellPx != null && !ct.IsCancellationRequested) {
-        if (shellW >= (int)size || shellH >= (int)size) {
-          // Shell cache already has a full-size result — skip Storage API entirely.
-          finalPx = shellPx; finalW = shellW; finalH = shellH;
-        } else {
-          // Shell has a small placeholder — show it immediately as a low-res preview
-          // so the item is never blank while the full-size version loads below.
-          var capSmallPx = shellPx; var capSmallW = shellW; var capSmallH = shellH;
-          dq.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
-            if (ct.IsCancellationRequested || item.HasRealThumbnail) return;
-            var wb = NativeShell.PixelsToBitmapSync(capSmallPx, capSmallW, capSmallH);
-            if (wb != null && !item.HasRealThumbnail) item.Icon = wb;
-          });
+      if (item.IsFolder) {
+        // Cloud-backed folders: skip the shell cache entirely.  Even after
+        // SHCNE_UPDATEITEM invalidation, the shell may still return a stale
+        // generic type icon from the system image list before the OneDrive
+        // broker has finished regenerating.  If that stale entry gets stored
+        // in _thumbCache, it permanently blocks real thumbnail loading.
+        // Go straight to the Storage API which queries OneDrive directly.
+      } else {
+        var (shellPx, shellW, shellH, _) = await NativeShell.GetShellImagePixelsAsync(
+            item.FullPath, size, NativeShell.SIIGBF.CacheOnly_Thumb, ct).ConfigureAwait(false);
+
+        if (shellPx != null && !ct.IsCancellationRequested) {
+          if (shellW >= (int)size || shellH >= (int)size) {
+            // Shell cache already has a full-size result — skip Storage API entirely.
+            finalPx = shellPx; finalW = shellW; finalH = shellH;
+          } else {
+            // Shell has a small placeholder — show it immediately as a low-res preview
+            // so the item is never blank while the full-size version loads below.
+            var capSmallPx = shellPx; var capSmallW = shellW; var capSmallH = shellH;
+            dq.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => {
+              if (ct.IsCancellationRequested || item.HasRealThumbnail) return;
+              var wb = NativeShell.PixelsToBitmapSync(capSmallPx, capSmallW, capSmallH);
+              if (wb != null && !item.HasRealThumbnail) item.Icon = wb;
+            });
+          }
         }
       }
 
@@ -2999,7 +3408,7 @@ public sealed partial class ShellListView : UserControl {
           if (_thumbCache.TryGetValue((item.FullPath, size), out var hit)) {
             var capHit = hit;
             dq.TryEnqueue(DispatcherQueuePriority.Low, () => {
-              if (!item.HasRealThumbnail) item.Icon = capHit;
+              if (!item.HasRealThumbnail && !item.IsFtpItem) item.Icon = capHit;
             });
             continue;
           }
@@ -3017,7 +3426,7 @@ public sealed partial class ShellListView : UserControl {
               var wb = NativeShell.PixelsToBitmapSync(capPx, capW, capH);
               if (wb == null) return;
               _thumbCache[(capPath, capSize)] = wb;
-              if (!item.HasRealThumbnail) item.Icon = wb;
+              if (!item.HasRealThumbnail && !item.IsFtpItem) item.Icon = wb;
             });
           }
         } catch (OperationCanceledException) { break; } catch { }
@@ -3059,12 +3468,25 @@ public sealed partial class ShellListView : UserControl {
   // ── Double-tap navigation ─────────────────────────────────────────────────
 
   private void ShellView_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e) {
+    // Navigating into a folder or opening a file should close the item tooltip.
+    CloseItemTooltipImmediate();
+
     var dep = e.OriginalSource as DependencyObject;
     while (dep is not null and not ListViewItem)
       dep = VisualTreeHelper.GetParent(dep);
 
     if (dep is not ListViewItem { Content: ShellItem item })
       return;
+
+    if (IsFtpMode) {
+      // In FTP mode navigate into sub-folders; files are ignored (no shell open).
+      if (item.IsFolder) {
+        _backStack.Push(CurrentPath);
+        _forwardStack.Clear();
+        _ = LoadFtpDirectoryAsync(_ftpSite!, FtpUrlToRemotePath(item.FullPath), item.FullPath);
+      }
+      return;
+    }
 
     if (item.IsFolder) {
       // The item is known to exist — skip Navigate's async Directory.Exists round-trip
@@ -3088,6 +3510,10 @@ public sealed partial class ShellListView : UserControl {
   // ── Context menu (right-tap) ──────────────────────────────────────────────
 
   private void OnShellViewRightTapped(object sender, RightTappedRoutedEventArgs e) {
+    // Right-click should close the item tooltip immediately, whether it's already
+    // shown or merely scheduled to appear after the hover delay.
+    CloseItemTooltipImmediate();
+
     // Walk up to find the tapped ListViewItem, if any.
     var dep = e.OriginalSource as DependencyObject;
     while (dep is not null and not ListViewItem)
@@ -3108,30 +3534,25 @@ public sealed partial class ShellListView : UserControl {
         ShellView.SelectedItems.Add(tappedItem);
       }
 
-      var selected = ShellView.SelectedItems.OfType<ShellItem>().ToList();
-      if (selected.Count > 0) {
-        var paths = selected.Select(i => i.FullPath).ToList();
-        _ = ShellContextMenuFlyout.ShowAsync(
-            paths,
-            CurrentPath,
-            hwnd,
-            point,
-            DragSelectGrid,
-            this,
-            extendedVerbs);
+      if (IsFtpMode) {
+        ShowFtpItemContextMenu(tappedItem, point);
+      } else {
+        var selected = ShellView.SelectedItems.OfType<ShellItem>().ToList();
+        if (selected.Count > 0) {
+          var paths = selected.Select(i => i.FullPath).ToList();
+          _ = ShellContextMenuFlyout.ShowAsync(
+              paths, CurrentPath, hwnd, point, DragSelectGrid, this, extendedVerbs);
+        }
       }
     } else {
       // ── Background (empty-space) context menu ─────────────────────────
       ShellView.SelectedItems.Clear();
 
-      if (!string.IsNullOrEmpty(CurrentPath)) {
+      if (IsFtpMode) {
+        ShowFtpBackgroundContextMenu(point);
+      } else if (!string.IsNullOrEmpty(CurrentPath)) {
         _ = ShellContextMenuFlyout.ShowBackgroundAsync(
-            CurrentPath,
-            hwnd,
-            point,
-            DragSelectGrid,
-            this,
-            extendedVerbs);
+            CurrentPath, hwnd, point, DragSelectGrid, this, extendedVerbs);
       }
     }
 
@@ -3235,6 +3656,10 @@ public sealed partial class ShellListView : UserControl {
   }
 
   private void OnDragSelectPointerPressed(object sender, PointerRoutedEventArgs e) {
+    // Any click should close the item tooltip immediately, whether it's already
+    // shown or merely scheduled to appear after the hover delay.
+    CloseItemTooltipImmediate();
+
     // If a rename is in progress, a click anywhere outside the textbox should commit it.
     if (_renameActive)
       CommitRename();
@@ -4341,6 +4766,7 @@ public sealed partial class ShellListView : UserControl {
   private void OnShellViewDragOver(object sender, DragEventArgs e) {
     if (!e.DataView.Contains(StandardDataFormats.StorageItems)) {
       e.AcceptedOperation = DataPackageOperation.None;
+      e.Handled = true;
       return;
     }
 
@@ -4684,8 +5110,9 @@ public sealed partial class ShellListView : UserControl {
     var optimisticPath = System.IO.Path.Combine(
         System.IO.Path.GetDirectoryName(item.FullPath) ?? string.Empty, newName);
 
-    item.Name     = newName;
-    item.FullPath = optimisticPath;
+    item.Name        = newName;
+    item.FullPath    = optimisticPath;
+    item.DisplayName = BuildDisplayName(item);
     UpdateNameExpansion();
     ShellView.Focus(FocusState.Programmatic);
 
@@ -4699,21 +5126,24 @@ public sealed partial class ShellListView : UserControl {
         // Update to the authoritative final path/name if they differ.
         var finalName = System.IO.Path.GetFileName(newPath);
         if (!string.Equals(item.FullPath, newPath, StringComparison.OrdinalIgnoreCase)) {
-          item.FullPath = newPath;
-          item.Name     = finalName;
+          item.FullPath    = newPath;
+          item.Name        = finalName;
+          item.DisplayName = BuildDisplayName(item);
           UpdateNameExpansion();
         }
         ApplyGrouping();
       } else {
         // Operation failed — roll back to the original name.
-        item.Name     = oldName;
-        item.FullPath = oldFullPath;
+        item.Name        = oldName;
+        item.FullPath    = oldFullPath;
+        item.DisplayName = BuildDisplayName(item);
         UpdateNameExpansion();
       }
     } catch {
       // Roll back on exception.
-      item.Name     = oldName;
-      item.FullPath = oldFullPath;
+      item.Name        = oldName;
+      item.FullPath    = oldFullPath;
+      item.DisplayName = BuildDisplayName(item);
       UpdateNameExpansion();
     }
   }
@@ -4786,8 +5216,10 @@ public sealed partial class ShellListView : UserControl {
 
 
   private async void OnShellViewDrop(object sender, DragEventArgs e) {
-    if (!e.DataView.Contains(StandardDataFormats.StorageItems))
+    if (!e.DataView.Contains(StandardDataFormats.StorageItems)) {
+      e.Handled = true;
       return;
+    }
 
     var deferral = e.GetDeferral();
 
@@ -5019,10 +5451,12 @@ public sealed partial class ShellListView : UserControl {
   }
 
   private IntPtr GetOwnerHwnd() {
+    // SettingsPage caches a delegate that captures the real Window instance,
+    // because Microsoft.UI.Xaml.Window.Current is always null inside UserControls
+    // in WinUI 3 / Windows App SDK.
     try {
-      var window = Microsoft.UI.Xaml.Window.Current;
-      if (window is not null)
-        return WinRT.Interop.WindowNative.GetWindowHandle(window);
+      if (SettingsPage.GetMainWindowHandle is { } getter)
+        return getter();
     } catch { }
     return IntPtr.Zero;
   }
@@ -5127,6 +5561,72 @@ public sealed partial class ShellListView : UserControl {
     }
   }
 
+  // ── COM interop interfaces for ShareUI ─────────────────────────────────────
+
+  private static readonly Guid _dtmIid = new(0xa5caee9b, 0x8708, 0x49d1, 0x8d, 0x36, 0x67, 0xd2, 0x5a, 0x8d, 0xa0, 0x0c);
+
+  [ComImport]
+  [Guid("3A3DCD6C-3EAB-43DC-BCDE-45671CE800C8")]
+  [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  private interface IDataTransferManagerInterop {
+    void GetForWindow([In] IntPtr appWindow, [In] ref Guid riid, [Out] out IntPtr pDataTransferManager);
+    void ShowShareUIForWindow(IntPtr appWindow);
+  }
+
+  /// <summary>
+  /// Invokes the Windows ShareUI panel for the selected file.
+  /// Only works with a single file (not folders or multi-selection).
+  /// </summary>
+  public async Task ShareSelectedAsync() {
+    var selected = ShellView.SelectedItems.OfType<ShellItem>().ToList();
+    if (selected.Count != 1)
+      return;
+    var item = selected[0];
+    if (item.IsFolder)
+      return;
+
+    var hwnd = GetOwnerHwnd();
+    if (hwnd == IntPtr.Zero)
+      return;
+
+    try {
+      var storageFile = await StorageFile.GetFileFromPathAsync(item.FullPath);
+
+      var interop = DataTransferManager.As<IDataTransferManagerInterop>();
+
+      var iid = _dtmIid;
+      interop.GetForWindow(hwnd, ref iid, out var dtmPtr);
+      if (dtmPtr == IntPtr.Zero)
+        return;
+
+      var dtm = WinRT.MarshalInterface<DataTransferManager>.FromAbi(dtmPtr);
+
+      TaskCompletionSource tcs = new();
+      bool handlerCalled = false;
+
+      void OnDataRequested(DataTransferManager sender, DataRequestedEventArgs args) {
+        if (handlerCalled) return;
+        handlerCalled = true;
+        var request = args.Request;
+        request.Data.SetStorageItems(new[] { storageFile });
+        request.Data.Properties.Title = storageFile.Name;
+        request.Data.Properties.Description = $"Share {storageFile.Name}";
+        tcs.TrySetResult();
+      }
+
+      dtm.DataRequested += OnDataRequested;
+      interop.ShowShareUIForWindow(hwnd);
+
+      // Wait for DataRequested to fire so the share contract data is set.
+      await tcs.Task;
+
+      dtm.DataRequested -= OnDataRequested;
+    } catch (Exception ex) {
+      System.Diagnostics.Debug.WriteLine(
+          $"[ShellListView] ShareSelectedAsync failed: {ex.Message}");
+    }
+  }
+
   /// <summary>
   /// Surgically removes items that were moved away and inserts items that
   /// arrived in <see cref="CurrentPath"/> — no full directory reload.
@@ -5166,16 +5666,20 @@ public sealed partial class ShellListView : UserControl {
     try {
       if (Directory.Exists(path)) {
         var di = new DirectoryInfo(path);
+        var attrs = di.Attributes;
         return new ShellItem {
           Name = di.Name,
           FullPath = path,
           ItemType = "File folder",
           IsFolder = true,
-          IsHidden = (di.Attributes & System.IO.FileAttributes.Hidden) != 0,
+          IsHidden = (attrs & System.IO.FileAttributes.Hidden) != 0,
+          IsLinkItem = (attrs & System.IO.FileAttributes.ReparsePoint) != 0,
+          IsArchive = NativeShell.IsArchivePath(path),
         };
       }
       if (File.Exists(path)) {
         var fi = new FileInfo(path);
+        var attrs = fi.Attributes;
         var ext = fi.Extension;
         var typeName = ext.Length <= 1 ? "File" : ext[1..].ToUpperInvariant() + " file";
         return new ShellItem {
@@ -5183,7 +5687,11 @@ public sealed partial class ShellListView : UserControl {
           FullPath = path,
           ItemType = typeName,
           IsFolder = false,
-          IsHidden = (fi.Attributes & System.IO.FileAttributes.Hidden) != 0,
+          IsHidden = (attrs & System.IO.FileAttributes.Hidden) != 0,
+          IsShortcut = NativeShell.IsShortcutPath(path),
+          IsLinkItem = (attrs & System.IO.FileAttributes.ReparsePoint) != 0,
+          IsArchive = NativeShell.IsArchivePath(path),
+          IsPicture = NativeShell.IsPicturePath(path),
           Size = NativeShell.FormatSize(fi.Length),
           SizeBytes = fi.Length,
           DateModified = fi.LastWriteTime,
@@ -5319,6 +5827,1133 @@ public sealed partial class ShellListView : UserControl {
       "Size" => "Size",
       _      => key,
     };
+
+  // ── FTP integration ─────────────────────────────────────────────────────────
+
+  // ── FTP inline browsing ───────────────────────────────────────────────────
+  // When CurrentPath starts with ftp://, ftps://, sftp://, or scp://, the
+  // ShellView shows remote files as ShellItem objects, using the same list,
+  // breadcrumb, column headers, sort/group, and context-menu surface as a
+  // normal local folder. Shell-specific operations (thumbnails, FSW, shell
+  // context menus) are suppressed while IsFtpMode is true.
+
+  private Session?      _ftpSession;
+  private FtpSiteEntry? _ftpSite;
+  private CancellationTokenSource _ftpCts = new();
+
+  /// <summary>True while the list is showing a remote FTP/SFTP directory.</summary>
+  public bool IsFtpMode => _ftpSite is not null;
+
+  /// <summary>Raised when the FTP session ends (disconnect or error).</summary>
+  public event EventHandler? FtpDisconnected;
+
+  // ── FTP URL helpers ───────────────────────────────────────────────────────
+
+  internal static bool IsFtpPath(string path) =>
+      path.StartsWith("ftp://",  StringComparison.OrdinalIgnoreCase) ||
+      path.StartsWith("ftps://", StringComparison.OrdinalIgnoreCase) ||
+      path.StartsWith("sftp://", StringComparison.OrdinalIgnoreCase) ||
+      path.StartsWith("scp://",  StringComparison.OrdinalIgnoreCase);
+
+  /// <summary>
+  /// Encodes a site + remote path into an ftp:// URL that is stored on the
+  /// back/forward stacks and shown in the breadcrumb bar.
+  /// The host token is the URL-encoded display name of the site so the user
+  /// sees a human-readable address like  ftp://My%20Site/pub/docs.
+  /// </summary>
+  private static string BuildFtpUrl(FtpSiteEntry site, string remotePath)
+  {
+      var scheme = site.Protocol switch
+      {
+          FtpProtocol.Sftp => "sftp",
+          FtpProtocol.Scp  => "scp",
+          FtpProtocol.Ftps => "ftps",
+          _                => "ftp",
+      };
+      var host = Uri.EscapeDataString(site.DisplayName);
+      var path = remotePath.StartsWith('/') ? remotePath : "/" + remotePath;
+      return $"{scheme}://{host}{path}";
+  }
+
+  private static string FtpUrlToRemotePath(string ftpUrl)
+  {
+      var schemeEnd   = ftpUrl.IndexOf("://", StringComparison.Ordinal);
+      if (schemeEnd < 0) return "/";
+      var afterScheme = schemeEnd + 3;
+      var slashIdx    = ftpUrl.IndexOf('/', afterScheme);
+      return slashIdx < 0 ? "/" : ftpUrl[slashIdx..];
+  }
+
+  private static string? FtpUrlParent(string ftpUrl)
+  {
+      var remotePath  = FtpUrlToRemotePath(ftpUrl).TrimEnd('/');
+      if (remotePath.Length <= 1) return null;
+      var slashIdx    = remotePath.LastIndexOf('/');
+      var parentPath  = slashIdx <= 0 ? "/" : remotePath[..slashIdx];
+      var schemeEnd   = ftpUrl.IndexOf("://", StringComparison.Ordinal);
+      var afterScheme = schemeEnd + 3;
+      var hostEnd     = ftpUrl.IndexOf('/', afterScheme);
+      var hostPart    = hostEnd < 0 ? ftpUrl : ftpUrl[..hostEnd];
+      return hostPart + parentPath;
+  }
+
+  // ── Public entry points ───────────────────────────────────────────────────
+
+  /// <summary>
+  /// Called by the host when the user selects an FTP site node in the tree.
+  /// Connects (or reuses the session) and populates the list.
+  /// </summary>
+  public async Task NavigateToFtpSiteAsync(FtpSiteEntry site)
+  {
+      var startPath = string.IsNullOrEmpty(site.RemotePath) ? "/" : site.RemotePath;
+      var ftpUrl    = BuildFtpUrl(site, startPath);
+
+      // Push the current real-shell path so Back works after connecting.
+      if (!string.IsNullOrEmpty(CurrentPath) && !IsFtpPath(CurrentPath))
+          _backStack.Push(CurrentPath);
+      _forwardStack.Clear();
+
+      await LoadFtpDirectoryAsync(site, startPath, ftpUrl);
+  }
+
+  /// <summary>
+  /// Disconnects the FTP session and navigates back to the last real-shell
+  /// path on the back stack, or to the Desktop if the stack is empty.
+  /// </summary>
+  public void DisconnectFtp()
+  {
+      DisconnectFtpSilently();
+      Items.Clear();
+      CurrentPath  = string.Empty;
+      CanGoBack    = _backStack.Count > 0;
+      CanGoForward = _forwardStack.Count > 0;
+
+      string? dest = null;
+      while (_backStack.Count > 0)
+      {
+          var candidate = _backStack.Pop();
+          if (!IsFtpPath(candidate)) { dest = candidate; break; }
+      }
+      if (dest is not null)
+          Navigate(dest);
+      else
+          NavigateToKnownFolder(new Guid("B4BFCC3A-DB86-4CBB-9D57-7EB81F2D2D34"));
+  }
+
+  // ── Core FTP directory loader ─────────────────────────────────────────────
+
+  private async Task LoadFtpDirectoryAsync(FtpSiteEntry site, string remotePath, string ftpUrl)
+  {
+      BusyChanged?.Invoke(this, true);
+
+      // Cancel any previous in-flight FTP load.
+      var oldCts = _ftpCts;
+      _ftpCts = new CancellationTokenSource();
+      var ct = _ftpCts.Token;
+      try { oldCts.Cancel(); oldCts.Dispose(); } catch { }
+
+      // Epoch guard (same pattern as LoadDirectory).
+      var epoch = Interlocked.Increment(ref _navEpoch);
+      bool IsStale() => ct.IsCancellationRequested || _navEpoch != epoch;
+
+      // Tear down shell-specific background services.
+      StopFolderWatcher();
+      // RestartThumbnailWorker() is intentionally omitted here:
+      // FTP entries have no shell thumbnails to decode, so spinning the worker
+      // just adds unnecessary latency for every remote navigation.
+
+      // Clear the visible list immediately.
+      _itemIndexMap.Clear();
+      _dragSelectedItems.Clear();
+      foreach (var it in Items) it.ClearReferences();
+      Items.Clear();
+      if (ShellView.ItemsSource != Items) ShellView.ItemsSource = Items;
+
+      List<RemoteFsItem>? remoteItems = null;
+      List<ShellItem>?    newItems     = null;
+      Exception?          connectError = null;
+
+      try
+      {
+          bool needNew = _ftpSession == null ||
+                         _ftpSite?.Host     != site.Host     ||
+                         _ftpSite?.Port     != site.Port     ||
+                         _ftpSite?.Protocol != site.Protocol;
+
+          await Task.Run(() =>
+          {
+              if (needNew)
+              {
+                  _ftpSession?.Dispose();
+                  _ftpSession = null;
+                  _ftpSite    = null;
+                  var opts    = BuildFtpSessionOptions(site);
+                  var sess    = new Session();
+                  sess.Open(opts);
+                  _ftpSession = sess;
+                  _ftpSite    = site;
+              }
+
+              var dir = _ftpSession!.ListDirectory(remotePath);
+              remoteItems = [];
+              foreach (RemoteFileInfo fi in dir.Files)
+              {
+                  if (fi.Name is "." or "..") continue;
+                  remoteItems.Add(new RemoteFsItem
+                  {
+                      Name        = fi.Name,
+                      IsDirectory = fi.IsDirectory,
+                      Size        = fi.Length,
+                      Modified    = fi.LastWriteTime,
+                  });
+              }
+
+              // Build and sort ShellItem list on the background thread so the UI thread
+              // only needs a single Reset() call with a ready List<T>.
+              newItems = remoteItems
+                  .OrderBy(i => i.IsDirectory ? 0 : 1)
+                  .ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+                  .Select(ri => new ShellItem
+                  {
+                      IsFtpItem    = true,
+                      Name         = ri.Name,
+                      DisplayName  = ri.Name,
+                      FullPath     = BuildFtpUrl(site, remotePath.TrimEnd('/') + "/" + ri.Name),
+                      IsFolder     = ri.IsDirectory,
+                      SizeBytes    = ri.Size,
+                      Size         = ri.IsDirectory ? string.Empty : FormatFtpSize(ri.Size),
+                      DateModified = ri.Modified,
+                      ItemType     = ri.TypeText,
+                  })
+                  .ToList();
+          }, ct);
+      }
+      catch (OperationCanceledException) { BusyChanged?.Invoke(this, false); return; }
+      catch (Exception ex)               { connectError = ex; }
+
+      if (IsStale()) { BusyChanged?.Invoke(this, false); return; }
+
+      if (connectError is not null)
+      {
+          DisconnectFtpSilently();
+          BusyChanged?.Invoke(this, false);
+          StatusTotalText.Text = $"FTP error: {connectError.Message}";
+          return;
+      }
+
+      // Site may have been set inside Task.Run above; keep it.
+      _ftpSite = site;
+
+      // newItems was built and sorted on the background thread.
+      if (!IsStale())
+          Items.AddRange(newItems);
+      else
+      {
+          BusyChanged?.Invoke(this, false);
+          return;
+      }
+
+      // Update navigation state — breadcrumb fires automatically via PathChanged.
+      CurrentPath  = ftpUrl;
+      CanGoBack    = _backStack.Count > 0;
+      CanGoForward = _forwardStack.Count > 0;
+      UpdateStatusBar();
+      PathChanged?.Invoke(this, ftpUrl);
+      BusyChanged?.Invoke(this, false);
+  }
+
+  private static string FormatFtpSize(long bytes) => bytes switch
+  {
+      < 1024                => $"{bytes} B",
+      < 1024 * 1024         => $"{bytes / 1024.0:F1} KB",
+      < 1024L * 1024 * 1024 => $"{bytes / (1024.0 * 1024):F1} MB",
+      _                     => $"{bytes / (1024.0 * 1024 * 1024):F2} GB",
+  };
+
+  private static SessionOptions BuildFtpSessionOptions(FtpSiteEntry site)
+  {
+      var password = FtpSiteDb.DecryptPassword(site.EncryptedPassword);
+      var proto    = site.Protocol switch
+      {
+          FtpProtocol.Ftp  => WinSCP.Protocol.Ftp,
+          FtpProtocol.Ftps => WinSCP.Protocol.Ftp,
+          FtpProtocol.Sftp => WinSCP.Protocol.Sftp,
+          FtpProtocol.Scp  => WinSCP.Protocol.Scp,
+          _                => WinSCP.Protocol.Ftp,
+      };
+      var opts = new SessionOptions
+      {
+          Protocol   = proto,
+          HostName   = site.Host,
+          PortNumber = site.Port,
+          UserName   = string.IsNullOrEmpty(site.Username) ? "anonymous" : site.Username,
+          Password   = password,
+      };
+      if (site.Protocol == FtpProtocol.Ftps)
+          opts.FtpSecure = FtpSecure.Explicit;
+      if (site.AcceptAnyHostKey)
+          opts.SshHostKeyPolicy = SshHostKeyPolicy.GiveUpSecurityAndAcceptAny;
+      else if (!string.IsNullOrEmpty(site.HostFingerprint))
+          opts.SshHostKeyFingerprint = site.HostFingerprint;
+      return opts;
+  }
+
+  private void DisconnectFtpSilently()
+  {
+      if (_ftpSite is null) return;
+      try { _ftpCts.Cancel(); } catch { }
+      try { _ftpSession?.Dispose(); } catch { }
+      _ftpSession = null;
+      _ftpSite    = null;
+      FtpDisconnected?.Invoke(this, EventArgs.Empty);
+  }
+
+  // ── FTP context menus ──────────────────────────────────────────────────
+
+  private void ShowFtpItemContextMenu(ShellItem item, Windows.Foundation.Point point)
+  {
+      var menu = new MenuFlyout();
+
+      if (item.IsFolder) {
+          var openItem = new MenuFlyoutItem { Text = "Open" };
+          openItem.Click += (_, _) => {
+              _backStack.Push(CurrentPath);
+              _forwardStack.Clear();
+              _ = LoadFtpDirectoryAsync(_ftpSite!, FtpUrlToRemotePath(item.FullPath), item.FullPath);
+          };
+          menu.Items.Add(openItem);
+      } else {
+          var downloadItem = new MenuFlyoutItem { Text = "Download…" };
+          downloadItem.Click += (_, _) => _ = FtpDownloadFileAsync(item);
+          menu.Items.Add(downloadItem);
+      }
+
+      menu.Items.Add(new MenuFlyoutSeparator());
+
+      var deleteItem = new MenuFlyoutItem { Text = "Delete" };
+      deleteItem.Click += (_, _) => _ = FtpDeleteItemAsync(item);
+      menu.Items.Add(deleteItem);
+
+      var disconnectItem = new MenuFlyoutItem { Text = "Disconnect" };
+      disconnectItem.Click += (_, _) => DisconnectFtp();
+      menu.Items.Add(disconnectItem);
+
+      menu.ShowAt(DragSelectGrid, point);
+  }
+
+  private void ShowFtpBackgroundContextMenu(Windows.Foundation.Point point)
+  {
+      var menu = new MenuFlyout();
+
+      var refreshItem = new MenuFlyoutItem { Text = "Refresh" };
+      refreshItem.Click += (_, _) => Refresh();
+      menu.Items.Add(refreshItem);
+
+      var uploadItem = new MenuFlyoutItem { Text = "Upload file here…" };
+      uploadItem.Click += (_, _) => _ = FtpUploadFileAsync();
+      menu.Items.Add(uploadItem);
+
+      menu.Items.Add(new MenuFlyoutSeparator());
+
+      var disconnectItem = new MenuFlyoutItem { Text = "Disconnect" };
+      disconnectItem.Click += (_, _) => DisconnectFtp();
+      menu.Items.Add(disconnectItem);
+
+      menu.ShowAt(DragSelectGrid, point);
+  }
+
+  // ── FTP file-transfer stubs ────────────────────────────────────────────
+
+  private async Task FtpDownloadFileAsync(ShellItem item)
+  {
+      if (_ftpSession is null || _ftpSite is null) return;
+
+      var picker = new Windows.Storage.Pickers.FileSavePicker();
+      picker.SuggestedFileName = System.IO.Path.GetFileName(item.FullPath);
+      WinRT.Interop.InitializeWithWindow.Initialize(picker, GetOwnerHwnd());
+      var file = await picker.PickSaveFileAsync();
+      if (file is null) return;
+
+      BusyChanged?.Invoke(this, true);
+      try {
+          await Task.Run(() =>
+              _ftpSession.GetFiles(
+                  FtpUrlToRemotePath(item.FullPath),
+                  file.Path,
+                  remove: false,
+                  new TransferOptions { TransferMode = TransferMode.Binary }));
+      } catch (Exception ex) {
+          StatusMessage?.Invoke(this, $"Download failed: {ex.Message}");
+      } finally {
+          BusyChanged?.Invoke(this, false);
+      }
+  }
+
+  private async Task FtpUploadFileAsync()
+  {
+      if (_ftpSession is null || _ftpSite is null) return;
+
+      var picker = new Windows.Storage.Pickers.FileOpenPicker();
+      picker.FileTypeFilter.Add("*");
+      WinRT.Interop.InitializeWithWindow.Initialize(picker, GetOwnerHwnd());
+      var file = await picker.PickSingleFileAsync();
+      if (file is null) return;
+
+      BusyChanged?.Invoke(this, true);
+      string remotePath = FtpUrlToRemotePath(CurrentPath)
+                          .TrimEnd('/') + "/" + file.Name;
+      try {
+          await Task.Run(() =>
+              _ftpSession.PutFiles(
+                  file.Path,
+                  remotePath,
+                  remove: false,
+                  new TransferOptions { TransferMode = TransferMode.Binary }));
+          _ = LoadFtpDirectoryAsync(_ftpSite!, FtpUrlToRemotePath(CurrentPath), CurrentPath);
+      } catch (Exception ex) {
+          StatusMessage?.Invoke(this, $"Upload failed: {ex.Message}");
+          BusyChanged?.Invoke(this, false);
+      }
+  }
+
+  private async Task FtpDeleteItemAsync(ShellItem item)
+  {
+      if (_ftpSession is null || _ftpSite is null) return;
+
+      BusyChanged?.Invoke(this, true);
+      string remotePath = FtpUrlToRemotePath(item.FullPath);
+      try {
+          await Task.Run(() => {
+              if (item.IsFolder)
+                  _ftpSession.RemoveFiles(remotePath + "/*");
+              _ftpSession.RemoveFiles(remotePath);
+          });
+          _ = LoadFtpDirectoryAsync(_ftpSite!, FtpUrlToRemotePath(CurrentPath), CurrentPath);
+      } catch (Exception ex) {
+          StatusMessage?.Invoke(this, $"Delete failed: {ex.Message}");
+          BusyChanged?.Invoke(this, false);
+      }
+  }
+
+  // ── Item Tooltip (acrylic) ──────────────────────────────────────────────
+
+  private ShellItem? _tooltipItem;
+  private CancellationTokenSource? _tooltipCts;
+  private DispatcherQueueTimer? _tooltipDelayTimer;
+  private DispatcherQueueTimer? _tooltipCloseTimer;
+  private ShellItem? _tooltipPendingItem;
+  private bool _tooltipPointerInside;
+
+  /// <summary>Tooltip icon size in logical pixels (96px — matches Windows Explorer tooltip).</summary>
+  private const uint TooltipIconSize = 96;
+
+  // Live pointer position relative to DragSelectGrid, updated every PointerMoved.
+  private Point _tooltipPointerPos;
+
+  private void OnTooltipPointerEntered(object sender, PointerRoutedEventArgs e) {
+    _tooltipPointerInside = true;
+    CancelTooltipClose();
+    UpdateTooltipPointerPos(e);
+    var item = GetShellItemFromPointer(e);
+    if (item is null) return;
+    ScheduleTooltipShow(item);
+  }
+
+  private void OnTooltipPointerMoved(object sender, PointerRoutedEventArgs e) {
+    // PointerEntered only fires when the pointer actually crosses into this element.
+    // If the app is launched with the cursor already sitting over the control (e.g.
+    // from the click that opened it), PointerEntered never fires on first load, but
+    // PointerMoved still does — so mirror the "inside" state here too.
+    _tooltipPointerInside = true;
+    CancelTooltipClose();
+    UpdateTooltipPointerPos(e);
+    var item = GetShellItemFromPointer(e);
+    if (item is null) {
+      CancelTooltipDelay();
+      HideItemTooltip();
+      return;
+    }
+    // Already shown or already the pending target — do NOT reschedule, otherwise
+    // every micro-jitter PointerMoved (which fires continuously even while the
+    // cursor is "resting" over the same item) would perpetually restart the delay
+    // timer from zero, and the tooltip would never actually appear.
+    if (item == _tooltipItem || item == _tooltipPendingItem) return;
+    ScheduleTooltipShow(item);
+  }
+
+  private void OnTooltipPointerExited(object sender, PointerRoutedEventArgs e) {
+    _tooltipPointerInside = false;
+    CancelTooltipDelay();
+    StartTooltipClose();
+  }
+
+  /// <summary>Keeps <see cref="_tooltipPointerPos"/> in sync with the live cursor.</summary>
+  private void UpdateTooltipPointerPos(PointerRoutedEventArgs e) {
+    try {
+      _tooltipPointerPos = e.GetCurrentPoint(DragSelectGrid).Position;
+    } catch {
+      try {
+        var pt = e.GetCurrentPoint(ShellView).Position;
+        if (ShellView.TransformToVisual(DragSelectGrid) is { } xform)
+          _tooltipPointerPos = xform.TransformPoint(pt);
+      } catch { /* best effort */ }
+    }
+  }
+
+  /// <summary>Schedules the tooltip to appear after a short hover delay.</summary>
+  private void ScheduleTooltipShow(ShellItem item) {
+    // Already counting down for this exact item — leave the existing timer running
+    // instead of restarting it from zero.
+    if (_tooltipPendingItem == item && _tooltipDelayTimer is { IsRunning: true }) return;
+
+    CancelTooltipDelay();
+    _tooltipPendingItem = item;
+
+    _tooltipDelayTimer ??= DispatcherQueue.CreateTimer();
+    _tooltipDelayTimer.Interval = TimeSpan.FromMilliseconds(750);
+    // Guard against duplicate subscriptions building up across repeated calls.
+    _tooltipDelayTimer.Tick -= OnTooltipDelayTick;
+    _tooltipDelayTimer.Tick += OnTooltipDelayTick;
+    _tooltipDelayTimer.Start();
+  }
+
+  private void OnTooltipDelayTick(DispatcherQueueTimer sender, object args) {
+    sender.Stop();
+    sender.Tick -= OnTooltipDelayTick;
+    if (_tooltipPointerInside && _tooltipPendingItem is { } pending) {
+      ShowItemTooltip(pending);
+    }
+  }
+
+  private void CancelTooltipDelay() {
+    _tooltipDelayTimer?.Stop();
+    _tooltipPendingItem = null;
+  }
+
+  /// <summary>
+  /// Immediately cancels any pending (scheduled but not-yet-shown) tooltip and hides
+  /// the tooltip if it is currently visible. Used for interactions that should never
+  /// leave a stale tooltip on screen, e.g. clicks, right-clicks, navigation, or scrolling.
+  /// </summary>
+  private void CloseItemTooltipImmediate() {
+    CancelTooltipDelay();
+    CancelTooltipClose();
+    HideItemTooltip();
+  }
+
+  private void StartTooltipClose() {
+    _tooltipCloseTimer ??= DispatcherQueue.CreateTimer();
+    _tooltipCloseTimer.Interval = TimeSpan.FromMilliseconds(150);
+    _tooltipCloseTimer.Tick += OnTooltipCloseTick;
+    _tooltipCloseTimer.Start();
+  }
+
+  private void CancelTooltipClose() {
+    _tooltipCloseTimer?.Stop();
+    if (_tooltipCloseTimer is not null)
+      _tooltipCloseTimer.Tick -= OnTooltipCloseTick;
+  }
+
+  private void OnTooltipCloseTick(DispatcherQueueTimer sender, object args) {
+    sender.Stop();
+    sender.Tick -= OnTooltipCloseTick;
+    HideItemTooltip();
+  }
+
+  // Stored delegate instances so AddHandler/RemoveHandler use the same reference.
+  private PointerEventHandler? _tooltipEnteredHandler;
+  private PointerEventHandler? _tooltipExitedHandler;
+  private PointerEventHandler? _tooltipMovedHandler;
+
+  // The ListViewItem that the tooltip was triggered from — used to check
+  // whether its label TextBlock is truncated.
+  private ListViewItem? _tooltipListViewItem;
+
+  private ListViewItem? GetListViewItemFromPointer(PointerRoutedEventArgs e) {
+    var source = e.OriginalSource as DependencyObject;
+    while (source is not null) {
+      if (source is ListViewItem lvi) return lvi;
+      source = VisualTreeHelper.GetParent(source);
+    }
+    return null;
+  }
+
+  private ShellItem? GetShellItemFromPointer(PointerRoutedEventArgs e) {
+    var source = e.OriginalSource as DependencyObject;
+    while (source is not null) {
+      if (source is ListViewItem lvi) {
+        _tooltipListViewItem = lvi;
+        return ShellView.ItemFromContainer(lvi) as ShellItem;
+      }
+      source = VisualTreeHelper.GetParent(source);
+    }
+    return null;
+  }
+
+  /// <summary>
+  /// Returns true when the label TextBlock inside <paramref name="lvi"/> is
+  /// visually truncated (text overflows the available width and shows ellipsis).
+  /// </summary>
+  private static bool IsLabelTruncated(ListViewItem lvi) {
+    // Find the first TextBlock with TextTrimming set — that's the display-name label.
+    var candidate = FindLabelVisual(lvi);
+    if (candidate is not TextBlock tb) return false;
+
+    // Measure the text with infinite width to get the natural (untrimmed) size.
+    var m = new TextBlock {
+      Text         = tb.Text,
+      FontWeight   = tb.FontWeight,
+      FontSize     = tb.FontSize,
+      FontFamily   = tb.FontFamily,
+      TextWrapping = TextWrapping.NoWrap,
+    };
+    m.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+    // Small epsilon to avoid false positives from sub-pixel rounding.
+    return m.DesiredSize.Width > tb.ActualWidth + 1.0;
+  }
+
+  /// <summary>Finds the label TextBlock (the one with CharacterEllipsis trimming)
+  /// inside a ListViewItem's visual tree.</summary>
+  private static DependencyObject? FindLabelVisual(DependencyObject root) {
+    int count = VisualTreeHelper.GetChildrenCount(root);
+    for (int i = 0; i < count; i++) {
+      var child = VisualTreeHelper.GetChild(root, i);
+      if (child is TextBlock tb && tb.TextTrimming == TextTrimming.CharacterEllipsis)
+        return tb;
+      var found = FindLabelVisual(child);
+      if (found is not null) return found;
+    }
+    return null;
+  }
+
+  private async void ShowItemTooltip(ShellItem item) {
+    // Cancel any in-flight load from a previous item.
+    _tooltipCts?.Cancel();
+    _tooltipCts = new CancellationTokenSource();
+    var ct = _tooltipCts.Token;
+
+    _tooltipItem = item;
+    bool isPicture = item.IsPicture;
+
+    // Only show the filename row when the item's label in the list view is
+    // actually truncated — if the full name is already visible there's no
+    // need to duplicate it in the tooltip.
+    bool showFileName = _tooltipListViewItem is { } lvi && IsLabelTruncated(lvi);
+    _tooltipListViewItem = null;
+
+    // ── Populate standard info ────────────────────────────────────────────
+    TooltipFileName.Text      = item.DisplayName;
+    TooltipFileName.Visibility = showFileName ? Visibility.Visible : Visibility.Collapsed;
+    TooltipInfoTip.Text       = string.Empty;
+    TooltipInfoTip.Visibility  = Visibility.Collapsed;
+
+    // Show fallback glyph while the real icon loads.
+    TooltipIcon.Source             = null;
+    TooltipIcon.Visibility         = Visibility.Collapsed;
+
+    // ── Picture-specific info ─────────────────────────────────────────────
+    if (isPicture) {
+      // For pictures, the large preview takes over — hide the small icon /
+      // standard info row and show name, dimensions and rating below the preview instead.
+      TooltipStandardInfo.Visibility   = Visibility.Collapsed;
+      TooltipPictureInfo.Visibility    = Visibility.Visible;
+      TooltipPictureFileName.Text      = item.DisplayName;
+      TooltipPictureSize.Text          = item.Size;
+      // Nothing is revealed yet — see ShowPictureTooltipWhenReadyAsync. Opening
+      // the popup now with a placeholder box and resizing it later once the
+      // real image arrives is what caused the visible "jump"; waiting until
+      // the preview (and metadata) has actually resolved and revealing the
+      // popup already at its final size avoids that entirely.
+      TooltipLargePreview.Source                = null;
+      TooltipPreviewBorder.Visibility           = Visibility.Collapsed;
+      TooltipPreviewPlaceholderGlyph.Visibility = Visibility.Collapsed;
+      TooltipPreviewLoadingRing.IsActive         = false;
+      // Drop the previous item's fitted size so the box doesn't briefly carry
+      // over the old item's shape once it becomes visible again.
+      TooltipPreviewBorder.ClearValue(FrameworkElement.WidthProperty);
+      TooltipPreviewBorder.ClearValue(FrameworkElement.HeightProperty);
+      TooltipDimensions.Text           = string.Empty;
+      TooltipRatingStars.Children.Clear();
+      _ = ShowPictureTooltipWhenReadyAsync(item, ct);
+      return;
+    }
+
+    TooltipStandardInfo.Visibility  = Visibility.Visible;
+    TooltipPictureInfo.Visibility    = Visibility.Collapsed;
+    TooltipPreviewBorder.Visibility = Visibility.Collapsed;
+    TooltipPreviewLoadingRing.IsActive = false;
+
+    // Load the crisp 96 px tooltip icon asynchronously (not needed for pictures,
+    // since the large preview replaces the small icon there).
+    await LoadTooltipIconAsync(item, ct);
+
+    // Load shell infotip asynchronously (additional properties like Company,
+    // File version, dimensions, etc. that Windows Explorer also shows).
+    await LoadTooltipInfoTipAsync(item, ct);
+
+    // ── Position and show ─────────────────────────────────────────────────
+    PositionTooltip();
+    ItemTooltipPopup.IsOpen = true;
+  }
+
+  /// <summary>
+  /// For picture items, waits for both the metadata and large-preview fetches
+  /// to finish applying their UI updates before opening the tooltip popup at
+  /// all, so it appears already at its final size instead of popping up small
+  /// and then resizing once the real image arrives (the visible "jump" this
+  /// replaces). For a cache hit or a fast local file this is imperceptible;
+  /// for a cold cloud fetch the popup simply takes longer to appear.
+  /// </summary>
+  private async Task ShowPictureTooltipWhenReadyAsync(ShellItem item, CancellationToken ct) {
+    try {
+      await LoadTooltipPictureInfoAsync(item, ct).ConfigureAwait(false);
+      if (ct.IsCancellationRequested || _tooltipItem != item) return;
+
+      // LoadTooltipMetadataAsync and LoadTooltipLargePreviewAsync each enqueue
+      // their own UI update as the last step before their task completes, so
+      // by the time Task.WhenAll (inside LoadTooltipPictureInfoAsync) has
+      // returned, both updates are already queued ahead of this one —
+      // DispatcherQueue runs same-priority work in order, so the border/image/
+      // text are guaranteed to be applied before this callback opens the popup.
+      DispatcherQueue.TryEnqueue(() => {
+        if (ct.IsCancellationRequested || _tooltipItem != item) return;
+        PositionTooltip();
+        ItemTooltipPopup.IsOpen = true;
+      });
+    } catch (OperationCanceledException) { } catch { }
+  }
+
+  /// <summary>
+  /// Loads a fresh 96 px (DPI-scaled) icon from the shell for the tooltip,
+  /// using the same pipeline as the list-item thumbnail workers.
+  /// </summary>
+  private async Task LoadTooltipIconAsync(ShellItem item, CancellationToken ct) {
+    var size = PhysicalSize(TooltipIconSize);
+    var fullPath = item.FullPath;
+
+    try {
+      // Acquire a shell-call slot so we don't compete with the thumbnail
+      // workers indefinitely — use a short timeout so the tooltip doesn't
+      // hang if all 8 slots are occupied by slow ResizeToFit requests.
+      using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+      timeoutCts.CancelAfter(TimeSpan.FromSeconds(3));
+
+      var (pixels, pw, ph, _) = await NativeShell.GetShellImagePixelsAsync(
+          fullPath, size, NativeShell.SIIGBF.ResizeToFit, timeoutCts.Token).ConfigureAwait(false);
+
+      if (ct.IsCancellationRequested || pixels is null) return;
+
+      // Marshal BOTH the WriteableBitmap creation AND the property assignment
+      // back to the UI thread — PixelsToBitmapSync creates a WriteableBitmap
+      // which must run on the UI thread, and the DispatcherQueue continuation
+      // is what actually runs on the UI thread in WinUI 3.
+      DispatcherQueue.TryEnqueue(() => {
+        if (ct.IsCancellationRequested || _tooltipItem != item) return;
+        var wb = NativeShell.PixelsToBitmapSync(pixels, pw, ph);
+        if (wb is null) return;
+        TooltipIcon.Source             = wb;
+        TooltipIcon.Visibility         = Visibility.Visible;
+      });
+    } catch (OperationCanceledException) { } catch { }
+  }
+
+  /// <summary>
+  /// Loads the shell infotip for a standard (non-picture) item asynchronously,
+  /// off the UI thread.  This calls <see cref="NativeShell.GetInfoTip"/> which
+  /// uses <c>IQueryInfo::GetInfoTip</c> — the same COM interface Windows
+  /// Explorer uses to build its tooltip text.
+  /// </summary>
+  private async Task LoadTooltipInfoTipAsync(ShellItem item, CancellationToken ct) {
+    var fullPath = item.FullPath;
+    try {
+      var infoTip = await Task.Run(() => NativeShell.GetInfoTip(fullPath), ct)
+          .ConfigureAwait(false);
+
+      if (ct.IsCancellationRequested || string.IsNullOrEmpty(infoTip)) return;
+
+      DispatcherQueue.TryEnqueue(() => {
+        if (ct.IsCancellationRequested || _tooltipItem != item) return;
+        TooltipInfoTip.Text       = infoTip;
+        TooltipInfoTip.Visibility  = Visibility.Visible;
+      });
+    } catch (OperationCanceledException) { } catch { }
+  }
+
+  private async Task LoadTooltipPictureInfoAsync(ShellItem item, CancellationToken ct) {
+    var fullPath = item.FullPath;
+    // Off the UI thread: besides the attribute/path tiers in IsCloudItem, this
+    // also checks PKEY_StorageProviderSyncStatus directly (an extra COM round
+    // trip) to catch cloud providers other than OneDrive and pinned items
+    // outside a recognised OneDrive root — worth the extra call here since it
+    // only runs once per tooltip hover, unlike the per-item list-thumbnail loops.
+    bool isCloud = await Task.Run(() =>
+        NativeShell.IsCloudItem(fullPath) || NativeShell.HasStorageProviderSyncStatus(fullPath))
+        .ConfigureAwait(false);
+    if (ct.IsCancellationRequested) return;
+
+    // Metadata (dimensions/rating) and the large preview are fetched independently
+    // and each update the UI as soon as they're ready. For cloud items, reading
+    // metadata with the slow/network property handler open can take a while —
+    // it must NOT block the preview fetch, otherwise a slow metadata call makes
+    // the preview appear to "never load" even though the pixels arrived quickly.
+    var metadataTask = LoadTooltipMetadataAsync(item, fullPath, isCloud, ct);
+    var previewTask  = LoadTooltipLargePreviewAsync(item, fullPath, isCloud, ct);
+    await Task.WhenAll(metadataTask, previewTask).ConfigureAwait(false);
+  }
+
+  // 5-pointed star outline, defined on a 24x24 grid (the same vertex set as the
+  // common Material/Fluent star glyph). Rendered as a vector Polygon rather than
+  // a font glyph so the shape isn't at the mercy of whatever icon font happens to
+  // be installed — mirrors the star geometry approach used by the CustomControls
+  // Rating control at https://github.com/Gainedge/BetterExplorer.
+  private static readonly Point[] StarOutline = [
+    new(12, 2), new(15.09, 8.26), new(22, 9.27), new(17, 14.14), new(18.18, 21),
+    new(12, 17.77), new(5.82, 21), new(7, 14.14), new(2, 9.27), new(8.91, 8.26)
+  ];
+
+  private static Microsoft.UI.Xaml.Shapes.Polygon CreateStarShape(Brush fill, double size) {
+    var points = new PointCollection();
+    foreach (var p in StarOutline) points.Add(p);
+    return new Microsoft.UI.Xaml.Shapes.Polygon {
+      Points   = points,
+      Fill     = fill,
+      Stretch  = Stretch.Uniform,
+      Width    = size,
+      Height   = size,
+    };
+  }
+
+  private async Task LoadTooltipMetadataAsync(ShellItem item, string fullPath, bool isCloud, CancellationToken ct) {
+    // Read image metadata via the Windows.Storage typed property accessors for
+    // ALL items (local and cloud-backed) — the COM-based IShellItem2.GetUInt32
+    // path (NativeShell.GetImageMetadata) silently returns a zero rating for
+    // many files because PKEY_Rating often lives behind the slow property
+    // handler that the fast-only COM flags refuse to open.
+    (int width, int height, int rawRating) =
+        await NativeShell.GetStorageImageMetadataAsync(fullPath, isCloud, ct).ConfigureAwait(false);
+
+    if (ct.IsCancellationRequested) return;
+    double stars = NativeShell.RatingToStars(rawRating);
+
+    DispatcherQueue.TryEnqueue(() => {
+      if (ct.IsCancellationRequested || _tooltipItem != item) return;
+
+      TooltipDimensions.Text = (width > 0 && height > 0) ? $"({width} × {height})" : string.Empty;
+
+      TooltipRatingStars.Children.Clear();
+      // Always render all 5 stars \u2014 an unrated item (stars == 0) shows five
+      // empty stars rather than nothing, so the rating row doesn't disappear.
+      var accentBrush  = (Brush)Application.Current.Resources["SystemControlForegroundAccentBrush"];
+      var normalBrush  = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+      const double fontSize = 12;
+
+      for (int i = 0; i < 5; i++) {
+        double position = i + 1;           // 1-based star position
+        bool isFull  = stars >= position;
+        bool isHalf  = !isFull && stars >= position - 0.5;
+
+        if (isFull) {
+          // Filled star
+          var star = CreateStarShape(accentBrush, fontSize);
+          star.Margin = new Thickness(0, 0, 1, 0);
+          TooltipRatingStars.Children.Add(star);
+        } else if (isHalf) {
+          // Half star: empty star base + filled star clipped to left half
+          var halfStarContainer = new Grid { Width = fontSize, Height = fontSize, Margin = new Thickness(0, 0, 1, 0) };
+          halfStarContainer.Children.Add(CreateStarShape(normalBrush, fontSize));
+          var filledHalf = CreateStarShape(accentBrush, fontSize);
+          filledHalf.Clip = new Microsoft.UI.Xaml.Media.RectangleGeometry {
+            Rect = new Rect(0, 0, fontSize / 2, fontSize)
+          };
+          halfStarContainer.Children.Add(filledHalf);
+          TooltipRatingStars.Children.Add(halfStarContainer);
+        } else {
+          // Empty star
+          var star = CreateStarShape(normalBrush, fontSize);
+          star.Margin = new Thickness(0, 0, 1, 0);
+          TooltipRatingStars.Children.Add(star);
+        }
+      }
+    });
+  }
+
+  // Session-lifetime cache of resolved cloud tooltip previews, keyed by full path.
+  // A dehydrated cloud item's real thumbnail can take much longer to become
+  // available than a single hover lasts (the close delay is only 150 ms), so
+  // without this cache every hover restarted the fetch from scratch and the
+  // user only ever saw the generic placeholder glyph. Bounded FIFO so it can't
+  // grow unbounded over a long session.
+  private readonly Dictionary<string, (byte[] Px, int W, int H)> _tooltipCloudPreviewCache = new();
+  private readonly List<string> _tooltipCloudPreviewCacheOrder = new();
+  private const int TooltipCloudPreviewCacheCap = 24;
+  // Guards the two collections above — CacheTooltipCloudPreview can run on a
+  // background thread pool thread (called after ConfigureAwait(false) inside
+  // FetchCloudTooltipPreviewAsync) while the UI thread reads the cache concurrently.
+  private readonly object _tooltipCloudPreviewCacheLock = new();
+
+  // In-flight cloud preview fetches, keyed by full path, so that re-hovering
+  // the same item while its fetch is still running reuses it instead of
+  // starting a duplicate.
+  private readonly Dictionary<string, Task<(byte[]? Px, int W, int H)>> _tooltipCloudPreviewFetches = new();
+
+  // Caps how many cloud preview fetches are allowed to keep running in the
+  // background after their tooltip has closed. Bounds worst-case contention
+  // for the shared 8-slot shell-call semaphore when a user quickly hovers many
+  // dehydrated cloud pictures in a row — beyond this cap, extra fetches fall
+  // back to being cancelled with the tooltip exactly like before.
+  private static readonly SemaphoreSlim _tooltipCloudFetchDetachGate = new(3, 3);
+
+  private void CacheTooltipCloudPreview(string fullPath, byte[] px, int w, int h) {
+    lock (_tooltipCloudPreviewCacheLock) {
+      if (!_tooltipCloudPreviewCache.ContainsKey(fullPath)) {
+        if (_tooltipCloudPreviewCacheOrder.Count >= TooltipCloudPreviewCacheCap) {
+          var oldest = _tooltipCloudPreviewCacheOrder[0];
+          _tooltipCloudPreviewCacheOrder.RemoveAt(0);
+          _tooltipCloudPreviewCache.Remove(oldest);
+        }
+        _tooltipCloudPreviewCacheOrder.Add(fullPath);
+      }
+      _tooltipCloudPreviewCache[fullPath] = (px, w, h);
+    }
+  }
+
+  private bool TryGetTooltipCloudPreview(string fullPath, out (byte[] Px, int W, int H) result) {
+    lock (_tooltipCloudPreviewCacheLock) {
+      return _tooltipCloudPreviewCache.TryGetValue(fullPath, out result);
+    }
+  }
+
+  /// <summary>Sizes <see cref="TooltipPreviewBorder"/> to the loaded image's own
+  /// aspect ratio (capped at 600 px on the longer side) so the tooltip shrink-wraps
+  /// the picture with just its layout margins, instead of sitting in a fixed
+  /// placeholder-colored box.</summary>
+  private void FitTooltipPreviewBorder(int pixelW, int pixelH) {
+    if (pixelW <= 0 || pixelH <= 0) return;
+    const double maxDim = 600;
+    double scale = Math.Min(maxDim / pixelW, maxDim / pixelH);
+    TooltipPreviewBorder.Width  = Math.Round(pixelW * scale);
+    TooltipPreviewBorder.Height = Math.Round(pixelH * scale);
+  }
+
+  private async Task LoadTooltipLargePreviewAsync(ShellItem item, string fullPath, bool isCloud, CancellationToken ct) {
+    // Cloud-backed items request a smaller preview size — the shell/Storage-API
+    // pipeline for large (1024px) cloud thumbnails is noticeably slower, and a
+    // 600px preview is still crisp inside the tooltip's 600px preview cap.
+    var size = isCloud ? 600u : 1024u;
+
+    void ShowPreview(byte[]? px, int w, int h, bool stopSpinner) {
+      DispatcherQueue.TryEnqueue(() => {
+        if (ct.IsCancellationRequested || _tooltipItem != item) return;
+        if (stopSpinner) TooltipPreviewLoadingRing.IsActive = false;
+
+        WriteableBitmap? wb = px is not null ? NativeShell.PixelsToBitmapSync(px, w, h) : null;
+        if (wb is not null) {
+          TooltipLargePreview.Source               = wb;
+          TooltipPreviewPlaceholderGlyph.Visibility = Visibility.Collapsed;
+          TooltipPreviewBorder.Visibility           = Visibility.Visible;
+          FitTooltipPreviewBorder(w, h);
+        } else if (stopSpinner) {
+          // No real preview ever arrived — show the border + placeholder glyph
+          // as a fallback rather than leaving the preview area empty. The
+          // border starts Collapsed (see ShowItemTooltip's deferred-reveal
+          // setup) since nothing is shown until this callback fires, so it
+          // must be made visible here too, not just on the success path.
+          TooltipPreviewBorder.Visibility           = Visibility.Visible;
+          TooltipPreviewPlaceholderGlyph.Visibility = Visibility.Visible;
+        }
+      });
+    }
+
+    try {
+      if (!isCloud) {
+        // Regular files: the shell fast path is reliable and immediate.
+        var (px, pw, ph, _) = await NativeShell.GetShellImagePixelsAsync(
+            fullPath, size, NativeShell.SIIGBF.ResizeToFit, ct).ConfigureAwait(false);
+        if (ct.IsCancellationRequested || _tooltipItem != item) return;
+        ShowPreview(px, pw, ph, stopSpinner: true);
+        return;
+      }
+
+      // ── Cloud item ───────────────────────────────────────────────────────
+      // Reuse a previously-resolved thumbnail instantly — no spinner, no re-fetch.
+      if (TryGetTooltipCloudPreview(fullPath, out var cached)) {
+        ShowPreview(cached.Px, cached.W, cached.H, stopSpinner: true);
+        return;
+      }
+
+      // Share one fetch across concurrent/repeated hovers of the same path.
+      Task<(byte[]? Px, int W, int H)> fetchTask;
+      lock (_tooltipCloudPreviewFetches) {
+        if (!_tooltipCloudPreviewFetches.TryGetValue(fullPath, out fetchTask!)) {
+          // If we're under the detach cap, the fetch keeps running to completion
+          // even after this tooltip closes (populating the cache for next time).
+          // Otherwise it falls back to the tooltip's own ct, i.e. the old
+          // cancel-on-close behavior, so a burst of hovers can't pile up
+          // unboundedly many long-lived background fetches.
+          bool detached = _tooltipCloudFetchDetachGate.Wait(0);
+          var fetchCt = detached ? CancellationToken.None : ct;
+          fetchTask = FetchCloudTooltipPreviewAsync(fullPath, size, fetchCt);
+          _tooltipCloudPreviewFetches[fullPath] = fetchTask;
+          _ = fetchTask.ContinueWith(_ => {
+            lock (_tooltipCloudPreviewFetches) _tooltipCloudPreviewFetches.Remove(fullPath);
+            if (detached) _tooltipCloudFetchDetachGate.Release();
+          }, TaskScheduler.Default);
+        }
+      }
+
+      // Stop watching once this tooltip closes/switches — but don't cancel a
+      // detached fetch, it keeps running in the background regardless.
+      var tooltipClosed = new TaskCompletionSource<bool>();
+      using (ct.Register(() => tooltipClosed.TrySetResult(true))) {
+        if (await Task.WhenAny(fetchTask, tooltipClosed.Task).ConfigureAwait(false) != fetchTask)
+          return;
+      }
+
+      var (resultPx, resultW, resultH) = await fetchTask.ConfigureAwait(false);
+      if (ct.IsCancellationRequested || _tooltipItem != item) return;
+      ShowPreview(resultPx, resultW, resultH, stopSpinner: true);
+    } catch (OperationCanceledException) {
+    } catch {
+      ShowPreview(null, 0, 0, stopSpinner: true);
+    }
+  }
+
+  /// <summary>
+  /// Resolves a cloud item's large tooltip preview. When <paramref name="externalCt"/>
+  /// is <see cref="CancellationToken.None"/> this runs "detached" — independent of the
+  /// tooltip popup's own lifetime — so a hover that ends before hydration finishes
+  /// doesn't throw away nearly-complete progress; the result is cached instead.
+  /// Always bounded by a hard safety timeout so an abandoned fetch can't run forever.
+  /// Shell calls stay throttled by the existing shared semaphore, so running this to
+  /// completion in the background can't starve other shell work.
+  /// </summary>
+  private async Task<(byte[]? Px, int W, int H)> FetchCloudTooltipPreviewAsync(
+      string fullPath, uint size, CancellationToken externalCt) {
+    using var cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
+    cts.CancelAfter(TimeSpan.FromSeconds(90));
+    var ct = cts.Token;
+
+    // Race BOTH mechanisms on every attempt instead of trusting one
+    // exclusively: Windows.Storage alone can stall or come back empty for
+    // some cloud providers/paths (relying on it exclusively left the preview
+    // stuck on nothing at all), while the plain shell fast path
+    // (SIIGBF.ResizeToFit) can return a generic per-type icon instead of
+    // E_PENDING for dehydrated placeholders.
+    //
+    // storagePx is trustworthy on its own: GetStorageThumbnailPixelsAsync
+    // already asks WinRT for ThumbnailType and returns null whenever the OS
+    // handed back an icon instead of real content.
+    //
+    // shellPx used to be requested with SIIGBF.ResizeToFit, which is
+    // documented to fall back to the generic per-type icon when no real
+    // thumbnail exists — and to *upscale* that icon to fill the requested
+    // box. That's the bug that made cloud previews permanently show the
+    // file-type icon: a 600px request for a file with no thumbnail came back
+    // as a non-null, square, 600x600 image (the icon stretched to size),
+    // which is indistinguishable by size/shape from a real 600x600 photo, so
+    // no heuristic here can reliably tell them apart. SIIGBF.ThumbnailOnly is
+    // the documented fix: it fails outright (null) instead of substituting an
+    // icon, so any non-null shellPx from here on is guaranteed to be real
+    // content — same trust model as storagePx, no heuristic needed.
+    try {
+      for (int retry = 0; retry < CloudThumbRetryMax; retry++) {
+        if (ct.IsCancellationRequested) break;
+
+        var storageTask = NativeShell.GetStorageThumbnailPixelsAsync(
+            fullPath, size, ct, modeOverride: ThumbnailMode.SingleItem,
+            options: ThumbnailOptions.ResizeThumbnail);
+        var shellTask   = NativeShell.GetShellImagePixelsAsync(fullPath, size, NativeShell.SIIGBF.ThumbnailOnly, ct);
+        await Task.WhenAll(storageTask, shellTask).ConfigureAwait(false);
+
+        if (ct.IsCancellationRequested) break;
+
+        var (storagePx, sw, sh) = storageTask.Result;
+        var (shellPx, hw, hh, _) = shellTask.Result;
+
+        if (storagePx is not null) {
+          CacheTooltipCloudPreview(fullPath, storagePx, sw, sh);
+          return (storagePx, sw, sh);
+        }
+        if (shellPx is not null) {
+          CacheTooltipCloudPreview(fullPath, shellPx, hw, hh);
+          return (shellPx, hw, hh);
+        }
+
+        // Neither source produced real content yet (storagePx null means
+        // WinRT reported an icon; shellPx null means ThumbnailOnly refused to
+        // substitute one) — retry after a backoff delay.
+        int delayMs = Math.Min((retry + 1) * CloudThumbRetryBaseMs, CloudThumbRetryMaxMs);
+        try { await Task.Delay(delayMs, ct).ConfigureAwait(false); }
+        catch (OperationCanceledException) { break; }
+      }
+
+      if (ct.IsCancellationRequested) return (null, 0, 0);
+
+      // Neither fast path ever confirmed a real thumbnail (typical for a
+      // fully dehydrated OneDrive/SharePoint "Files On-Demand" placeholder
+      // with no cached thumbnail at all, remote or local). Force the real
+      // download by opening a read stream via the Storage API — this is what
+      // actually triggers cloud hydration, unlike GetThumbnailAsync/SIIGBF
+      // which only ever read cached data. Give it a generous timeout since it
+      // may need to pull the full file down over the network.
+      using var forceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+      forceCts.CancelAfter(TimeSpan.FromSeconds(30));
+      var (forcedPx, fw, fh) = await NativeShell.ForceLoadImagePixelsViaStorageApiAsync(
+          fullPath, size, forceCts.Token).ConfigureAwait(false);
+
+      if (forcedPx is not null) {
+        CacheTooltipCloudPreview(fullPath, forcedPx, fw, fh);
+        return (forcedPx, fw, fh);
+      }
+
+      // Hydration itself failed too (e.g. offline/network error). Nothing
+      // real is available — the placeholder glyph is the honest result here,
+      // not a generic icon dressed up as content.
+      return (null, 0, 0);
+    } catch {
+      return (null, 0, 0);
+    }
+  }
+
+  private void HideItemTooltip() {
+    CancelTooltipClose();
+    _tooltipCts?.Cancel();
+    _tooltipItem = null;
+    _tooltipPendingItem = null;
+    ItemTooltipPopup.IsOpen = false;
+    TooltipLoadingRing.IsActive = false;
+    TooltipPreviewLoadingRing.IsActive = false;
+  }
+
+  /// <summary>
+  /// Positions the tooltip near the cursor, offset to the right and below.
+  /// Uses the actual rendered size of the tooltip border so clamping is
+  /// accurate regardless of content (text-only vs picture preview).
+  /// </summary>
+  private void PositionTooltip() {
+    // Use actual rendered size so we only clamp when truly needed.
+    double tipW = TooltipBorder.ActualWidth  > 0 ? TooltipBorder.ActualWidth  : 300;
+    double tipH = TooltipBorder.ActualHeight > 0 ? TooltipBorder.ActualHeight : 120;
+
+    double popupX = _tooltipPointerPos.X + 16;
+    double popupY = _tooltipPointerPos.Y + 16;
+
+    var rootSize = DragSelectGrid.ActualSize;
+
+    // Only clamp if the grid has been laid out — on first load ActualSize
+    // may be (0,0) which would push the tooltip off-screen.
+    if (rootSize.X > 0 && rootSize.Y > 0) {
+      if (popupX + tipW > rootSize.X)
+        popupX = Math.Max(0, _tooltipPointerPos.X - tipW - 4);
+      if (popupY + tipH > rootSize.Y)
+        popupY = Math.Max(0, _tooltipPointerPos.Y - tipH - 4);
+      popupX = Math.Max(0, popupX);
+      popupY = Math.Max(0, popupY);
+    }
+
+    ItemTooltipPopup.HorizontalOffset = popupX;
+    ItemTooltipPopup.VerticalOffset   = popupY;
+  }
 }
 
 // ── ShellItemGroup ────────────────────────────────────────────────────────────

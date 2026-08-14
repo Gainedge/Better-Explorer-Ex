@@ -23,8 +23,8 @@ namespace BetterExplorer.Controls;
 ///   • One chip per path segment.  Clicking a chip navigates to that path.
 ///   • Each chip has a chevron that drops down a flyout listing the sibling
 ///     folders at the same level, each with a shell icon and acrylic background.
-///   • The leftmost root-menu button (☰) lists This PC / Desktop / Downloads /
-///     Documents / OneDrive for quick-jump navigation.
+///   • The leftmost root-menu button lists Desktop shell namespace roots
+///     (This PC, Network, OneDrive, Libraries, etc.) in native Windows order.
 ///   • Clicking the empty area right of the chips enters edit mode.
 ///   • Pressing F2 anywhere in the control enters edit mode.
 ///
@@ -61,20 +61,6 @@ public sealed partial class ShellBreadcrumbBar : UserControl
     // Cancels any in-flight suggestion enumeration when the user keeps typing.
     private System.Threading.CancellationTokenSource _suggestCts =
         new System.Threading.CancellationTokenSource();
-
-    // ── Quick-access root entries ─────────────────────────────────────────────
-
-    private static readonly (string Label, Func<string?> GetPath)[] QuickRoots =
-    [
-        ("Desktop",   () => Environment.GetFolderPath(Environment.SpecialFolder.Desktop)),
-        ("Documents", () => Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)),
-        ("Downloads", () => NativeShell.SHGetKnownFolderPath(new Guid("374DE290-123F-4565-9164-39C4925E467B"))),
-        ("Pictures",  () => Environment.GetFolderPath(Environment.SpecialFolder.MyPictures)),
-        ("Music",     () => Environment.GetFolderPath(Environment.SpecialFolder.MyMusic)),
-        ("Videos",    () => Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)),
-        ("OneDrive",  () => Environment.GetEnvironmentVariable("OneDriveConsumer")
-                         ?? Environment.GetEnvironmentVariable("OneDrive")),
-    ];
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -170,6 +156,10 @@ public sealed partial class ShellBreadcrumbBar : UserControl
 
     private static List<Segment> BuildSegments(string path)
     {
+        // FTP/SFTP/SCP/FTPS URLs cannot be resolved by the shell — build chips directly.
+        if (IsFtpUrl(path))
+            return BuildFtpSegments(path);
+
         var shellChain = NativeShell.BuildShellBreadcrumbs(path);
         var result = new List<Segment>(shellChain.Count);
 
@@ -205,6 +195,45 @@ public sealed partial class ShellBreadcrumbBar : UserControl
         {
             var displayName = NativeShell.GetVirtualRootDisplayName(path);
             result.Add(new Segment(displayName, path));
+        }
+
+        return result;
+    }
+
+    private static bool IsFtpUrl(string path) =>
+        path.StartsWith("ftp://",  StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("ftps://", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("sftp://", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWith("scp://",  StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Builds breadcrumb segments for FTP/SFTP/SCP/FTPS URLs.
+    /// Each chip shows only the plain folder name — no "folder on site" text.
+    /// </summary>
+    private static List<Segment> BuildFtpSegments(string ftpUrl)
+    {
+        // e.g.  ftp://MySite/pub/docs
+        //       scheme = "ftp",  hostToken = "MySite",  remotePath = "/pub/docs"
+        var schemeEnd  = ftpUrl.IndexOf("://", StringComparison.Ordinal);
+        if (schemeEnd < 0) return [];
+
+        var afterScheme = schemeEnd + 3;
+        var slashIdx    = ftpUrl.IndexOf('/', afterScheme);
+        var hostToken   = slashIdx < 0 ? ftpUrl[afterScheme..] : ftpUrl[afterScheme..slashIdx];
+        var siteName    = Uri.UnescapeDataString(hostToken);
+        var remotePath  = slashIdx < 0 ? string.Empty : ftpUrl[slashIdx..];
+
+        var rootUrl = ftpUrl[..(afterScheme + hostToken.Length)];
+
+        var result = new List<Segment>();
+        result.Add(new Segment(siteName, rootUrl + "/"));
+
+        var parts = remotePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var accumulated = rootUrl;
+        foreach (var part in parts)
+        {
+            accumulated += "/" + part;
+            result.Add(new Segment(part, accumulated));
         }
 
         return result;
@@ -270,9 +299,9 @@ public sealed partial class ShellBreadcrumbBar : UserControl
         }
     }
 
-    // ── Root menu button → quick-jump flyout ──────────────────────────────────
+    // ── Root menu button → namespace-root flyout ─────────────────────────────
 
-    private void OnRootMenuClick(object sender, RoutedEventArgs e)
+    private async void OnRootMenuClick(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn) return;
 
@@ -288,35 +317,55 @@ public sealed partial class ShellBreadcrumbBar : UserControl
         };
         flyout.Content = scroller;
 
-        // Enumerate drives via the shell (This PC children) for correct display names.
-        var thisPcParsing = $"::{{{NativeShell.FOLDERID_ComputerFolder}}}";
-        var drives = NativeShell.GetShellSubfolders(thisPcParsing);
-        foreach (var (displayName, parsingName) in drives)
-        {
-            var row = BuildFlyoutRow(displayName, parsingName, parsingName, flyout);
-            content.Children.Add(row);
-            _ = LoadIconForRowAsync(row, parsingName);
-        }
+        // Build the static items immediately — no I/O, just string formatting.
+        AddRootMenuItem(content, "Quick Access",
+            $"::{{{NativeShell.FOLDERID_QuickAccess}}}", flyout);
+        AddRootMenuItem(content, "This PC",
+            $"::{{{NativeShell.FOLDERID_ComputerFolder}}}", flyout);
+        AddRootMenuItem(content, "Libraries",
+            $"::{{{NativeShell.FOLDERID_Libraries}}}", flyout);
+        AddRootMenuItem(content, "Network",
+            $"::{{{NativeShell.FOLDERID_NetworkFolder}}}", flyout);
 
-        // Separator
-        content.Children.Add(new Border
+        // Show the flyout immediately with the static items so the UI feels instant.
+        flyout.ShowAt(btn);
+
+        // Resolve OneDrive and Linux on a background thread to avoid blocking the UI.
+        var oneDriveInfo = await Task.Run(() =>
         {
-            Height     = 1,
-            Margin     = new Thickness(8, 4, 8, 4),
-            Background = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"],
+            var odPath = Environment.GetEnvironmentVariable("OneDriveConsumer")
+                      ?? Environment.GetEnvironmentVariable("OneDrive");
+            if (string.IsNullOrEmpty(odPath) || !Directory.Exists(odPath))
+                return ((string Name, string Path)?)(null);
+
+            var name = NativeShell.GetShellDisplayName(odPath);
+            if (string.IsNullOrEmpty(name) || name.Equals(odPath, StringComparison.OrdinalIgnoreCase))
+                name = Path.GetFileName(odPath.TrimEnd('\\', '/')) is { Length: > 0 } n ? n : "OneDrive";
+            return (name, odPath);
         });
 
-        // Quick-access locations
-        foreach (var (label, getPath) in QuickRoots)
+        if (oneDriveInfo is { } od)
         {
-            var p = getPath();
-            if (string.IsNullOrEmpty(p) || !System.IO.Directory.Exists(p)) continue;
-            var row = BuildFlyoutRow(label, p, p, flyout);
-            content.Children.Add(row);
-            _ = LoadIconForRowAsync(row, p);
+            // Insert OneDrive after Quick Access (index 1).
+            var odRow = BuildFlyoutRow(od.Name, od.Path, od.Path, flyout);
+            content.Children.Insert(1, odRow);
+            _ = LoadIconForRowAsync(odRow, od.Path);
         }
 
-        flyout.ShowAt(btn);
+        bool hasLinux = await Task.Run(() => NativeShell.EnumerateWslDistributions().Count > 0);
+        if (hasLinux)
+        {
+            AddRootMenuItem(content, "Linux",
+                $"::{{{NativeShell.CLSID_LinuxFolder}}}", flyout);
+        }
+    }
+
+    private void AddRootMenuItem(StackPanel content, string displayName,
+        string parsingName, Flyout flyout)
+    {
+        var row = BuildFlyoutRow(displayName, parsingName, parsingName, flyout);
+        content.Children.Add(row);
+        _ = LoadIconForRowAsync(row, parsingName);
     }
 
     // ── Shared flyout helpers ─────────────────────────────────────────────────
@@ -336,6 +385,8 @@ public sealed partial class ShellBreadcrumbBar : UserControl
         style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0)));
         style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
         style.Setters.Add(new Setter(FrameworkElement.MinWidthProperty, 200.0));
+        style.Setters.Add(new Setter(Control.CornerRadiusProperty,
+            new CornerRadius(0, 0, 4, 4)));
         return style;
     }
 
@@ -381,13 +432,38 @@ public sealed partial class ShellBreadcrumbBar : UserControl
         if (row.Content is not StackPanel sp) return;
         if (sp.Children.FirstOrDefault(c => c is Image) is not Image img) return;
 
+        // FTP paths have no shell icon — replace the Image with a FontIcon.
+        if (path.StartsWith("ftp://",  StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("ftps://", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("sftp://", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("scp://",  StringComparison.OrdinalIgnoreCase))
+        {
+            var fi = new FontIcon { Glyph = "\uE8B7", FontSize = 14 };
+            var idx = sp.Children.IndexOf(img);
+            sp.Children.RemoveAt(idx);
+            sp.Children.Insert(idx, fi);
+            return;
+        }
+
         WriteableBitmap? bmp;
         if (!_iconCache.TryGetValue(path, out bmp))
         {
+            // Virtual namespace roots (::) need TryGetIDListKnownFolderHBitmap
+            // (SHGetKnownFolderIDList → SHCreateItemFromIDList) just like the
+            // tree view does — TryGetShellHBitmap fails for many of these.
+            bool isVirtual = path.StartsWith("::{", StringComparison.Ordinal)
+                          && path.EndsWith('}');
+            Guid? folderId = isVirtual && Guid.TryParse(path.AsSpan(3, path.Length - 4), out var g)
+                ? g : null;
+
             // Extract raw pixels on a background thread (safe — no WinRT UI objects created).
             var (pixels, w, h) = await Task.Run(() =>
             {
-                var hbm = NativeShell.TryGetShellHBitmap(path, 16, NativeShell.SIIGBF.IconOnly);
+                IntPtr hbm;
+                if (folderId.HasValue)
+                    hbm = NativeShell.TryGetIDListKnownFolderHBitmap(folderId.Value, 16);
+                else
+                    hbm = NativeShell.TryGetShellHBitmap(path, 16, NativeShell.SIIGBF.IconOnly);
                 if (hbm == IntPtr.Zero) return (null, 0, 0);
                 try   { return NativeShell.HBitmapToPixels(hbm); }
                 finally { NativeShell.DeleteObject(hbm); }
@@ -403,6 +479,15 @@ public sealed partial class ShellBreadcrumbBar : UserControl
 
     private async Task UpdateRootMenuIconAsync(string path)
     {
+        // FTP paths have no shell icon — just leave the root menu icon as-is.
+        if (path.StartsWith("ftp://",  StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("ftps://", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("sftp://", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("scp://",  StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         WriteableBitmap? bmp;
         if (!_iconCache.TryGetValue(path, out bmp))
         {

@@ -112,9 +112,17 @@ public sealed partial class ShellTreeView : UserControl
                         ?? Environment.GetEnvironmentVariable("OneDrive");
         if (!string.IsNullOrEmpty(oneDrivePath) && Directory.Exists(oneDrivePath))
         {
+            // Ask the shell for the display name exactly as the breadcrumb bar does,
+            // so "OneDrive" shows its personalised label (e.g. "Dimitar-Personal").
+            var oneDriveName = await Task.Run(() => NativeShell.GetShellDisplayName(oneDrivePath), ct);
+            // GetShellDisplayName returns the raw path on failure – fall back to folder name.
+            if (string.IsNullOrEmpty(oneDriveName) ||
+                oneDriveName.Equals(oneDrivePath, StringComparison.OrdinalIgnoreCase))
+                oneDriveName = Path.GetFileName(oneDrivePath.TrimEnd('\\', '/')) is { Length: > 0 } n ? n : "OneDrive";
+
             var od = new ShellTreeNode
             {
-                Name          = Path.GetFileName(oneDrivePath.TrimEnd('\\', '/')) is { Length: > 0 } n ? n : "OneDrive",
+                Name          = oneDriveName,
                 FullPath      = oneDrivePath,
                 IsVirtual     = false,
                 IsGroupHeader = true,

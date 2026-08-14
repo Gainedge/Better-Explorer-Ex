@@ -261,6 +261,123 @@
       </Style>
 
       <!--
+        Ghost ToggleButton style, matching NavButtonStyle but with a Checked
+        state that shows a subtle themed background so active toggles are visible.
+      -->
+      <Style x:Key="NavToggleButtonStyle" TargetType="ToggleButton">
+        <Setter Property="Foreground"               Value="{ThemeResource ButtonForeground}" />
+        <Setter Property="BorderThickness"          Value="{ThemeResource ButtonBorderThemeThickness}" />
+        <Setter Property="HorizontalAlignment"      Value="Left" />
+        <Setter Property="VerticalAlignment"        Value="Center" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment"   Value="Center" />
+        <Setter Property="FontFamily"               Value="{ThemeResource ContentControlThemeFontFamily}" />
+        <Setter Property="FontSize"                 Value="{ThemeResource ControlContentThemeFontSize}" />
+        <Setter Property="UseSystemFocusVisuals"    Value="{StaticResource UseSystemFocusVisuals}" />
+        <Setter Property="FocusVisualMargin"        Value="-3" />
+        <Setter Property="CornerRadius"             Value="{ThemeResource ControlCornerRadius}" />
+        <Setter Property="Height"                   Value="40" />
+        <Setter Property="Padding"                  Value="0" />
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="ToggleButton">
+              <ContentPresenter x:Name="ContentPresenter"
+                                Background="Transparent"
+                                BorderBrush="Transparent"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                ContentTransitions="{TemplateBinding ContentTransitions}"
+                                CornerRadius="{TemplateBinding CornerRadius}"
+                                Padding="{TemplateBinding Padding}"
+                                HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                AutomationProperties.AccessibilityView="Raw">
+                <VisualStateManager.VisualStateGroups>
+                  <VisualStateGroup x:Name="CommonStates">
+                    <VisualState x:Name="Normal" />
+                    <VisualState x:Name="PointerOver">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBackgroundPointerOver}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBorderBrushPointerOver}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonForegroundPointerOver}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+                    <VisualState x:Name="Pressed">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBackgroundPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBorderBrushPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonForegroundPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+                    <VisualState x:Name="Disabled">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonForegroundDisabled}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+                  </VisualStateGroup>
+                  <VisualStateGroup x:Name="CheckStates">
+                    <VisualState x:Name="Checked">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBackgroundPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+                    <VisualState x:Name="CheckedPointerOver">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBackgroundPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+                    <VisualState x:Name="CheckedPressed">
+                      <Storyboard>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource ButtonBackgroundPressed}" />
+                        </ObjectAnimationUsingKeyFrames>
+                        <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                          <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+                        </ObjectAnimationUsingKeyFrames>
+                      </Storyboard>
+                    </VisualState>
+                    <VisualState x:Name="Unchecked" />
+                    <VisualState x:Name="Indeterminate" />
+                  </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+              </ContentPresenter>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
+      <!--
         Ghost SplitButton style, matching NavButtonStyle:
           Normal / Disabled – fully transparent background + border
           Hover / Pressed   – themed fill + border (same as NavButtonStyle)
@@ -893,6 +1010,16 @@
           <FontIcon Glyph="&#xE8C8;" FontSize="16" />
         </Button>
 
+        <!-- Share -->
+        <Button x:Name="TbShareButton"
+                Style="{StaticResource NavButtonStyle}"
+                VerticalAlignment="Center"
+                IsEnabled="False"
+                ToolTipService.ToolTip="Share"
+                Click="TbShareButton_Click">
+          <FontIcon Glyph="&#xE72D;" FontSize="16" />
+        </Button>
+
         <!-- Paste -->
         <Button x:Name="TbPasteButton"
                 Style="{StaticResource NavButtonStyle}"
@@ -1171,6 +1298,271 @@
                      VerticalAlignment="Center" Margin="2,0" />
         </StackPanel>
 
+        <!--
+          This PC Tools section — visible when the current location is the This PC virtual folder.
+          Teal pill at left identifies the contextual group.
+        -->
+        <StackPanel x:Name="ThisPCToolsSection"
+                    Orientation="Horizontal"
+                    Spacing="4"
+                    VerticalAlignment="Center"
+                    Visibility="Collapsed">
+
+          <!-- Teal pill -->
+          <Border Width="3" Height="26" CornerRadius="2"
+                  Background="#008272" VerticalAlignment="Center" />
+
+          <!-- Add network location -->
+          <Button x:Name="TbAddNetworkLocationButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  ToolTipService.ToolTip="Add a network location"
+                  Click="TbAddNetworkLocation_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE8F7;" FontSize="16" />
+              <TextBlock Text="Add network location" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </Button>
+
+          <!-- Map network drive -->
+          <Button x:Name="TbMapNetworkDriveButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  ToolTipService.ToolTip="Map network drive"
+                  Click="TbMapNetworkDrive_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xEDA3;" FontSize="16" />
+              <TextBlock Text="Map network drive" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </Button>
+
+          <!-- Disconnect network drive -->
+          <Button x:Name="TbDisconnectNetworkDriveButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  ToolTipService.ToolTip="Disconnect network drive"
+                  Click="TbDisconnectNetworkDrive_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon FontFamily="/BetterExplorer.Controls/Assets/Fonts/FluentSystemIcons-Regular.ttf#FluentSystemIcons-Regular" Glyph="&#xF609;" FontSize="16" />
+              <TextBlock Text="Disconnect network drive" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </Button>
+
+          <!-- Connect to media server -->
+          <Button x:Name="TbConnectMediaServerButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  ToolTipService.ToolTip="Connect to a media server"
+                  Click="TbConnectMediaServer_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE93E;" FontSize="16" />
+              <TextBlock Text="Connect to media server" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </Button>
+
+          <!-- End separator -->
+          <Rectangle Width="1" Height="20"
+                     Fill="{ThemeResource DividerStrokeColorDefaultBrush}"
+                     VerticalAlignment="Center" Margin="2,0" />
+        </StackPanel>
+
+        <!--
+          Search Tools section — visible only when a search is active.
+          Purple pill at left identifies the contextual group.
+        -->
+        <StackPanel x:Name="SearchToolsSection"
+                    Orientation="Horizontal"
+                    Spacing="4"
+                    VerticalAlignment="Center"
+                    Visibility="Collapsed">
+
+          <!-- Purple pill -->
+          <Border Width="3" Height="26" CornerRadius="2"
+                  Background="#8764B8" VerticalAlignment="Center" />
+
+          <!-- Entire system toggle -->
+          <ToggleButton x:Name="SearchGlobalButton"
+                        Style="{StaticResource NavToggleButtonStyle}"
+                        Width="Auto" Padding="8,0"
+                        VerticalAlignment="Center"
+                        ToolTipService.ToolTip="Search entire system (all drives)"
+                        IsChecked="False"
+                        Click="SearchGlobalButton_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE721;" FontSize="16" />
+              <TextBlock Text="Entire system" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </ToggleButton>
+
+          <!-- Match case toggle -->
+          <ToggleButton x:Name="SearchMatchCaseButton"
+                        Style="{StaticResource NavToggleButtonStyle}"
+                        Width="Auto" Padding="8,0"
+                        VerticalAlignment="Center"
+                        ToolTipService.ToolTip="Match case"
+                        IsChecked="False"
+                        Click="SearchMatchCaseButton_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon FontFamily="/BetterExplorer.Controls/Assets/Fonts/FluentSystemIcons-Regular.ttf#FluentSystemIcons-Regular" Glyph="&#xF4DB;" FontSize="16" />
+              <TextBlock Text="Match case" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </ToggleButton>
+
+          <!-- Whole word toggle -->
+          <ToggleButton x:Name="SearchWholeWordButton"
+                        Style="{StaticResource NavToggleButtonStyle}"
+                        Width="Auto" Padding="8,0"
+                        VerticalAlignment="Center"
+                        ToolTipService.ToolTip="Match whole word"
+                        IsChecked="False"
+                        Click="SearchWholeWordButton_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon FontFamily="/BetterExplorer.Controls/Assets/Fonts/FluentSystemIcons-Regular.ttf#FluentSystemIcons-Regular" Glyph="&#xF6EF;" FontSize="16" />
+              <TextBlock Text="Whole word" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </ToggleButton>
+
+          <!-- Regex toggle (Everything only) -->
+          <ToggleButton x:Name="SearchRegexButton"
+                        Style="{StaticResource NavToggleButtonStyle}"
+                        Width="Auto" Padding="8,0"
+                        VerticalAlignment="Center"
+                        ToolTipService.ToolTip="Regular expression (Everything only)"
+                        IsChecked="False"
+                        Click="SearchRegexButton_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon FontFamily="/BetterExplorer.Controls/Assets/Fonts/FluentSystemIcons-Regular.ttf#FluentSystemIcons-Regular" Glyph="&#xF585;" FontSize="16" />
+              <TextBlock Text="Regex" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </ToggleButton>
+
+          <!-- File contents toggle -->
+          <ToggleButton x:Name="SearchContentsButton"
+                        Style="{StaticResource NavToggleButtonStyle}"
+                        Width="Auto" Padding="8,0"
+                        VerticalAlignment="Center"
+                        ToolTipService.ToolTip="Search file contents"
+                        IsChecked="False"
+                        Click="SearchContentsButton_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE8B7;" FontSize="16" />
+              <TextBlock Text="Contents" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </ToggleButton>
+
+          <!-- Size filter -->
+          <Button x:Name="SearchSizeButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  ToolTipService.ToolTip="Size filter">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE8B1;" FontSize="16" />
+              <TextBlock x:Name="SearchSizeLabel" Text="Size" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+            <Button.Flyout>
+              <MenuFlyout x:Name="SearchSizeFlyout" Placement="Bottom">
+                <RadioMenuFlyoutItem Text="Any size" GroupName="SearchSize" Tag="" IsChecked="True" Click="SearchSizeMenuItem_Click" />
+                <MenuFlyoutSeparator />
+                <RadioMenuFlyoutItem Text="Tiny (0 - 10 KB)" GroupName="SearchSize" Tag="tiny" Click="SearchSizeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Small (10 - 100 KB)" GroupName="SearchSize" Tag="small" Click="SearchSizeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Medium (100 KB - 1 MB)" GroupName="SearchSize" Tag="medium" Click="SearchSizeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Large (1 - 16 MB)" GroupName="SearchSize" Tag="large" Click="SearchSizeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Huge (16 - 128 MB)" GroupName="SearchSize" Tag="huge" Click="SearchSizeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Gigantic (> 128 MB)" GroupName="SearchSize" Tag="gigantic" Click="SearchSizeMenuItem_Click" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+
+          <!-- Date modified filter -->
+          <Button x:Name="SearchDateButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  ToolTipService.ToolTip="Date modified filter">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE787;" FontSize="16" />
+              <TextBlock x:Name="SearchDateLabel" Text="Date" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+            <Button.Flyout>
+              <MenuFlyout x:Name="SearchDateFlyout" Placement="Bottom">
+                <RadioMenuFlyoutItem Text="Any time" GroupName="SearchDate" Tag="" IsChecked="True" Click="SearchDateMenuItem_Click" />
+                <MenuFlyoutSeparator />
+                <RadioMenuFlyoutItem Text="Today" GroupName="SearchDate" Tag="today" Click="SearchDateMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Yesterday" GroupName="SearchDate" Tag="yesterday" Click="SearchDateMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="This week" GroupName="SearchDate" Tag="thisweek" Click="SearchDateMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Last week" GroupName="SearchDate" Tag="lastweek" Click="SearchDateMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="This month" GroupName="SearchDate" Tag="thismonth" Click="SearchDateMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Last month" GroupName="SearchDate" Tag="lastmonth" Click="SearchDateMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="This year" GroupName="SearchDate" Tag="thisyear" Click="SearchDateMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Last year" GroupName="SearchDate" Tag="lastyear" Click="SearchDateMenuItem_Click" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+
+          <!-- File type filter -->
+          <Button x:Name="SearchTypeButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  ToolTipService.ToolTip="File type filter">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE8F1;" FontSize="16" />
+              <TextBlock x:Name="SearchTypeLabel" Text="Type" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+            <Button.Flyout>
+              <MenuFlyout x:Name="SearchTypeFlyout" Placement="Bottom">
+                <RadioMenuFlyoutItem Text="All types" GroupName="SearchType" Tag="" IsChecked="True" Click="SearchTypeMenuItem_Click" />
+                <MenuFlyoutSeparator />
+                <RadioMenuFlyoutItem Text="Folders" GroupName="SearchType" Tag="folder" Click="SearchTypeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Documents" GroupName="SearchType" Tag="document" Click="SearchTypeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Pictures" GroupName="SearchType" Tag="picture" Click="SearchTypeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Videos" GroupName="SearchType" Tag="video" Click="SearchTypeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Music" GroupName="SearchType" Tag="music" Click="SearchTypeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Archives" GroupName="SearchType" Tag="archive" Click="SearchTypeMenuItem_Click" />
+                <RadioMenuFlyoutItem Text="Executable" GroupName="SearchType" Tag="exe" Click="SearchTypeMenuItem_Click" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+
+          <!-- Separator -->
+          <Rectangle Width="1" Height="20"
+                     Fill="{ThemeResource DividerStrokeColorDefaultBrush}"
+                     VerticalAlignment="Center" Margin="4,0" />
+
+          <!-- Save results -->
+          <Button x:Name="SearchSaveResultsButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  IsEnabled="False"
+                  ToolTipService.ToolTip="Save search results"
+                  Click="SearchSaveResultsButton_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE74E;" FontSize="16" />
+              <TextBlock Text="Save" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </Button>
+
+          <!-- Close search -->
+          <Button x:Name="CloseSearchButton"
+                  Style="{StaticResource NavButtonStyle}"
+                  Width="Auto" Padding="8,0"
+                  VerticalAlignment="Center"
+                  ToolTipService.ToolTip="Close search"
+                  Click="CloseSearchButton_Click">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+              <FontIcon Glyph="&#xE711;" FontSize="16" />
+              <TextBlock Text="Close" VerticalAlignment="Center" FontSize="11" />
+            </StackPanel>
+          </Button>
+
+        </StackPanel>
+
       </StackPanel>
 
       <!-- Sort + View buttons — right side -->
@@ -1399,10 +1791,6 @@
                                     Grid.Column="2"
                                     ViewMode="SmallIcons" />
 
-        <!-- FTP browser overlay — visible only when an FTP site is selected -->
-        <local:FtpBrowserPage x:Name="FtpPanel"
-                              Grid.Column="2"
-                              Visibility="Collapsed" />
       </Grid>
     </Border>
   </Grid>

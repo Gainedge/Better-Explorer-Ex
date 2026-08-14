@@ -218,7 +218,7 @@ public sealed partial class DetailsRowControl : UserControl
 
         var fallback = new FontIcon
         {
-            FontSize           = 12,
+            FontSize           = 16,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment   = VerticalAlignment.Center,
         };
@@ -226,7 +226,7 @@ public sealed partial class DetailsRowControl : UserControl
         SetBinding(fallback, UIElement.VisibilityProperty, item, nameof(ShellItem.IconFallbackVisibility));
         iconRoot.Children.Add(fallback);
 
-        var iconImage = new Image { Stretch = Stretch.Uniform };
+        var iconImage = new Image { Stretch = Stretch.Uniform, Tag = "icon" };
         SetBinding(iconImage, Image.SourceProperty, item, nameof(ShellItem.Icon));
         iconRoot.Children.Add(iconImage);
 
@@ -238,6 +238,7 @@ public sealed partial class DetailsRowControl : UserControl
             IsHitTestVisible    = false,
             HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment   = VerticalAlignment.Bottom,
+            Tag                 = "overlay",
         };
         SetBinding(overlayImage, Image.SourceProperty,     item, nameof(ShellItem.OverlayIcon));
         SetBinding(overlayImage, UIElement.VisibilityProperty, item, nameof(ShellItem.OverlayIconVisibility));
@@ -310,7 +311,7 @@ public sealed partial class DetailsRowControl : UserControl
                 if (gc is not Viewbox vb || vb.Child is not Grid iconRoot) continue;
                 foreach (var ic in iconRoot.Children)
                 {
-                    if (ic is Image img && Grid.GetColumn(img) == 0)
+                    if (ic is Image img && (string?)img.Tag == "icon")
                     {
                         img.Source = Item.Icon;
                     }

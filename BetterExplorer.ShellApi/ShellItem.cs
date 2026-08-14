@@ -20,6 +20,19 @@ public sealed class ShellItem : INotifyPropertyChanged
     private bool _hasRealThumbnail;
     private bool _isSelected;
 
+    /// <summary>True for items loaded from an FTP/FTPS/SFTP/SCP session.
+    /// Immutable once set — no PropertyChanged needed.</summary>
+    public bool IsFtpItem { get; set; }
+
+    /// <summary>True when this item is a shell shortcut (.lnk).</summary>
+    public bool IsShortcut { get; set; }
+
+    /// <summary>True when this item is a filesystem junction, symlink, or mount point.</summary>
+    public bool IsLinkItem { get; set; }
+
+    /// <summary>True when this item is a compressed archive file that Windows treats as a folder (.zip, .cab, etc.).</summary>
+    public bool IsArchive { get; set; }
+
     public string Name
     {
         get => _name;
@@ -204,6 +217,36 @@ public sealed class ShellItem : INotifyPropertyChanged
         return $"{bytes} B";
     }
 
+    // ── Tooltip metadata ──────────────────────────────────────────────────
+    private string _imageDimensions = string.Empty;
+    private int _rating;
+    private ImageSource? _thumbnailLarge;
+
+    /// <summary>Image dimensions string (e.g. "1920 × 1080") for tooltip display. Empty for non-image items.</summary>
+    public string ImageDimensions {
+        get => _imageDimensions;
+        set { _imageDimensions = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>Photo rating (0–5) for tooltip display. 0 means no rating.</summary>
+    public int Rating {
+        get => _rating;
+        set { _rating = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>Large 1024 px thumbnail used in the tooltip for picture items. Loaded lazily on hover.</summary>
+    public ImageSource? ThumbnailLarge {
+        get => _thumbnailLarge;
+        set { _thumbnailLarge = value; OnPropertyChanged(); OnPropertyChanged(nameof(ThumbnailLargeVisibility)); }
+    }
+
+    /// <summary>Visible when a large tooltip thumbnail has been loaded.</summary>
+    public Microsoft.UI.Xaml.Visibility ThumbnailLargeVisibility =>
+        _thumbnailLarge == null ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
+
+    /// <summary>True when the item is a picture file (tooltip should show large preview).</summary>
+    public bool IsPicture { get; set; }
+
     private bool _isLabelHidden;
     /// <summary>True while the name-expansion popup is open for this item; hides the in-template label to avoid double text.</summary>
     public bool IsLabelHidden
@@ -243,6 +286,7 @@ public sealed class ShellItem : INotifyPropertyChanged
     public void ClearReferences() {
         _icon = null;
         _overlayIcon = null;
+        _thumbnailLarge = null;
         _isSelected = false;
         _isCut = false;
         _hasRealThumbnail = false;
@@ -251,6 +295,9 @@ public sealed class ShellItem : INotifyPropertyChanged
         _driveTotalBytes = 0;
         _driveUsedBytes = 0;
         _driveGroupType = string.Empty;
+        _imageDimensions = string.Empty;
+        _rating = 0;
+        IsPicture = false;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>

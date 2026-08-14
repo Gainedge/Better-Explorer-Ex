@@ -37,6 +37,7 @@ public sealed class ShellChangeWatcher : IDisposable {
   private const uint SHCNE_RENAME_FOLDER   = 0x20000000;
   private const uint SHCNE_UPDATEDIR       = 0x00001000;
   private const uint SHCNE_UPDATEITEM      = 0x00002000;
+  private const uint SHCNE_FREESPACE       = 0x00040000;
   private const uint SHCNE_ASSOCCHANGED    = 0x08000000;
   private const uint SHCNE_DISKEVENTS      = 0x0002381F;
 
@@ -390,7 +391,7 @@ public sealed class ShellChangeWatcher : IDisposable {
           SHCNE_MKDIR         | SHCNE_RMDIR           |
           SHCNE_RENAME_ITEM   | SHCNE_RENAME_FOLDER   |
           SHCNE_UPDATEDIR     | SHCNE_UPDATEITEM      |
-          SHCNE_ASSOCCHANGED;
+          SHCNE_FREESPACE     | SHCNE_ASSOCCHANGED;
 
       // Real FS paths need SHCNRF_INTERRUPTLEVEL to receive filesystem-driver events
       // (create, delete, write).  Without it only shell-broker broadcasts arrive,
@@ -456,6 +457,7 @@ public enum ShellChangeType : uint {
   NetUnshare     = 0x00000400,
   UpdateItem     = 0x00002000,
   UpdateDir      = 0x00001000,
+  FreeSpace      = 0x00040000,
   RenameFolder   = 0x20000000,
   AssocChanged   = 0x08000000,
 }

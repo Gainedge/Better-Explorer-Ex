@@ -9,8 +9,30 @@
     mc:Ignorable="d">
 
   <Grid x:Name="ContentGrid">
+
+    <Grid.Resources>
+      <ResourceDictionary>
+        <ResourceDictionary.ThemeDictionaries>
+          <ResourceDictionary x:Key="Dark">
+            <SolidColorBrush x:Key="TabViewItemSeparatorBrush"     Color="{ThemeResource DividerStrokeColorDefault}" />
+            <SolidColorBrush x:Key="TabViewBackground"             Color="Transparent" />
+            <!-- White tint on dark Mica: selected tab + content area + loading overlay -->
+            <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#80303030" />
+            <SolidColorBrush x:Key="TabViewContentBackground"      Color="#80303030" />
+          </ResourceDictionary>
+          <ResourceDictionary x:Key="Light">
+            <SolidColorBrush x:Key="TabViewItemSeparatorBrush"     Color="{ThemeResource DividerStrokeColorDefault}" />
+            <SolidColorBrush x:Key="TabViewBackground"             Color="Transparent" />
+            <!-- Black tint on light Mica: selected tab + content area + loading overlay -->
+            <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#4FE8E7E7" />
+            <SolidColorBrush x:Key="TabViewContentBackground"      Color="#4FE8E7E7" />
+          </ResourceDictionary>
+        </ResourceDictionary.ThemeDictionaries>
+      </ResourceDictionary>
+    </Grid.Resources>
+
     <TabView x:Name="Tabs"
-             Opacity="0"
+             Visibility="Collapsed"
              IsAddTabButtonVisible="True"
              CanReorderTabs="True"
              CanDragTabs="True"
@@ -19,27 +41,6 @@
              AddTabButtonClick="OnAddTabButtonClick"
              TabCloseRequested="OnTabCloseRequested"
              SelectionChanged="OnTabSelectionChanged">
-
-      <TabView.Resources>
-        <ResourceDictionary>
-          <ResourceDictionary.ThemeDictionaries>
-            <ResourceDictionary x:Key="Dark">
-              <SolidColorBrush x:Key="TabViewItemSeparatorBrush"     Color="{ThemeResource DividerStrokeColorDefault}" />
-              <SolidColorBrush x:Key="TabViewBackground"             Color="Transparent" />
-              <!-- White tint on dark Mica: selected tab + content area -->
-              <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#80303030" />
-              <SolidColorBrush x:Key="TabViewContentBackground"      Color="#80303030" />
-            </ResourceDictionary>
-            <ResourceDictionary x:Key="Light">
-              <SolidColorBrush x:Key="TabViewItemSeparatorBrush"     Color="{ThemeResource DividerStrokeColorDefault}" />
-              <SolidColorBrush x:Key="TabViewBackground"             Color="Transparent" />
-              <!-- Black tint on light Mica: selected tab + content area -->
-              <SolidColorBrush x:Key="TabViewItemHeaderBackgroundSelected" Color="#4FE8E7E7" />
-              <SolidColorBrush x:Key="TabViewContentBackground"      Color="#4FE8E7E7" />
-            </ResourceDictionary>
-          </ResourceDictionary.ThemeDictionaries>
-        </ResourceDictionary>
-      </TabView.Resources>
 
       <!--
         TabStripHeader: a passive drag region to the left of the first tab.
@@ -61,8 +62,16 @@
 
     </TabView>
 
-    <!-- Loading overlay: visible until the first navigation completes -->
+    <!--
+      Loading overlay: visible until the active tab's content finishes loading AND has
+      visually settled. It is declared after Tabs in this Grid, so it fully covers Tabs
+      in z-order. RevealTabsAsync (code-behind) makes Tabs visible and selects the last
+      tab WHILE this overlay is still Visible on top — letting layout/container
+      realization/icon paint happen hidden underneath it — and only collapses this
+      overlay once that has settled, so the user never sees the tab's content build up.
+    -->
     <Grid x:Name="LoadingOverlay"
+          Background="Transparent"
           VerticalAlignment="Stretch"
           HorizontalAlignment="Stretch">
       <StackPanel HorizontalAlignment="Center"
